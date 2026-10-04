@@ -6,7 +6,7 @@ import unittest
 import numpy as np
 
 from rowsynth.errors import RowSynthError
-from rowsynth.osc import DUTY, FM, NOISE, PULSE, SAW, TRI, WAVES, _k_blep, _k_pulse, new_state, tone
+from rowsynth.osc import DUTY, FM, NOISE, PULSE, SAW, TRI, WAVES, _k_blep, _k_noise, _k_pulse, new_state, tone
 
 # 125 Hz at 8000 Hz moves the phase 1/64 a sample, which is exact in binary: a period is 64 samples to the bit.
 RATE = 8000
@@ -25,6 +25,17 @@ def repeats_after(samples: np.ndarray) -> int:
         if np.array_equal(samples[shift:], samples[:-shift]):
             return shift
     return 0
+
+
+def one_round(short: int) -> list[float]:
+    """What the noise gives, a clock a call, until its register is back where it began. Gives up after 40000."""
+    state = new_state()
+    out = []
+    while len(out) < 40000:
+        out.append(_k_noise(state, 1.0, 1.0, short))
+        if state[1] == 1.0:
+            break
+    return out
 
 
 class TableTest(unittest.TestCase):
@@ -46,6 +57,9 @@ class StateTest(unittest.TestCase):
         state = new_state()
         state[0] = 0.5
         self.assertEqual(new_state()[0], 0.0)
+
+    def test_new_state_has_the_register_at_one_and_the_output_high(self):
+        self.assertEqual(list(new_state()), [0.0, 1.0, 0.0, 1.0])
 
 
 class BlepTest(unittest.TestCase):
@@ -180,6 +194,67 @@ class TriTest(unittest.TestCase):
         np.testing.assert_allclose(got, known, rtol=0, atol=1e-6)
 
 
+class NoiseTest(unittest.TestCase):
+    def test_long_register_comes_round_after_32767_clocks(self):
+        self.assertEqual(len(one_round(0)), 32767)
+
+    def test_short_register_comes_round_after_93_clocks(self):
+        self.assertEqual(len(one_round(1)), 93)
+
+    def test_long_round_is_low_once_more_than_it_is_high(self):
+        heard = one_round(0)
+        self.assertEqual(heard.count(-1.0), 16384)
+        self.assertEqual(heard.count(1.0), 16383)
+
+    def test_register_stays_a_whole_number_of_15_bits_and_never_empties(self):
+        for short in (0, 1):
+            state = new_state()
+            for _ in range(200):
+                _k_noise(state, 1.0, 1.0, short)
+                self.assertEqual(state[1], int(state[1]))
+                self.assertTrue(1 <= state[1] <= 32767, (short, state[1]))
+
+    def test_range_is_one_or_minus_one_and_nothing_between(self):
+        for short in (False, True):
+            wave = tone("noise", 3000.0, 0.2, RATE, short=short)
+            self.assertEqual(set(np.unique(wave).tolist()), {-1.0, 1.0}, short)
+
+    def test_stays_high_until_the_first_clock(self):
+        self.assertEqual(tone("noise", 100.0, 0.001, RATE).tolist(), [1.0] * 8)
+
+    def test_short_output_repeats_after_93_clocks_and_long_does_not(self):
+        # Clocked at the rate, a sample is a clock.
+        self.assertEqual(repeats_after(tone("noise", RATE, 4 * 93 / RATE, RATE, short=True)), 93)
+        self.assertEqual(repeats_after(tone("noise", RATE, 4 * 93 / RATE, RATE)), 0)
+
+    def test_two_modes_differ(self):
+        long = tone("noise", RATE, 0.05, RATE)
+        short = tone("noise", RATE, 0.05, RATE, short=True)
+        self.assertFalse(np.array_equal(long, short))
+
+    def test_clock_at_half_the_rate_holds_each_value_two_samples(self):
+        for short in (False, True):
+            full = tone("noise", RATE, 400 / RATE, RATE, short=short)
+            half = tone("noise", RATE / 2, 800 / RATE, RATE, short=short)
+            self.assertTrue(np.array_equal(half[1::2], full), short)
+            self.assertTrue(np.array_equal(half[2::2], full[:-1]), short)
+
+    def test_clock_at_twice_the_rate_gives_every_other_value(self):
+        for short in (False, True):
+            full = tone("noise", RATE, 400 / RATE, RATE, short=short)
+            fast = tone("noise", 2 * RATE, 200 / RATE, RATE, short=short)
+            self.assertTrue(np.array_equal(fast, full[1::2]), short)
+
+    def test_first_samples_of_noise_clocked_at_64000_hz(self):
+        known = (
+            (False, "++++++++++-++++++++--++++++++-+++++++++-"),
+            (True, "++++++++++-+++++-+++-+-+++++-+++++++++++"),
+        )
+        for short, signs in known:
+            got = tone("noise", 64000.0, 0.001, 44100, short=short)[:len(signs)]
+            self.assertEqual(got.tolist(), [1.0 if sign == "+" else -1.0 for sign in signs], short)
+
+
 class ToneTest(unittest.TestCase):
     def test_gives_float32_of_the_length_asked_for(self):
         wave = tone("pulse", 440.0, 0.01, RATE)
@@ -202,10 +277,16 @@ class ToneTest(unittest.TestCase):
         self.assertTrue(np.array_equal(tone("pulse", 440.0, 0.01, RATE), tone("pulse", 440.0, 0.01, RATE, duty=2)))
 
     def test_duty_shapes_the_pulse_only(self):
-        for wave in ("saw", "tri"):
+        for wave in ("saw", "tri", "noise"):
             plain = tone(wave, 440.0, 0.01, RATE)
             self.assertTrue(np.array_equal(plain, tone(wave, 440.0, 0.01, RATE, duty=0)), wave)
             self.assertFalse(np.array_equal(plain, tone("pulse", 440.0, 0.01, RATE)), wave)
+
+    def test_short_shapes_the_noise_only(self):
+        for wave in ("pulse", "saw", "tri"):
+            plain = tone(wave, 440.0, 0.01, RATE)
+            self.assertTrue(np.array_equal(plain, tone(wave, 440.0, 0.01, RATE, short=True)), wave)
+        self.assertFalse(np.array_equal(tone("noise", RATE, 0.05, RATE), tone("noise", RATE, 0.05, RATE, short=True)))
 
     def test_refuses_a_wave_it_cannot_play(self):
         for wave in ("square", "PULSE", "", "fm", None, 0):
