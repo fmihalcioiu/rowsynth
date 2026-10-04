@@ -118,6 +118,68 @@ class PulseTest(unittest.TestCase):
             np.testing.assert_allclose(got, samples, rtol=0, atol=1e-6, err_msg=f"duty {duty}")
 
 
+class SawTest(unittest.TestCase):
+    def test_repeats_every_period_and_no_sooner(self):
+        self.assertEqual(repeats_after(tone("saw", FREQ, 4 * PERIOD / RATE, RATE)), PERIOD)
+
+    def test_climbs_in_a_straight_line_and_drops_through_the_middle(self):
+        wave = one_period("saw")
+        self.assertEqual(wave[0], 0.0)
+        self.assertTrue(np.array_equal(wave[1:], np.arange(1, PERIOD) / (PERIOD / 2) - 1.0))
+
+    def test_range_stays_inside_one_each_way(self):
+        for freq in (20.0, 440.0, 1000.0, 3000.0, 5000.0):
+            wave = tone("saw", freq, 0.2, 11025)
+            self.assertLess(float(np.abs(wave).max()), 1.0, freq)
+        low = tone("saw", 20.0, 0.2, 11025)
+        self.assertGreater(float(low.max()), 0.99)
+        self.assertLess(float(low.min()), -0.99)
+
+    def test_no_offset(self):
+        whole = tone("saw", FREQ, 5 * PERIOD / RATE, RATE).astype(np.float64)
+        self.assertAlmostEqual(float(whole.mean()), 0.0, places=9)
+
+    def test_first_samples_of_a_3520_hz_saw(self):
+        known = (0.0, -0.840363, -0.680726, -0.521088, -0.361451, -0.201814, -0.042177, 0.11746,
+                 0.277097, 0.436735, 0.596372, 0.756009, 0.693248, -0.6455, -0.765079, -0.605442)
+        got = tone("saw", 3520.0, 0.001, 44100)[:len(known)]
+        np.testing.assert_allclose(got, known, rtol=0, atol=1e-6)
+
+
+class TriTest(unittest.TestCase):
+    def test_repeats_every_period_and_no_sooner(self):
+        self.assertEqual(repeats_after(tone("tri", FREQ, 4 * PERIOD / RATE, RATE)), PERIOD)
+
+    def test_one_period_is_32_steps_down_then_up(self):
+        # Twice the frequency: a step a sample.
+        wave = tone("tri", 2 * FREQ, 32 / RATE, RATE)
+        levels = np.array(list(range(15, -1, -1)) + list(range(16)))
+        np.testing.assert_allclose(wave, levels / 7.5 - 1.0, rtol=0, atol=1e-6)
+
+    def test_sixteen_levels_evenly_spaced(self):
+        for freq in (FREQ, 440.0, 1234.5):
+            levels = np.unique(tone("tri", freq, 0.1, RATE))
+            self.assertEqual(len(levels), 16, freq)
+            np.testing.assert_allclose(levels, np.linspace(-1.0, 1.0, 16), rtol=0, atol=1e-6, err_msg=str(freq))
+
+    def test_range_is_one_each_way(self):
+        for freq in (20.0, 440.0, 3000.0):
+            wave = tone("tri", freq, 0.2, 11025)
+            self.assertEqual(float(wave.max()), 1.0, freq)
+            self.assertEqual(float(wave.min()), -1.0, freq)
+
+    def test_every_level_lasts_as_long_as_any_other(self):
+        levels, counts = np.unique(one_period("tri"), return_counts=True)
+        self.assertEqual(list(counts), [4] * 16)
+        self.assertAlmostEqual(float(one_period("tri").mean()), 0.0, places=9)
+
+    def test_first_samples_of_a_3520_hz_triangle(self):
+        known = (1.0, 0.733333, 0.333333, 0.066667, -0.333333, -0.6, -1.0, -0.866667,
+                 -0.466667, -0.2, 0.2, 0.6, 0.866667, 0.866667, 0.6, 0.2)
+        got = tone("tri", 3520.0, 0.001, 44100)[:len(known)]
+        np.testing.assert_allclose(got, known, rtol=0, atol=1e-6)
+
+
 class ToneTest(unittest.TestCase):
     def test_gives_float32_of_the_length_asked_for(self):
         wave = tone("pulse", 440.0, 0.01, RATE)
@@ -138,6 +200,12 @@ class ToneTest(unittest.TestCase):
 
     def test_duty_left_out_is_the_square(self):
         self.assertTrue(np.array_equal(tone("pulse", 440.0, 0.01, RATE), tone("pulse", 440.0, 0.01, RATE, duty=2)))
+
+    def test_duty_shapes_the_pulse_only(self):
+        for wave in ("saw", "tri"):
+            plain = tone(wave, 440.0, 0.01, RATE)
+            self.assertTrue(np.array_equal(plain, tone(wave, 440.0, 0.01, RATE, duty=0)), wave)
+            self.assertFalse(np.array_equal(plain, tone("pulse", 440.0, 0.01, RATE)), wave)
 
     def test_refuses_a_wave_it_cannot_play(self):
         for wave in ("square", "PULSE", "", "fm", None, 0):

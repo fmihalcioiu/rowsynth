@@ -44,11 +44,33 @@ def _k_pulse(state: np.ndarray, freq: float, rate: float, duty: float) -> float:
     return v - (2.0 * duty - 1.0)
 
 
+def _k_saw(state: np.ndarray, freq: float, rate: float) -> float:
+    """The next sample of a sawtooth: a straight climb through each period, the drop back smoothed."""
+    dt = freq / rate
+    t = float(state[0])
+    v = 2.0 * t - 1.0 - _k_blep(t, dt)
+    state[0] = (t + dt) % 1.0
+    return v
+
+
+def _k_tri(state: np.ndarray, freq: float, rate: float) -> float:
+    """The next sample of the stepped triangle: 32 steps a period over 16 levels, down then up, not smoothed."""
+    t = float(state[0])
+    step = int(t * 32.0)
+    level = 15 - step if step < 16 else step - 16
+    state[0] = (t + freq / rate) % 1.0
+    return level / 7.5 - 1.0
+
+
 def _k_tone(out: np.ndarray, state: np.ndarray, wave: int, freq: float, rate: float, duty: float) -> None:
     """Fills out with one wave held at one frequency."""
     for i in range(len(out)):
         if wave == PULSE:
             out[i] = _k_pulse(state, freq, rate, duty)
+        elif wave == SAW:
+            out[i] = _k_saw(state, freq, rate)
+        elif wave == TRI:
+            out[i] = _k_tri(state, freq, rate)
 
 
 def _is_number(value: object) -> bool:
@@ -59,9 +81,9 @@ def _is_number(value: object) -> bool:
 def tone(wave: str, freq: float, seconds: float, rate: int = 44100, duty: int = 2) -> np.ndarray:
     """The plain voice with nothing on it: one wave at one frequency, as float32 samples.
 
-    wave is "pulse"; duty picks the pulse's width from DUTY.
+    wave is "pulse", "saw" or "tri"; duty picks the pulse's width from DUTY.
     """
-    if wave != "pulse":
+    if wave not in ("pulse", "saw", "tri"):
         raise RowSynthError(f"tone: cannot play the wave {wave!r}")
     if not _is_number(freq) or freq < 0:
         raise RowSynthError(f"tone: freq must be a number, 0 or more, not {freq!r}")
