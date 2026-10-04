@@ -1,0 +1,2 @@
+# Store every file exactly as it is on disk. No line-ending conversion.
+* -text
