@@ -104,3 +104,40 @@ def parse(text: str, inst: str, rows_per_beat: int = 4, drums: dict | None = Non
             tie = True
         at = found.end()
     return events, row
+
+
+# The twelve notes of an octave from c up, as moved text spells them.
+_NAMES = ("c", "d-", "d", "e-", "e", "f", "g-", "g", "a-", "a", "b-", "b")
+
+
+def transpose(text: str, semis: int) -> str:
+    """Rewrites a channel's text `semis` semitones higher, spelling each note with its octave in front."""
+    out = []
+    octave = 4
+    at = 0
+    while at < len(text):
+        found = _TOKEN.match(text, at)
+        if not found or found["drum"]:
+            raise _unread(text, at)
+        if found["name"] and found["name"] != "r":
+            note = _number(octave, found["name"], found["sign"]) + semis
+            out.append(f"o{note // 12 - 1} {_NAMES[note % 12]}{found['length']}{found['dots']}")
+        elif found["octave"]:
+            octave = int(found["octave"])
+        elif found["mark"] == ">":
+            octave += 1
+        elif found["mark"] == "<":
+            octave -= 1
+        elif not found[0].isspace():
+            out.append(found[0])
+        at = found.end()
+    return " ".join(out)
+
+
+def up(song: dict, semis: int) -> dict:
+    """A copy of a song with its tuned channels `semis` semitones higher. Drum channels keep their text."""
+    channels = song["channels"]
+    patterns = {name: {channel: text if channels[channel].get("drums") else transpose(text, semis)
+                       for channel, text in pattern.items()}
+                for name, pattern in song["patterns"].items()}
+    return {**song, "patterns": patterns}

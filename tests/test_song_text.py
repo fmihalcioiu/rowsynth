@@ -1,10 +1,11 @@
 """Tests for the text a song's channels are written in."""
 from __future__ import annotations
 
+import copy
 import unittest
 
 from rowsynth.errors import RowSynthError
-from rowsynth.song import parse
+from rowsynth.song import parse, transpose, up
 
 
 # What each drum letter plays in these tests.
@@ -13,6 +14,16 @@ DRUMS = {"k": {"inst": "thud", "note": "c2"},
          "h": {"inst": "tick", "note": 80, "vel": 0.5},
          "H": {"inst": "tick", "note": "f#5", "rows": 3, "vel": 0.8},
          "t": {"inst": "tub", "note": "eb3", "rows": 0.5}}
+
+# A short song of two tuned channels and a drum channel.
+SONG = {"row_ticks": 6,
+        "instruments": {"lead": {"wave": "pulse"}, "bass": {"wave": "tri"}, "thud": {"wave": "noise"}},
+        "drums": {"k": {"inst": "thud", "note": "c2"}},
+        "channels": {"tune": {"inst": "lead"}, "low": {"inst": "bass", "pan": -0.3},
+                     "beat": {"inst": "thud", "drums": True}},
+        "patterns": {"a": {"tune": "l8 c e g > c", "low": "o2 c2", "beat": "k4 k4"},
+                     "b": {"tune": "o5 c4 < b4", "beat": "l4 k k"}},
+        "order": ["a", "b", "a"]}
 
 
 def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1) -> dict:
@@ -239,6 +250,124 @@ class ParseTest(unittest.TestCase):
     def test_a_drum_of_length_zero_cannot_be_read(self):
         self.assertEqual(self.refused("k s0", DRUMS), 'cannot read "s0" in a channel')
         self.assertEqual(self.refused("t00.", DRUMS), 'cannot read "t00." in a channel')
+
+
+class TransposeTest(unittest.TestCase):
+    def test_every_note_is_written_with_its_octave(self):
+        self.assertEqual(transpose("c d e", 2), "o4 d o4 e o4 g-")
+
+    def test_the_notes_between_the_letters_are_written_as_flats(self):
+        self.assertEqual(transpose("c c+ d d+ e f f+ g g+ a a+ b", 0),
+                         "o4 c o4 d- o4 d o4 e- o4 e o4 f o4 g- o4 g o4 a- o4 a o4 b- o4 b")
+        self.assertEqual(transpose("c# f+ a#", 0), "o4 d- o4 g- o4 b-")
+        self.assertEqual(transpose("b+ c-", 0), "o5 c o3 b")
+
+    def test_moving_up_crosses_into_the_octave_above(self):
+        self.assertEqual(transpose("o4 a b", 2), "o4 b o5 d-")
+        self.assertEqual(transpose("o4 a b", 5), "o5 d o5 e")
+        self.assertEqual(transpose("c", 12), "o5 c")
+        self.assertEqual(transpose("c", 13), "o5 d-")
+        self.assertEqual(transpose("c", 24), "o6 c")
+
+    def test_moving_down_crosses_into_the_octave_below(self):
+        self.assertEqual(transpose("o4 c d", -1), "o3 b o4 d-")
+        self.assertEqual(transpose("o4 c d", -2), "o3 b- o4 c")
+        self.assertEqual(transpose("c", -12), "o3 c")
+        self.assertEqual(transpose("c", -13), "o2 b")
+        self.assertEqual(transpose("c", -25), "o1 b")
+
+    def test_notes_can_be_moved_to_either_end_of_what_o_can_write(self):
+        self.assertEqual(transpose("o0 c+", -1), "o0 c")
+        self.assertEqual(transpose("o1 c", -12), "o0 c")
+        self.assertEqual(transpose("o9 b-", 1), "o9 b")
+        self.assertEqual(transpose("o8 b", 12), "o9 b")
+
+    def test_lengths_and_dots_stay_on_their_notes(self):
+        self.assertEqual(transpose("c4. d8.. e16 f", 1), "o4 d-4. o4 e-8.. o4 f16 o4 g-")
+        self.assertEqual(transpose("c12 d12 e12 >c6.<b-24", 11), "o4 b12 o5 d-12 o5 e-12 o5 b6. o5 a24")
+
+    def test_octave_marks_go_into_the_notes_after_them(self):
+        self.assertEqual(transpose("o3 c > c < < c", 0), "o3 c o4 c o2 c")
+        self.assertEqual(transpose("o3 c > c < < c", 2), "o3 d o4 d o2 d")
+
+    def test_everything_that_is_not_a_note_or_an_octave_stays(self):
+        self.assertEqual(transpose("@bass v12 l8 c & c r4. | r", 5), "@bass v12 l8 o4 f & o4 f r4. | r")
+        self.assertEqual(transpose("l8 o3 @bass v12 e & e g+4. & | g+8 r b & > b < | v9 b2 & b2", -7),
+                         "l8 @bass v12 o2 a & o2 a o3 d-4. & | o3 d-8 r o3 e & o4 e | v9 o3 e2 & o3 e2")
+
+    def test_one_space_goes_between_things_and_none_at_the_ends(self):
+        self.assertEqual(transpose("  c4\n\td4  |e4", 0), "o4 c4 o4 d4 | o4 e4")
+        self.assertEqual(transpose("c4d4&d4", 0), "o4 c4 o4 d4 & o4 d4")
+        self.assertEqual(transpose("c4d4&d4", -7), "o3 f4 o3 g4 & o3 g4")
+
+    def test_text_without_notes_comes_back_tidied(self):
+        self.assertEqual(transpose("", 5), "")
+        self.assertEqual(transpose("   ", 5), "")
+        self.assertEqual(transpose("| |", 5), "| |")
+
+    def test_moved_text_reads_as_the_same_events_with_every_note_moved(self):
+        texts = ("l8 o3 @bass v12 e & e g+4. & | g+8 r b & > b < | v9 b2 & b2",
+                 "c12 d12 e12 >c6.<b-24", "o5 c >> c <<<< c", "c4. & c8.. & c32... r d-")
+        for text in texts:
+            events, rows = parse(text, "lead")
+            for semis in (-13, -12, -1, 0, 1, 7, 12, 13):
+                with self.subTest(text=text, semis=semis):
+                    moved = [{**found, "note": found["note"] + semis} for found in events]
+                    self.assertEqual(parse(transpose(text, semis), "lead"), (moved, rows))
+
+    def test_text_that_cannot_be_read_is_quoted_from_where_it_starts(self):
+        with self.assertRaises(RowSynthError) as caught:
+            transpose("c d e xyz c d e f g a b", 3)
+        self.assertEqual(str(caught.exception), 'cannot read "xyz c d e f " in a channel')
+
+    def test_a_drum_letter_cannot_be_read(self):
+        for letter in "kshHt":
+            with self.subTest(letter=letter):
+                with self.assertRaises(RowSynthError) as caught:
+                    transpose(f"c {letter}4 c", 3)
+                self.assertEqual(str(caught.exception), f'cannot read "{letter}4 c" in a channel')
+
+
+class UpTest(unittest.TestCase):
+    def test_every_channel_is_moved_but_the_drums(self):
+        self.assertEqual(up(SONG, 2)["patterns"],
+                         {"a": {"tune": "l8 o4 d o4 g- o4 a o5 d", "low": "o2 d2", "beat": "k4 k4"},
+                          "b": {"tune": "o5 d4 o5 d-4", "beat": "l4 k k"}})
+
+    def test_each_channel_holds_what_transpose_makes_of_its_text(self):
+        for semis in (-12, -3, 0, 7):
+            with self.subTest(semis=semis):
+                moved = up(SONG, semis)["patterns"]
+                self.assertEqual(moved["a"]["tune"], transpose("l8 c e g > c", semis))
+                self.assertEqual(moved["a"]["low"], transpose("o2 c2", semis))
+                self.assertEqual(moved["b"]["tune"], transpose("o5 c4 < b4", semis))
+                self.assertEqual(moved["a"]["beat"], "k4 k4")
+                self.assertEqual(moved["b"]["beat"], "l4 k k")
+
+    def test_the_rest_of_the_song_comes_through_as_it_was(self):
+        moved = up(SONG, 2)
+        self.assertEqual(set(moved), set(SONG))
+        for key in SONG:
+            if key != "patterns":
+                self.assertEqual(moved[key], SONG[key])
+
+    def test_the_song_passed_in_is_not_changed(self):
+        song = copy.deepcopy(SONG)
+        moved = up(song, 5)
+        self.assertEqual(song, SONG)
+        self.assertIsNot(moved, song)
+        self.assertIsNot(moved["patterns"], song["patterns"])
+        self.assertIsNot(moved["patterns"]["a"], song["patterns"]["a"])
+
+    def test_a_channel_that_says_it_has_no_drums_is_moved(self):
+        song = {"channels": {"one": {"inst": "lead", "drums": False}}, "patterns": {"x": {"one": "c e g"}, "y": {}}}
+        self.assertEqual(up(song, 12)["patterns"], {"x": {"one": "o5 c o5 e o5 g"}, "y": {}})
+
+    def test_text_that_cannot_be_read_is_refused(self):
+        song = {"channels": {"one": {"inst": "lead"}}, "patterns": {"x": {"one": "c e ? g"}}}
+        with self.assertRaises(RowSynthError) as caught:
+            up(song, 2)
+        self.assertEqual(str(caught.exception), 'cannot read "? g" in a channel')
 
 
 if __name__ == "__main__":
