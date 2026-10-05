@@ -8,7 +8,12 @@ import unittest
 import numpy as np
 
 from rowsynth.errors import RowSynthError
-from rowsynth.measure import measure
+from rowsynth.measure import brightness, measure, spectrum
+
+
+def tone(hz: float, count: int, rate: int, level: float = 1.0) -> np.ndarray:
+    """`count` samples of a sine that starts at zero."""
+    return level * np.sin(2 * np.pi * hz * np.arange(count) / rate)
 
 
 class MeasureTest(unittest.TestCase):
@@ -112,6 +117,149 @@ class MeasureTest(unittest.TestCase):
     def test_more_than_one_row_is_an_error(self):
         with self.assertRaisesRegex(RowSynthError, "one row"):
             measure(np.zeros((2, 100)))
+
+
+class SpectrumTest(unittest.TestCase):
+    def setUp(self):
+        # At 8000 Hz with frames of 256: bin 20 for the first 1024 samples, bin 50 for the next 1024.
+        self.both = np.concatenate((tone(625, 1024, 8000), tone(1562.5, 1024, 8000)))
+
+    def test_there_are_half_as_many_bins_as_samples_in_a_frame(self):
+        mags, hz_per_bin = spectrum(np.zeros(8000), size=256, rate=8000)
+        self.assertEqual(mags.shape, (128,))
+        self.assertEqual(hz_per_bin, 31.25)
+
+    def test_the_defaults_are_a_frame_of_4096_at_44100(self):
+        mags, hz_per_bin = spectrum(np.zeros(100))
+        self.assertEqual(mags.shape, (2048,))
+        self.assertEqual(hz_per_bin, 44100 / 4096)
+
+    def test_a_full_scale_sine_reads_close_to_one_in_its_own_bin(self):
+        # 1250 Hz is bin 40 of 256 at 8000 Hz. The window takes the reading down to (size - 1) / size.
+        mags, _ = spectrum(tone(1250, 256, 8000), size=256, rate=8000)
+        self.assertEqual(int(mags.argmax()), 40)
+        self.assertAlmostEqual(mags[40], 255 / 256, places=5)
+
+    def test_a_sine_at_half_level_reads_half(self):
+        # A hundred periods in the frame: bin 100.
+        mags, _ = spectrum(0.5 * np.sin(2 * np.pi * 100 * np.arange(4096) / 4096))
+        self.assertEqual(int(mags.argmax()), 100)
+        self.assertAlmostEqual(mags[100], 0.499878, places=6)
+
+    def test_the_window_spreads_a_sine_into_the_bins_beside_it_and_little_further(self):
+        mags, _ = spectrum(tone(1250, 256, 8000), size=256, rate=8000)
+        self.assertAlmostEqual(mags[39], 0.500966, places=6)
+        self.assertAlmostEqual(mags[41], 0.500966, places=6)
+        self.assertLess(np.delete(mags, [38, 39, 40, 41, 42]).max(), 1e-3)
+
+    def test_the_bins_follow_the_rate(self):
+        # 3000 Hz at 48000 Hz with frames of 1024: 46.875 Hz a bin, so bin 64.
+        mags, hz_per_bin = spectrum(tone(3000, 1024, 48000, 0.25), size=1024, rate=48000)
+        self.assertEqual(hz_per_bin, 46.875)
+        self.assertEqual(int(mags.argmax()), 64)
+        self.assertAlmostEqual(mags[64], 0.249756, places=6)
+
+    def test_the_frame_starts_at_the_time_asked(self):
+        self.assertEqual(int(spectrum(self.both, 0.0, 256, 8000)[0].argmax()), 20)
+        self.assertEqual(int(spectrum(self.both, 0.128, 256, 8000)[0].argmax()), 50)
+
+    def test_a_frame_past_the_end_is_pulled_back_to_the_last_whole_one(self):
+        late, _ = spectrum(self.both, 99.0, 256, 8000)
+        last, _ = spectrum(self.both[-256:], 0.0, 256, 8000)
+        np.testing.assert_array_equal(late, last)
+
+    def test_a_time_before_the_start_reads_the_first_frame(self):
+        early, _ = spectrum(self.both, -3.0, 256, 8000)
+        first, _ = spectrum(self.both, 0.0, 256, 8000)
+        np.testing.assert_array_equal(early, first)
+
+    def test_a_buffer_shorter_than_a_frame_is_padded_with_silence(self):
+        short = tone(1000, 100, 8000, 0.5)
+        mags, _ = spectrum(short, size=256, rate=8000)
+        padded, _ = spectrum(np.concatenate((short, np.zeros(156))), size=256, rate=8000)
+        np.testing.assert_array_equal(mags, padded)
+        self.assertEqual(int(mags.argmax()), 32)
+        self.assertAlmostEqual(mags[32], 0.145616, places=6)
+
+    def test_silence_has_no_magnitude_anywhere(self):
+        mags, _ = spectrum(np.zeros(4096))
+        self.assertEqual(mags.max(), 0.0)
+
+    def test_a_list_is_read_like_an_array(self):
+        values = tone(1250, 256, 8000)
+        np.testing.assert_array_equal(
+            spectrum(values.tolist(), size=256, rate=8000)[0], spectrum(values, size=256, rate=8000)[0])
+
+    def test_a_frame_size_that_is_not_a_power_of_two_is_an_error(self):
+        for size in (0, 1, 3, 1000, -256):
+            with self.subTest(size=size):
+                with self.assertRaisesRegex(RowSynthError, "power of two"):
+                    spectrum(np.zeros(4096), size=size)
+
+    def test_no_samples_is_an_error(self):
+        with self.assertRaisesRegex(RowSynthError, "empty"):
+            spectrum([])
+
+
+class BrightnessTest(unittest.TestCase):
+    def test_a_low_tone_has_its_centre_at_its_pitch_and_nothing_above_4k(self):
+        self.assertEqual(brightness(tone(200, 11025, 44100, 0.5)), {"centroid_hz": 200, "above_4k": 0.0})
+
+    def test_a_high_tone_has_its_centre_at_its_pitch_and_everything_above_4k(self):
+        self.assertEqual(brightness(tone(8000, 11025, 44100, 0.5)), {"centroid_hz": 8000, "above_4k": 1.0})
+
+    def test_the_line_is_drawn_at_4000_hz(self):
+        self.assertEqual(brightness(tone(3900, 11025, 44100, 0.4)), {"centroid_hz": 3900, "above_4k": 0.0})
+        self.assertEqual(brightness(tone(4100, 11025, 44100, 0.4)), {"centroid_hz": 4100, "above_4k": 1.0})
+
+    def test_two_tones_of_one_level_share_the_energy_and_centre_halfway(self):
+        both = tone(1000, 11025, 44100, 0.4) + tone(9000, 11025, 44100, 0.4)
+        self.assertEqual(brightness(both), {"centroid_hz": 5000, "above_4k": 0.5})
+
+    def test_a_loud_stretch_weighs_more_than_a_quiet_one(self):
+        # Ten times the level is a hundred times the energy, so the quiet high tone holds about 1/101 of it.
+        both = np.concatenate((tone(500, 8192, 44100, 0.5), tone(8000, 8192, 44100, 0.05)))
+        self.assertEqual(brightness(both), {"centroid_hz": 576, "above_4k": 0.01})
+
+    def test_silence_gives_zeros(self):
+        self.assertEqual(brightness(np.zeros(8192)), {"centroid_hz": 0, "above_4k": 0.0})
+
+    def test_a_sound_too_quiet_to_weigh_gives_zeros(self):
+        self.assertEqual(brightness(tone(1000, 8192, 44100, 1e-5)), {"centroid_hz": 0, "above_4k": 0.0})
+
+    def test_a_buffer_shorter_than_one_frame_gives_zeros(self):
+        self.assertEqual(brightness(tone(1000, 2047, 44100)), {"centroid_hz": 0, "above_4k": 0.0})
+        self.assertEqual(brightness(tone(1000, 2048, 44100)), {"centroid_hz": 1000, "above_4k": 0.0})
+
+    def test_the_frame_size_and_the_rate_can_be_set(self):
+        self.assertEqual(brightness(tone(3000, 600, 8000, 0.5), size=256, rate=8000),
+                         {"centroid_hz": 3000, "above_4k": 0.0})
+        self.assertEqual(brightness(tone(200, 12000, 48000, 0.5), rate=48000), {"centroid_hz": 200, "above_4k": 0.0})
+        self.assertEqual(brightness(tone(8000, 12000, 48000, 0.5), rate=48000), {"centroid_hz": 8000, "above_4k": 1.0})
+
+    def test_each_frame_is_taken_from_where_spectrum_puts_its_time(self):
+        # A sawtooth of 294 samples a period. Some frames start a sample before their count, which is
+        # where spectrum() puts their time. Had each started on its count, the centre would read 1244.
+        saw = (np.arange(13230) % 294) / 147 - 1
+        self.assertEqual(brightness(saw, size=64), {"centroid_hz": 1243, "above_4k": 0.05})
+
+    def test_the_centre_is_a_whole_number_of_hz(self):
+        self.assertIs(type(brightness(tone(200, 4096, 44100))["centroid_hz"]), int)
+        self.assertIs(type(brightness(np.zeros(4096))["centroid_hz"]), int)
+
+    def test_a_list_is_read_like_an_array(self):
+        values = tone(1000, 600, 8000, 0.5)
+        self.assertEqual(brightness(values.tolist(), 256, 8000), brightness(values, 256, 8000))
+
+    def test_a_frame_size_that_is_not_a_power_of_two_is_an_error(self):
+        for size in (0, 1, 3, 1000, -256):
+            with self.subTest(size=size):
+                with self.assertRaisesRegex(RowSynthError, "power of two"):
+                    brightness(np.zeros(100), size=size)
+
+    def test_no_samples_is_an_error(self):
+        with self.assertRaisesRegex(RowSynthError, "empty"):
+            brightness([])
 
 
 if __name__ == "__main__":

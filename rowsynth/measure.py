@@ -57,3 +57,55 @@ def measure(samples, rate: int = 44100) -> dict:
         "head_step": _fixed(float(level[0]), 3),
         "tail_step": _fixed(float(level[-1]), 3),
     }
+
+
+def _frame_size(size: int) -> int:
+    """A frame size as a plain int. It has to be a power of two, so that it halves into whole bins."""
+    if not isinstance(size, (int, np.integer)) or size < 2 or size & (size - 1):
+        raise RowSynthError(f"a frame size must be a power of two, 2 or more, not {size!r}")
+    return int(size)
+
+
+def spectrum(samples, t: float = 0.0, size: int = 4096, rate: int = 44100) -> tuple[np.ndarray, float]:
+    """The magnitudes of one frame of `size` samples starting at time `t`, and the width of a bin in Hz.
+
+    A frame that would run past the end is pulled back to fit, and a buffer shorter than a frame is
+    padded with silence. The frame is shaped by a Hann window and scaled so that a full-scale sine
+    reads close to 1.0 in its bin. There are `size / 2` bins, from 0 Hz to just under half the rate.
+    """
+    row = _row(samples)
+    size = _frame_size(size)
+    start = max(0, min(len(row) - size, math.floor(t * rate)))
+    part = row[start:start + size]
+    frame = np.zeros(size)
+    frame[:len(part)] = part
+    frame *= 0.5 - 0.5 * np.cos(2 * np.pi * np.arange(size) / (size - 1))
+    mags = np.abs(np.fft.rfft(frame))[:size // 2] / (size / 4)
+    return mags, rate / size
+
+
+def brightness(samples, size: int = 2048, rate: int = 44100) -> dict:
+    """Where the energy of a buffer sits: `centroid_hz`, its centre in Hz, and `above_4k`, the share above 4 kHz.
+
+    Frames of `size` samples, half a frame apart, each count by their energy, so a loud stretch
+    weighs more than a quiet one and a silent one not at all. A buffer shorter than one frame, or
+    silent throughout, gives zeros.
+    """
+    row = _row(samples)
+    size = _frame_size(size)
+    # Bin 0 is the offset and not a pitch, so it is left out.
+    hz = np.arange(1, size // 2) * (rate / size)
+    energy = centre = high = 0.0
+    for at in range(0, len(row) - size + 1, size // 2):
+        # The frame is asked for by its time and starts where spectrum() puts that time: now and then a sample early.
+        mags, _ = spectrum(row, at / rate, size, rate)
+        power = mags[1:] ** 2
+        total = float(power.sum())
+        if total < 1e-7:
+            continue
+        energy += total
+        centre += float(np.dot(power, hz))
+        high += float(power[hz > 4000].sum())
+    if not energy:
+        return {"centroid_hz": 0, "above_4k": 0.0}
+    return {"centroid_hz": math.floor(centre / energy + 0.5), "above_4k": _fixed(high / energy, 2)}
