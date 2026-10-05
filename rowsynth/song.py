@@ -4,15 +4,19 @@ from __future__ import annotations
 import re
 
 from .errors import RowSynthError
+from .notes import midi
 
 # Everything a channel's text can hold, one kind to a line.
 _TOKEN = re.compile("|".join((
     r"\s+",                                                           # space, which only keeps things apart
     r"\|",                                                            # a bar line, which changes nothing
+    r"@(?P<inst>\w+)",                                                # the instrument from here on: @lead
     r"(?P<name>[a-gr])(?P<sign>[+#-]?)(?P<length>\d*)(?P<dots>\.*)",  # a note, or r for a rest: c f+8 b-4. r2
+    r"(?P<drum>[kshHt])(?P<drum_length>\d*)(?P<drum_dots>\.*)",       # a drum hit, timed as a note is: k s8 H4.
     r"l(?P<default>\d+)",                                             # the length for notes written without one: l8
     r"o(?P<octave>\d)",                                               # the octave: o4
-    r"(?P<mark>[<>])",                                                # an octave down, an octave up
+    r"v(?P<vol>\d+)",                                                 # the volume from here on, 0 to 15: v12
+    r"(?P<mark>[<>&])",                                               # an octave down, an octave up, a tie
 )), re.ASCII)
 
 # Semitones from c up to each letter, and what a sharp or a flat adds.
@@ -40,25 +44,49 @@ def _rows(length: int, dots: int, rows_per_beat: int) -> float:
     return rows
 
 
-def parse(text: str, inst: str, rows_per_beat: int = 4) -> tuple[list[dict], float]:
-    """Reads a channel's text. Gives its events, each {"row", "rows", "note", "inst", "vel"}, and the rows it fills."""
+def parse(text: str, inst: str, rows_per_beat: int = 4, drums: dict | None = None) -> tuple[list[dict], float]:
+    """Reads a channel's text. Gives its events, each {"row", "rows", "note", "inst", "vel"}, and the rows it fills.
+
+    `drums` is what each drum letter plays: {letter: {"inst", "note", "rows", "vel"}}, the last two optional.
+    """
     events = []
     row = 0.0
     octave = 4
     default = 16
+    vel = 1.0
+    tie = False
     at = 0
     while at < len(text):
         found = _TOKEN.match(text, at)
         if not found:
             raise _unread(text, at)
-        if found["name"]:
+        if found["inst"]:
+            inst = found["inst"]
+        elif found["name"]:
             length = int(found["length"] or default)
             if not length:
                 raise _unread(text, at)
             rows = _rows(length, len(found["dots"]), rows_per_beat)
             if found["name"] != "r":
                 note = _number(octave, found["name"], found["sign"])
-                events.append({"row": row, "rows": rows, "note": note, "inst": inst, "vel": 1.0})
+                # A tie makes the note before longer, when this is the same note and starts where that one ends.
+                last = events[-1] if events else None
+                if tie and last and last["note"] == note and last["row"] + last["rows"] == row:
+                    last["rows"] += rows
+                else:
+                    events.append({"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel})
+            tie = False
+            row += rows
+        elif found["drum"]:
+            hit = drums.get(found["drum"]) if drums else None
+            if not hit:
+                raise RowSynthError(f'"{found["drum"]}" is a drum, and this is not a drum channel')
+            length = int(found["drum_length"] or default)
+            if not length:
+                raise _unread(text, at)
+            rows = _rows(length, len(found["drum_dots"]), rows_per_beat)
+            events.append({"row": row, "rows": min(rows, hit.get("rows", rows)), "note": midi(hit["note"]),
+                           "inst": hit["inst"], "vel": vel * hit.get("vel", 1)})
             row += rows
         elif found["default"]:
             default = int(found["default"])
@@ -66,9 +94,13 @@ def parse(text: str, inst: str, rows_per_beat: int = 4) -> tuple[list[dict], flo
                 raise _unread(text, at)
         elif found["octave"]:
             octave = int(found["octave"])
+        elif found["vol"]:
+            vel = int(found["vol"]) / 15
         elif found["mark"] == ">":
             octave += 1
         elif found["mark"] == "<":
             octave -= 1
+        elif found["mark"] == "&":
+            tie = True
         at = found.end()
     return events, row

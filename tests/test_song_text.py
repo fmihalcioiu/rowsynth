@@ -7,16 +7,24 @@ from rowsynth.errors import RowSynthError
 from rowsynth.song import parse
 
 
-def event(row: float, rows: float, note: int, inst: str = "lead") -> dict:
+# What each drum letter plays in these tests.
+DRUMS = {"k": {"inst": "thud", "note": "c2"},
+         "s": {"inst": "crack", "note": "d3", "rows": 2},
+         "h": {"inst": "tick", "note": 80, "vel": 0.5},
+         "H": {"inst": "tick", "note": "f#5", "rows": 3, "vel": 0.8},
+         "t": {"inst": "tub", "note": "eb3", "rows": 0.5}}
+
+
+def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1) -> dict:
     """One event as parse gives it."""
-    return {"row": row, "rows": rows, "note": note, "inst": inst, "vel": 1}
+    return {"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel}
 
 
 class ParseTest(unittest.TestCase):
-    def refused(self, text: str) -> str:
+    def refused(self, text: str, drums: dict | None = None) -> str:
         """The message parse refuses `text` with."""
         with self.assertRaises(RowSynthError) as caught:
-            parse(text, "lead")
+            parse(text, "lead", drums=drums)
         return str(caught.exception)
 
     def test_letters_are_the_notes_of_octave_four_a_sixteenth_each(self):
@@ -119,6 +127,80 @@ class ParseTest(unittest.TestCase):
         self.assertEqual(events, [event(0, 1, 60, "bass"), event(2, 1, 62, "bass")])
         self.assertEqual(rows, 3)
 
+    def test_at_changes_the_instrument_of_what_follows(self):
+        events, rows = parse("c @bass d e @pad_2 f", "lead")
+        self.assertEqual(events, [event(0, 1, 60), event(1, 1, 62, "bass"), event(2, 1, 64, "bass"),
+                                  event(3, 1, 65, "pad_2")])
+        self.assertEqual(rows, 4)
+
+    def test_v_sets_the_volume_of_what_follows_out_of_fifteen(self):
+        events, rows = parse("c v0 d v15 e v6 f", "lead")
+        self.assertEqual(events, [event(0, 1, 60), event(1, 1, 62, vel=0), event(2, 1, 64), event(3, 1, 65, vel=0.4)])
+        self.assertEqual(rows, 4)
+
+    def test_a_tie_makes_one_note_of_two_of_the_same_pitch(self):
+        self.assertEqual(parse("c4 & c4", "lead"), ([event(0, 8, 60)], 8))
+        self.assertEqual(parse("c2&c2&c1", "lead"), ([event(0, 32, 60)], 32))
+        self.assertEqual(parse("c4. & c8.. & c32...", "lead"), ([event(0, 10.4375, 60)], 10.4375))
+
+    def test_a_tie_joins_across_a_bar_line(self):
+        self.assertEqual(parse("c2 & | c2 d", "lead"), ([event(0, 16, 60), event(16, 1, 62)], 17))
+
+    def test_a_tie_joins_one_pitch_written_two_ways(self):
+        self.assertEqual(parse("c+4 & d-4", "lead"), ([event(0, 8, 61)], 8))
+        self.assertEqual(parse("c4 & > < c4", "lead"), ([event(0, 8, 60)], 8))
+
+    def test_a_tie_to_another_pitch_joins_nothing(self):
+        self.assertEqual(parse("c4 & d4 c4", "lead"), ([event(0, 4, 60), event(4, 4, 62), event(8, 4, 60)], 12))
+        self.assertEqual(parse("c4 & > c4", "lead"), ([event(0, 4, 60), event(4, 4, 72)], 8))
+
+    def test_a_rest_ends_a_tie(self):
+        self.assertEqual(parse("c4 & r4 c4", "lead"), ([event(0, 4, 60), event(8, 4, 60)], 12))
+
+    def test_a_tied_note_keeps_the_instrument_and_volume_it_began_with(self):
+        events, rows = parse("c4 & @bass v5 c4 c", "lead")
+        self.assertEqual(events, [event(0, 8, 60), event(8, 1, 60, "bass", 0.3333333333333333)])
+        self.assertEqual(rows, 9)
+
+    def test_a_tie_with_no_note_before_it_does_nothing(self):
+        self.assertEqual(parse("& c", "lead"), ([event(0, 1, 60)], 1))
+
+    def test_tied_triplets_add_up_without_rounding(self):
+        self.assertEqual(parse("c12&c12&c12", "lead"), ([event(0, 4, 60)], 4))
+        events, rows = parse("r12 c12&c12&c12 d", "lead")
+        self.assertEqual(events, [event(1.3333333333333333, 4, 60), event(5.333333333333333, 1, 62)])
+        self.assertEqual(rows, 6.333333333333333)
+
+    def test_a_drum_letter_plays_what_the_drums_say(self):
+        events, rows = parse("k s h H t", "lead", drums=DRUMS)
+        self.assertEqual(events, [event(0, 1, 36, "thud"), event(1, 1, 50, "crack"), event(2, 1, 80, "tick", 0.5),
+                                  event(3, 1, 78, "tick", 0.8), event(4, 0.5, 51, "tub")])
+        self.assertEqual(rows, 5)
+
+    def test_a_drum_sounds_no_longer_than_its_rows_and_still_takes_its_length(self):
+        events, rows = parse("k2 s2 H2 t2", "lead", drums=DRUMS)
+        self.assertEqual(events, [event(0, 8, 36, "thud"), event(8, 2, 50, "crack"), event(16, 3, 78, "tick", 0.8),
+                                  event(24, 0.5, 51, "tub")])
+        self.assertEqual(rows, 32)
+
+    def test_a_drum_takes_a_length_dots_and_the_length_l_set(self):
+        events, rows = parse("l8 k h. s4.. t", "lead", drums=DRUMS)
+        self.assertEqual(events, [event(0, 2, 36, "thud"), event(2, 3, 80, "tick", 0.5), event(5, 2, 50, "crack"),
+                                  event(12, 0.5, 51, "tub")])
+        self.assertEqual(rows, 14)
+
+    def test_the_volume_scales_the_level_a_drum_has_of_its_own(self):
+        events, rows = parse("v6 k h v15 H", "lead", drums=DRUMS)
+        self.assertEqual(events, [event(0, 1, 36, "thud", 0.4), event(1, 1, 80, "tick", 0.2),
+                                  event(2, 1, 78, "tick", 0.8)])
+        self.assertEqual(rows, 3)
+
+    def test_notes_and_drums_can_share_a_channel(self):
+        events, rows = parse("c k @bass d s", "lead", drums=DRUMS)
+        self.assertEqual(events, [event(0, 1, 60), event(1, 1, 36, "thud"), event(2, 1, 62, "bass"),
+                                  event(3, 1, 50, "crack")])
+        self.assertEqual(rows, 4)
+
     def test_text_that_cannot_be_read_is_quoted_from_where_it_starts(self):
         self.assertEqual(self.refused("c d ? e"), 'cannot read "? e" in a channel')
 
@@ -137,6 +219,26 @@ class ParseTest(unittest.TestCase):
         for text, quoted in cases.items():
             with self.subTest(text=text):
                 self.assertEqual(self.refused(text), f'cannot read "{quoted}" in a channel')
+
+    def test_an_instrument_needs_a_name_and_a_volume_a_number(self):
+        cases = {"@ c": "@ c", "c @-x": "@-x", "c v d": "v d", "c v": "v"}
+        for text, quoted in cases.items():
+            with self.subTest(text=text):
+                self.assertEqual(self.refused(text), f'cannot read "{quoted}" in a channel')
+
+    def test_a_drum_letter_is_refused_where_there_are_no_drums(self):
+        for letter in "kshHt":
+            with self.subTest(letter=letter):
+                self.assertEqual(self.refused(f"c {letter}4"),
+                                 f'"{letter}" is a drum, and this is not a drum channel')
+        self.assertEqual(self.refused("k", {}), '"k" is a drum, and this is not a drum channel')
+
+    def test_a_drum_letter_the_drums_leave_out_is_refused(self):
+        self.assertEqual(self.refused("k s", {"k": DRUMS["k"]}), '"s" is a drum, and this is not a drum channel')
+
+    def test_a_drum_of_length_zero_cannot_be_read(self):
+        self.assertEqual(self.refused("k s0", DRUMS), 'cannot read "s0" in a channel')
+        self.assertEqual(self.refused("t00.", DRUMS), 'cannot read "t00." in a channel')
 
 
 if __name__ == "__main__":
