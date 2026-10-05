@@ -109,3 +109,55 @@ def brightness(samples, size: int = 2048, rate: int = 44100) -> dict:
     if not energy:
         return {"centroid_hz": 0, "above_4k": 0.0}
     return {"centroid_hz": math.floor(centre / energy + 0.5), "above_4k": _fixed(high / energy, 2)}
+
+
+def _k_period(corr, low, high) -> float:
+    """One period as a lag from `low` to `high`, with a fraction, or 0.0 when no lag stands out."""
+    # At small lags a wave still overlaps itself, so the search waits until the match has fallen to zero or below.
+    lag = 1
+    while lag <= high and corr[lag] > 0.0:
+        lag += 1
+    first = max(lag, low)
+    best = 0.0
+    for i in range(first, high + 1):
+        if corr[i] > best:
+            best = corr[i]
+    if best <= 0.0:
+        return 0.0
+    # Two or three periods along, the match can come out a shade better than at one. So a peak within 7% of the
+    # best counts, and the earliest of those is the period.
+    for i in range(first, high):
+        if corr[i] >= best * 0.93 and corr[i] >= corr[i - 1] and corr[i] >= corr[i + 1]:
+            # A parabola through the peak and the lag on each side puts the top between whole lags.
+            a = corr[i - 1]
+            b = corr[i]
+            c = corr[i + 1]
+            bend = 2.0 * (a - 2.0 * b + c)
+            if bend == 0.0:
+                bend = 1.0
+            return i + (a - c) / bend
+    return 0.0
+
+
+def pitch_at(samples, t: float, lo: float = 50.0, hi: float = 4000.0, window: float = 0.04, rate: int = 44100) -> float:
+    """The note sounding at time `t`, in Hz to one decimal place, or 0.0 when none can be read.
+
+    A stretch of `window` seconds from `t` is set against itself moved along, and the shortest move
+    that lines it up again is one period. Only notes from `lo` to `hi` Hz are looked for. A stretch
+    of fewer than 64 samples, or one with next to no sound in it, reads as no note.
+    """
+    row = _row(samples)
+    start = max(0, math.floor(t * rate))
+    count = min(math.floor(window * rate), len(row) - start)
+    if count < 64:
+        return 0.0
+    low = math.floor(rate / hi)
+    high = min(math.floor(rate / lo), count - 1)
+    part = row[start:start + count]
+    if float(np.dot(part, part)) < 1e-6:
+        return 0.0
+    # Lag by lag, the mean product of the stretch and itself moved along. Zeros stand in past its end.
+    padded = np.concatenate((part, np.zeros(high)))
+    corr = np.correlate(padded, part, "valid") / (count - np.arange(high + 1))
+    period = float(_k_period(corr, low, high))
+    return _fixed(rate / period, 1) if period else 0.0

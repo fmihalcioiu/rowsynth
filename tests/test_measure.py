@@ -8,7 +8,7 @@ import unittest
 import numpy as np
 
 from rowsynth.errors import RowSynthError
-from rowsynth.measure import brightness, measure, spectrum
+from rowsynth.measure import brightness, measure, pitch_at, spectrum
 
 
 def tone(hz: float, count: int, rate: int, level: float = 1.0) -> np.ndarray:
@@ -260,6 +260,113 @@ class BrightnessTest(unittest.TestCase):
     def test_no_samples_is_an_error(self):
         with self.assertRaisesRegex(RowSynthError, "empty"):
             brightness([])
+
+
+class PitchAtTest(unittest.TestCase):
+    def test_a_sine_reads_as_its_own_note_across_the_range(self):
+        for rate in (44100, 48000):
+            for hz in (55, 110, 220, 440, 880, 1760, 3520):
+                with self.subTest(rate=rate, hz=hz):
+                    got = pitch_at(tone(hz, rate // 5, rate), 0.0, rate=rate)
+                    self.assertAlmostEqual(got, hz, delta=hz * 0.01)
+
+    def test_a_reading_has_one_decimal_place(self):
+        self.assertEqual(pitch_at(tone(55, 8820, 44100), 0.0), 54.9)
+        self.assertEqual(pitch_at(tone(440, 8820, 44100), 0.0), 439.5)
+        self.assertEqual(pitch_at(tone(3520, 8820, 44100), 0.0), 3519.7)
+        self.assertEqual(pitch_at(tone(3520, 9600, 48000), 0.0, rate=48000), 3519.2)
+
+    def test_two_clicks_read_as_the_gap_between_them(self):
+        # The only lag at which anything lines up is 50 samples, and nothing either side pulls it off 50.
+        clicks = np.zeros(400)
+        clicks[0] = clicks[50] = 0.75
+        self.assertEqual(pitch_at(clicks, 0.0), 882.0)
+        self.assertEqual(pitch_at(clicks, 0.0, rate=8000), 160.0)
+
+    def test_a_peak_level_with_both_its_neighbours_reads_at_its_own_lag(self):
+        # A click at 0 against clicks of 100/128, 99/128 and 98/128 at 11, 12 and 13, over 100, 99 and 98
+        # pairs: lags 11, 12 and 13 all come to exactly 1/128. Lag 10 comes to 1/101, which is more, so
+        # 12 is the first lag no lower than the one before it, and 44100 / 12 is 3675.
+        clicks = np.zeros(111)
+        clicks[0] = clicks[10] = 1.0
+        clicks[11:14] = (100 / 128, 99 / 128, 98 / 128)
+        self.assertEqual(pitch_at(clicks, 0.0), 3675.0)
+
+    def test_a_wave_with_overtones_reads_as_its_lowest_note(self):
+        # A square wave of 200 samples a period: 220.5 Hz at 44100 Hz and 240 Hz at 48000 Hz.
+        square = np.where((np.arange(8820) // 100) % 2 == 0, 0.5, -0.5)
+        self.assertEqual(pitch_at(square, 0.0), 220.5)
+        self.assertEqual(pitch_at(square, 0.0, rate=48000), 240.0)
+
+    def test_overtones_alone_read_as_the_note_they_belong_to(self):
+        overtones = sum(tone(200 * k, 8820, 44100, 0.2) for k in (2, 3, 4))
+        self.assertEqual(pitch_at(overtones, 0.0), 199.9)
+
+    def test_the_time_picks_the_stretch_that_is_read(self):
+        both = np.concatenate((tone(220, 8820, 44100), tone(660, 8820, 44100)))
+        self.assertEqual(pitch_at(both, 0.1), 219.9)
+        self.assertEqual(pitch_at(both, 0.3), 659.6)
+
+    def test_a_time_before_the_start_reads_from_the_start(self):
+        values = tone(2000, 8820, 44100)
+        self.assertEqual(pitch_at(values, 0.0), 1999.4)
+        self.assertEqual(pitch_at(values, -1.0), 1999.4)
+
+    def test_fewer_than_64_samples_read_as_no_note(self):
+        values = tone(2000, 8820, 44100)
+        self.assertEqual(pitch_at(values[:63], 0.0), 0.0)
+        self.assertEqual(pitch_at(values[:64], 0.0), 1986.0)
+
+    def test_a_time_too_near_the_end_or_past_it_reads_as_no_note(self):
+        # 800 samples at 8000 Hz: half of them are left at 0.05 s, 60 at 0.0925 s and none from 0.1 s on.
+        values = tone(250, 800, 8000)
+        self.assertEqual(pitch_at(values, 0.05, rate=8000), 249.3)
+        self.assertEqual(pitch_at(values, 0.0925, rate=8000), 0.0)
+        self.assertEqual(pitch_at(values, 0.1, rate=8000), 0.0)
+        self.assertEqual(pitch_at(values, 5.0, rate=8000), 0.0)
+
+    def test_silence_reads_as_no_note(self):
+        self.assertEqual(pitch_at(np.zeros(4410), 0.0), 0.0)
+
+    def test_next_to_no_sound_reads_as_no_note(self):
+        # The squares over the stretch of 1764 samples have to reach a millionth in all. A sine of level
+        # 3e-5 comes to 0.8 millionths and one of 4e-5 to 1.4.
+        self.assertEqual(pitch_at(tone(440, 4410, 44100, 3e-5), 0.0), 0.0)
+        self.assertEqual(pitch_at(tone(440, 4410, 44100, 4e-5), 0.0), 439.5)
+
+    def test_lo_is_the_lowest_note_looked_for(self):
+        values = tone(100, 8820, 44100)
+        self.assertEqual(pitch_at(values, 0.0), 99.2)
+        self.assertEqual(pitch_at(values, 0.0, lo=150), 0.0)
+
+    def test_hi_is_the_highest_note_looked_for(self):
+        # One period of 5000 Hz is a shorter lag than any tried for 4000 Hz. Two periods are found instead.
+        values = tone(5000, 4410, 44100)
+        self.assertEqual(pitch_at(values, 0.0), 2498.8)
+        self.assertEqual(pitch_at(values, 0.0, hi=6000), 4995.7)
+
+    def test_window_is_how_long_a_stretch_is_read(self):
+        # One period of 25 Hz is 1764 samples, the whole of the usual stretch, so it takes a longer one.
+        values = tone(25, 22050, 44100)
+        self.assertEqual(pitch_at(values, 0.0, lo=20), 0.0)
+        self.assertEqual(pitch_at(values, 0.0, lo=20, window=0.1), 24.6)
+
+    def test_a_window_of_fewer_than_64_samples_reads_as_no_note(self):
+        # 0.001 s at 44100 Hz is 44 samples.
+        self.assertEqual(pitch_at(tone(440, 4410, 44100), 0.0, window=0.001), 0.0)
+
+    def test_a_list_is_read_like_an_array(self):
+        values = tone(250, 800, 8000)
+        self.assertEqual(pitch_at(values.tolist(), 0.0, rate=8000), 249.3)
+        self.assertEqual(pitch_at(values.astype(np.float32), 0.0, rate=8000), 249.3)
+
+    def test_no_samples_is_an_error(self):
+        with self.assertRaisesRegex(RowSynthError, "empty"):
+            pitch_at([], 0.0)
+
+    def test_more_than_one_row_is_an_error(self):
+        with self.assertRaisesRegex(RowSynthError, "one row"):
+            pitch_at(np.zeros((2, 4410)), 0.0)
 
 
 if __name__ == "__main__":
