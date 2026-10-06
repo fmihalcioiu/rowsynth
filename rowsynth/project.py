@@ -4,26 +4,40 @@ from __future__ import annotations
 
 import copy
 import json
+import re
 from pathlib import Path
 from typing import NoReturn
 
 from .errors import RowSynthError
 
-_TABLES = ("instruments",)
+_TABLES = ("instruments", "sounds")
 _WAVES = ("pulse", "saw", "tri", "noise", "fm")
+_NOTE = re.compile(r"[a-g][#b]?\d", re.IGNORECASE)
 
 
 class Project:
-    """The instruments of a project, by name."""
+    """The instruments and sounds of a project, by name."""
 
     def __init__(self) -> None:
         self.instruments: dict = {}
+        self.sounds: dict = {}
         self._keys: list[str] = []
 
     def __eq__(self, other: object) -> bool:
         if not isinstance(other, Project):
             return NotImplemented
         return all(getattr(self, key) == getattr(other, key) for key in _TABLES)
+
+    def sound(self, name: str) -> dict:
+        """A copy of one sound with every instrument it names written out in full, ready to render."""
+        if name not in self.sounds:
+            raise RowSynthError(f"no sound named {name!r}")
+        entry = copy.deepcopy(self.sounds[name])
+        for defn in _sounds_in(entry):
+            for voice in defn["voices"]:
+                if isinstance(voice["inst"], str):
+                    voice["inst"] = copy.deepcopy(self.instruments[voice["inst"]])
+        return entry
 
     def to_dict(self) -> dict:
         """The project as plain data: the tables it was loaded with, in their order, then any filled since."""
@@ -80,6 +94,15 @@ def _number(value: object, where: str) -> None:
         _fail(where, "must be a number")
 
 
+def _numbers(value: object, where: str) -> None:
+    """One number, or a list of them."""
+    if isinstance(value, list):
+        for i, item in enumerate(value):
+            _number(item, f"{where}[{i}]")
+    else:
+        _number(value, where)
+
+
 def _whole(value: object, where: str, low: int | None = None, high: int | None = None) -> None:
     """A whole number, from `low` to `high` when those are given."""
     span = "" if low is None else f" from {low} to {high}"
@@ -114,6 +137,8 @@ def _project(data: object) -> None:
     instruments = data.get("instruments", {})
     for name, inst in instruments.items():
         _instrument(inst, f"instruments.{name}")
+    for name, entry in data.get("sounds", {}).items():
+        _entry(entry, f"sounds.{name}", instruments)
 
 
 def _steps(table: object, where: str, low: int | None = None, high: int | None = None) -> None:
@@ -180,3 +205,90 @@ def _instrument(inst: object, where: str) -> None:
         "fb": _number,
         "ops": _ops,
     })
+
+
+def _inst(value: object, where: str, instruments: dict) -> None:
+    """An instrument where one is used: a dict of its own, or the name of one of the project's."""
+    if not isinstance(value, str):
+        _instrument(value, where)
+    elif value not in instruments:
+        _fail(where, f"no instrument named {value!r}")
+
+
+def _note(value: object, where: str) -> None:
+    """A note: a number, or a name made of a letter, a sharp or a flat if it has one, and an octave digit."""
+    if isinstance(value, str):
+        if _NOTE.fullmatch(value):
+            return
+    elif isinstance(value, (int, float)) and not isinstance(value, bool):
+        return
+    _fail(where, f"must be a number or a note name such as 'c#4', not {value!r}")
+
+
+def _sound(defn: object, where: str, instruments: dict) -> None:
+    """One sound: voices playing notes, its level and its echo."""
+    _record(defn, where, {
+        "voices": _list,
+        "gain": _number,
+        "echo": lambda echo, at: _record(
+            echo, at, {"time": _numbers, "feedback": _number, "mix": _number, "lp": _number}, ("time",)),
+    }, ("voices",))
+    for i, voice in enumerate(defn["voices"]):
+        at = f"{where}.voices[{i}]"
+        _record(voice, at, {"inst": lambda inst, at: _inst(inst, at, instruments), "notes": _list}, ("inst", "notes"))
+        for j, note in enumerate(voice["notes"]):
+            spot = f"{at}.notes[{j}]"
+            _list(note, spot)
+            if len(note) not in (3, 4):
+                _fail(spot, "must be [tick, note, ticks] or [tick, note, ticks, velocity]")
+            for k, check in enumerate((_number, _note, _number, _number)[:len(note)]):
+                check(note[k], f"{spot}[{k}]")
+
+
+def _entry(entry: object, where: str, instruments: dict) -> None:
+    """A bank entry: one sound, variants of one, parts on a timeline or a held sound, and what goes with it."""
+    def sound(defn: object, at: str) -> None:
+        _sound(defn, at, instruments)
+
+    held = {"note": sound, "start": _number, "loop": _number, "join": _number, "end": sound, "let_go": _number}
+    _record(entry, where, {
+        "def": sound,
+        "defs": _list,
+        "parts": _list,
+        "held": lambda value, at: _record(value, at, held, tuple(held)),
+        "db": _numbers,
+        "meta": _dict,
+        "check": _list,
+        "max_seconds": _number,
+        "max_dc": _number,
+        "max_bright": _number,
+    })
+    if sum(key in entry for key in ("def", "defs", "parts", "held")) != 1:
+        _fail(where, "must hold one of 'def', 'defs', 'parts' and 'held', and only one")
+    for key in ("defs", "parts"):
+        if key in entry and not entry[key]:
+            _fail(f"{where}.{key}", "must hold at least one")
+    for i, defn in enumerate(entry.get("defs", [])):
+        sound(defn, f"{where}.defs[{i}]")
+    for i, part in enumerate(entry.get("parts", [])):
+        at = f"{where}.parts[{i}]"
+        _list(part, at)
+        if len(part) != 2:
+            _fail(at, "must be [seconds, entry]")
+        _number(part[0], f"{at}[0]")
+        _entry(part[1], f"{at}[1]", instruments)
+    levels = entry.get("db")
+    if isinstance(levels, list) and ("defs" not in entry or len(levels) != len(entry["defs"])):
+        _fail(f"{where}.db", "a list of levels must hold one for each of 'defs'")
+    for i, mark in enumerate(entry.get("check", [])):
+        _record(mark, f"{where}.check[{i}]", {"at": _number, "note": _note}, ("at", "note"))
+
+
+def _sounds_in(entry: dict) -> list[dict]:
+    """Every sound a bank entry holds, whichever form it has."""
+    found = [entry["def"]] if "def" in entry else list(entry.get("defs", []))
+    for _, part in entry.get("parts", []):
+        found += _sounds_in(part)
+    if "held" in entry:
+        found += [entry["held"]["note"], entry["held"]["end"]]
+    return found
