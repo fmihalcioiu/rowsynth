@@ -20,6 +20,9 @@ _WAVES = ("pulse", "saw", "tri", "noise")
 # The share of the way to its target that the level covers in one sample at 44100 Hz.
 _SLEW = 0.012
 
+# The highest cutoff the low-pass is given, in hertz.
+_TOP_CUTOFF = 18000
+
 
 def step(seq, tick: int, fallback: float) -> float:
     """The value of a step table at a tick.
@@ -50,19 +53,23 @@ def step(seq, tick: int, fallback: float) -> float:
     return float(value)
 
 
-def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty):
+def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp):
     """Adds a note to out: tick t fills the samples from edges[t] up to edges[t + 1], as far as out reaches.
 
     level is the loudness each tick heads for. Every sample the loudness covers the share slew of what is left
     to go. state, wave, rate and short are the oscillator's, and freq and duty its frequency and the width of
-    its pulse at each tick.
+    its pulse at each tick. lp is the low-pass at each tick: the share of the way to its input that each of
+    its two stages covers in a sample, which is 1 when there is nothing to take off.
     """
     size = out.shape[0]
     last = 0.0
+    low1 = 0.0
+    low2 = 0.0
     for tick in range(level.shape[0]):
         target = float(level[tick])
         hertz = float(freq[tick])
         width = float(duty[tick])
+        ease = float(lp[tick])
         for i in range(edges[tick], min(edges[tick + 1], size)):
             # A loudness that jumped would click.
             last += (target - last) * slew
@@ -74,6 +81,11 @@ def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty):
                 v = _k_tri(state, hertz, rate)
             else:
                 v = _k_noise(state, hertz, rate, short)
+            if ease < 1.0:
+                # Two poles, one feeding the other: 12 dB off for each octave above the cutoff.
+                low1 += (v - low1) * ease
+                low2 += (low1 - low2) * ease
+                v = low2
             out[i] = float(out[i]) + v * last
 
 
@@ -171,6 +183,7 @@ _KEYS = {
     "release": _length,
     "gain": _number,
     "short": _flag,
+    "lp": _steps,
     "key_scale": _number,
     "gate": _unread,
 }
@@ -218,6 +231,7 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     level = np.zeros(count)
     freq = np.zeros(count)
     duty = np.zeros(count)
+    lp = np.ones(count)
     sweep = 0.0
     for tick in range(count):
         vol = step(inst.get("vol"), tick, 15) / 15
@@ -233,9 +247,12 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
         semis = note + step(inst.get("arp"), tick, 0) + sweep + wobble + inst.get("slide", 0) * (tick / TICK_HZ)
         freq[tick] = _noise_rate(semis) if wave == "noise" else hz(semis)
         duty[tick] = DUTY[int(step(inst.get("duty"), tick, 2))]
+        cutoff = step(inst.get("lp"), tick, 0)
+        if cutoff > 0:
+            lp[tick] = 1 - math.exp((-2 * math.pi * min(cutoff, _TOP_CUTOFF)) / rate)
     edges = np.floor(at + np.arange(count + 1) * tick_samples + 0.5).astype(np.int64)
     # The level takes the same length of time to arrive at any rate.
     slew = 1 - (1 - _SLEW) ** (DEFAULT_RATE / rate)
     short = 1 if inst.get("short", False) else 0
-    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty)
+    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty, lp)
     return at + math.floor(total * tick_samples + 0.5)

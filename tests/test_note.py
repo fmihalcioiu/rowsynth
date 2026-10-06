@@ -57,6 +57,17 @@ def share_high(samples: np.ndarray) -> float:
     return float(-samples.min() / (samples.max() - samples.min()))
 
 
+def share_above(samples: np.ndarray, hertz: float) -> float:
+    """The share of the samples' energy that lies above a frequency."""
+    energy = np.abs(np.fft.rfft(samples)) ** 2
+    return float(energy[np.fft.rfftfreq(len(samples), 1 / RATE) > hertz].sum() / energy.sum())
+
+
+def decibels(samples: np.ndarray, beside: np.ndarray) -> float:
+    """How much louder the samples are than those beside them, in decibels."""
+    return 10 * math.log10(float(np.mean(samples ** 2)) / float(np.mean(beside ** 2)))
+
+
 class ConstantsTest(unittest.TestCase):
     def test_sixty_ticks_a_second(self):
         self.assertEqual(TICK_HZ, 60)
@@ -399,6 +410,81 @@ class KeyScaleTest(unittest.TestCase):
         np.testing.assert_allclose(play({"key_scale": -6, "arp": 12}, 60), play({"arp": 12}, 60), rtol=0, atol=1e-6)
 
 
+class LowPassTest(unittest.TestCase):
+    def test_makes_noise_darker_the_lower_its_cutoff(self):
+        shares = [share_above(play({"wave": "noise", "release": 0, **lp}, 81, ticks=12), 1000.0)
+                  for lp in ({}, {"lp": 2000}, {"lp": 1000}, {"lp": 500}, {"lp": 250})]
+        self.assertGreater(shares[0], 0.6)
+        self.assertLess(shares[3], 0.05)
+        self.assertTrue(all(lower < higher for higher, lower in zip(shares, shares[1:])), shares)
+
+    def test_takes_6_decibels_off_a_tone_at_its_cutoff(self):
+        got = play({"wave": "tri", "lp": 440, "release": 0}, 69, ticks=12)
+        plain = play({"wave": "tri", "release": 0}, 69, ticks=12)
+        self.assertAlmostEqual(decibels(got[400:], plain[400:]), -6.0, delta=0.5)
+
+    def test_takes_12_decibels_more_off_for_each_octave_above_its_cutoff(self):
+        for wave in ("pulse", "saw", "tri"):
+            two_above = play({"wave": wave, "lp": 55, "release": 0}, 57, ticks=12)
+            three_above = play({"wave": wave, "lp": 55, "release": 0}, 69, ticks=12)
+            self.assertAlmostEqual(decibels(two_above[400:], three_above[400:]), 12.0, delta=1.0, msg=wave)
+
+    def test_leaves_a_tone_far_below_its_cutoff_as_loud_as_it_was(self):
+        got = play({"wave": "tri", "lp": 3500, "release": 0}, 45, ticks=12)
+        plain = play({"wave": "tri", "release": 0}, 45, ticks=12)
+        self.assertAlmostEqual(decibels(got, plain), 0.0, delta=0.1)
+
+    def test_cutoff_of_0_or_less_is_wide_open(self):
+        for wave in ("pulse", "noise"):
+            plain = play({"wave": wave})
+            for lp in (0, -300, [0], []):
+                self.assertTrue(np.array_equal(play({"wave": wave, "lp": lp}), plain), (wave, lp))
+            self.assertFalse(np.array_equal(play({"wave": wave, "lp": 300}), plain), wave)
+
+    def test_number_is_the_cutoff_of_every_tick(self):
+        self.assertTrue(np.array_equal(play({"lp": 300}), play({"lp": [300, 300, 300, 300, 300, 300]})))
+
+    def test_list_sets_the_cutoff_of_each_tick(self):
+        got = play({"wave": "noise", "lp": [0, 300, 0, 2000], "release": 0}, 81)
+        plain = play({"wave": "noise", "release": 0}, 81)
+        for tick in (0, 2):
+            self.assertTrue(np.array_equal(tick_of(got, tick), tick_of(plain, tick)), tick)
+        self.assertGreater(share_above(tick_of(plain, 1), 1000.0), 0.5)
+        self.assertLess(share_above(tick_of(got, 1), 1000.0), 0.05)
+        self.assertGreater(share_above(tick_of(got, 3), 1000.0), 0.2)
+        self.assertLess(share_above(tick_of(got, 3), 1000.0), 0.75 * share_above(tick_of(plain, 3), 1000.0))
+
+    def test_list_holds_its_last_cutoff(self):
+        got = play({"wave": "noise", "lp": [0, 300], "release": 0}, 81)
+        plain = play({"wave": "noise", "release": 0}, 81)
+        self.assertTrue(np.array_equal(got[:133], plain[:133]))
+        for tick in (1, 2, 3):
+            self.assertLess(share_above(tick_of(got, tick), 1000.0), 0.05, tick)
+
+    def test_loop_goes_round(self):
+        got = play({"wave": "noise", "lp": {"v": [0, 300], "loop": 0}, "release": 0}, 81, ticks=6)
+        plain = play({"wave": "noise", "release": 0}, 81, ticks=6)
+        for tick in (0, 2, 4):
+            self.assertTrue(np.array_equal(tick_of(got, tick), tick_of(plain, tick)), tick)
+        for tick in (1, 3, 5):
+            self.assertLess(share_above(tick_of(got, tick), 1000.0), 0.05, tick)
+
+    def test_no_cutoff_is_set_above_18000_hertz(self):
+        def hiss(lp: float) -> np.ndarray:
+            return play({"wave": "noise", "lp": lp, "release": 0}, 105, ticks=1, rate=44100)
+
+        self.assertTrue(np.array_equal(hiss(40000), hiss(18000)))
+        self.assertFalse(np.array_equal(hiss(15000), hiss(18000)))
+
+    def test_level_is_laid_on_after_the_low_pass(self):
+        # A vol step is not smoothed away: the same filtered wave comes out under either level.
+        stepped = play({"wave": "saw", "lp": 300, "vol": [15, 4, 9]})
+        steady = play({"wave": "saw", "lp": 300})
+        stepped_level = np.abs(play({"wave": "noise", "vol": [15, 4, 9]}))
+        steady_level = np.abs(play(HISS))
+        np.testing.assert_allclose(stepped * steady_level, steady * stepped_level, rtol=0, atol=1e-6)
+
+
 class BufferTest(unittest.TestCase):
     def test_adds_to_what_is_there(self):
         inst = {"wave": "tri", "vol": [15, 8]}
@@ -523,6 +609,25 @@ class KnownSamplesTest(unittest.TestCase):
                          (369, 0.960000), (370, 0.960000), (500, 0.946809), (700, -0.213410), (918, -0.106681),
                          (919, 0.0)))
 
+    def test_noise_through_a_low_pass_that_moves_and_opens(self):
+        out = np.zeros(670, dtype=np.float32)
+        end = render_note(out, 0, {"wave": "noise", "lp": [600, 2400, 0, 9000], "release": 1}, 81.0, 4, 1.0, RATE)
+        self.assertEqual(end, 667)
+        self.check(out, ((0, 0.009091), (1, 0.039567), (2, 0.087335), (3, 0.144889), (4, 0.205818), (50, 0.796265),
+                         (132, 0.858069), (133, 0.972062), (134, -0.443885), (135, 0.562092), (200, -0.462857),
+                         (266, -0.438765), (267, 1.0), (268, 1.0), (399, 1.0), (400, -0.999264), (401, -0.999999),
+                         (402, 0.996596), (600, 0.503695), (666, 0.500065), (667, 0.0)))
+
+    def test_saw_through_a_looping_low_pass_at_11025_hz(self):
+        inst = {"wave": "saw", "lp": {"v": [3000, 400], "loop": 0}, "vol": [15, 10]}
+        out = np.zeros(920, dtype=np.float32)
+        end = render_note(out, 0, inst, 52.0, 3, 1.0, 11025)
+        self.assertEqual(end, 919)
+        self.check(out, ((0, 0.0), (1, -0.059918), (2, -0.116831), (3, -0.158589), (100, -0.023211), (183, 0.458098),
+                         (184, 0.453719), (185, 0.451402), (186, 0.451404), (300, -0.170676), (367, -0.168389),
+                         (368, -0.043465), (369, 0.004291), (500, -0.042741), (600, 0.327519), (800, 0.209496),
+                         (918, 0.096309), (919, 0.0)))
+
 
 class ErrorTest(unittest.TestCase):
     def refused(self, inst: object = None, out: object = None, at: object = 0, note: object = 69.0,
@@ -594,6 +699,13 @@ class ErrorTest(unittest.TestCase):
         for key in ("slide", "key_scale"):
             for value in ("1", None, True, [1], {"v": [1]}, float("inf")):
                 self.begins(key, self.refused({key: value}), repr(value))
+
+    def test_refuses_an_lp_that_is_not_a_step_table(self):
+        for lp in ("300", None, True, {"v": 300}, {"loop": 0}, float("inf")):
+            self.begins("lp", self.refused({"lp": lp}), repr(lp))
+        self.begins("lp[1]", self.refused({"lp": [300, "0"]}))
+        self.begins("lp.v[0]", self.refused({"lp": {"v": [None], "loop": 0}}))
+        self.begins("lp.loop", self.refused({"lp": {"v": [300, 0], "loop": 1.5}}))
 
     def test_refuses_a_release_that_is_not_a_length_of_time(self):
         for release in ("2", None, True, [2], -1, -0.5, float("nan"), float("inf")):
