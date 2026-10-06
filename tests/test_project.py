@@ -84,12 +84,84 @@ SOUNDS = {
         "db": -9,
     },
 }
-PROJECT = {"instruments": INSTRUMENTS, "sounds": SOUNDS}
+CHORDS = {
+    "Am": {"root": 9, "tones": [9, 0, 4]},
+    "F": {"root": 5, "tones": [5, 9, 0]},
+    "G7": {"root": 7, "tones": [7, 11, 2, 5]},
+    "C": {"root": 0, "tones": [0, 4, 7]},
+}
+SONGS = {
+    "tune": {
+        "row_ticks": 6,
+        "rows_per_beat": 4,
+        "gain": 0.3,
+        "instruments": {
+            "organ": {"wave": "saw", "vol": [9, 8, 7], "lp": 1500, "gate": 1},
+            "deep": {"wave": "pulse", "duty": 1, "vol": 13},
+            "glass": "bell",
+            "thud": {"wave": "tri", "pitch": [0, -6, -12], "vol": [15, 10, 0]},
+        },
+        "drums": {
+            "k": {"inst": "thud", "note": "c2"},
+            "s": {"inst": "hiss", "note": 62, "rows": 2, "vel": 0.8},
+            "h": {"inst": "hiss", "note": "a6", "rows": 1},
+        },
+        "channels": {
+            "melody": {"inst": "reed", "gain": 0.9, "pan": 0.2, "echo": {"rows": 3, "gain": 0.4}},
+            "under": {"inst": "deep", "gain": 1, "pan": -0.1},
+            "wash": {"inst": "organ"},
+            "taps": {"inst": "thud", "gain": 0.8, "drums": True},
+        },
+        "patterns": {
+            "a": {
+                "melody": "o4 l8 a > c e c < b > c e4 | @glass f4 a4 @reed g2",
+                "under": "o2 l4 a a a a | f f g g",
+                "wash": "o3 l1 a | f2 g2",
+                "taps": "l8 k h s h k h s h | k h s h k k s4",
+            },
+            "b": {
+                "melody": "o5 l4 c e g e | d < b > d2",
+                "under": "o2 l2 c c | g g",
+                "wash": "o3 l1 c | g",
+                "taps": "l4 k s k s | k s k8 k8 s",
+            },
+            "lead_in": {"melody": "o4 l16 e g a > c e4 r2", "taps": "l4 r r r s8 s8"},
+        },
+        "order": ["a", "b", "a"],
+        "chords": {"a": ["Am", "F G7"], "b": ["C", "G7"]},
+        "layers": {
+            "groups": {"kit": ["taps"], "roots": ["under"], "upper": ["melody", "wash"]},
+            "versions": {"sparse": ["kit", "roots"], "dense": ["kit", "roots", "upper"]},
+            "keys": [0, 2],
+            "premix": [{"version": "sparse", "key": 0}, {"version": "dense", "key": 2}],
+        },
+        "intro": {"order": ["lead_in"], "tail": 1.5, "fade": 0.05},
+    },
+    "jingle": {
+        "row_ticks": 5,
+        "channels": {"one": {"inst": "reed"}},
+        "patterns": {"x": {"one": "l8 c e g > c4."}},
+        "order": ["x"],
+    },
+}
+PROJECT = {"instruments": INSTRUMENTS, "chords": CHORDS, "sounds": SOUNDS, "songs": SONGS}
 
 
 def sound_of(inst: object = "reed", notes: object = None, **more: object) -> dict:
     """A sound of one voice, for the tests that spoil one part of it."""
     return {"voices": [{"inst": inst, "notes": [[0, "c4", 6]] if notes is None else notes}], **more}
+
+
+def song_of(**changes: object) -> dict:
+    """A song of two channels and two patterns, for the tests that spoil one part of it."""
+    song = {
+        "row_ticks": 6,
+        "drums": {"k": {"inst": "hiss", "note": "c2"}, "s": {"inst": "hiss", "note": "c4"}},
+        "channels": {"one": {"inst": "reed"}, "kit": {"inst": "hiss", "drums": True}},
+        "patterns": {"x": {"one": "o4 l4 c e g e", "kit": "l4 k s k s"}, "y": {"one": "o4 l1 c"}},
+        "order": ["x", "y", "x"],
+    }
+    return {**song, **changes}
 
 
 class ProjectCase(unittest.TestCase):
@@ -105,6 +177,9 @@ class ProjectCase(unittest.TestCase):
 
     def sound_refused(self, entry: object, message: str) -> None:
         self.refused({"instruments": INSTRUMENTS, "sounds": {"coin": entry}}, "sounds.coin" + message)
+
+    def song_refused(self, song: object, message: str) -> None:
+        self.refused({"instruments": INSTRUMENTS, "chords": CHORDS, "songs": {"tune": song}}, "songs.tune" + message)
 
 
 class Loading(ProjectCase):
@@ -429,6 +504,275 @@ class RefusedSounds(ProjectCase):
         for key in ("max_seconds", "max_dc", "max_bright"):
             with self.subTest(key=key):
                 self.sound_refused({"def": sound_of(), key: "1"}, f".{key}: must be a number")
+
+
+class Songs(ProjectCase):
+    def test_a_project_with_chords_and_songs_loads(self) -> None:
+        project = Project.from_dict(PROJECT)
+        self.assertEqual(project.chords, CHORDS)
+        self.assertEqual(project.songs, SONGS)
+
+    def test_song_lays_its_own_instruments_over_the_projects(self) -> None:
+        table = Project.from_dict(PROJECT).song("tune")["instruments"]
+        self.assertEqual(list(table), ["reed", "deep", "buzz", "hiss", "bell", "plain", "organ", "glass", "thud"])
+        self.assertEqual(table["reed"], INSTRUMENTS["reed"])
+        self.assertEqual(table["deep"], SONGS["tune"]["instruments"]["deep"])
+        self.assertEqual(table["organ"], SONGS["tune"]["instruments"]["organ"])
+
+    def test_song_writes_out_an_instrument_of_its_own_that_names_one_of_the_projects(self) -> None:
+        table = Project.from_dict(PROJECT).song("tune")["instruments"]
+        self.assertEqual(table["glass"], INSTRUMENTS["bell"])
+        self.assertIsNot(table["glass"], table["bell"])
+
+    def test_song_changes_nothing_but_its_instruments(self) -> None:
+        tune = Project.from_dict(PROJECT).song("tune")
+        tune["instruments"] = SONGS["tune"]["instruments"]
+        self.assertEqual(json.dumps(tune), json.dumps(SONGS["tune"]))
+
+    def test_every_instrument_a_song_names_is_a_dict_in_its_table(self) -> None:
+        tune = Project.from_dict(PROJECT).song("tune")
+        named = [channel["inst"] for channel in tune["channels"].values()]
+        named += [drum["inst"] for drum in tune["drums"].values()]
+        named += ["glass", "reed"]
+        self.assertEqual(sorted(set(named)), ["deep", "glass", "hiss", "organ", "reed", "thud"])
+        for name in named:
+            self.assertIsInstance(tune["instruments"][name], dict)
+
+    def test_a_song_with_no_instruments_of_its_own_gets_the_projects(self) -> None:
+        jingle = Project.from_dict(PROJECT).song("jingle")
+        self.assertEqual(jingle["instruments"], INSTRUMENTS)
+        self.assertEqual(jingle["order"], ["x"])
+
+    def test_changing_what_song_returns_never_changes_the_project(self) -> None:
+        project = Project.from_dict(PROJECT)
+        tune = project.song("tune")
+        tune["instruments"]["reed"]["vol"].append(0)
+        tune["instruments"]["glass"]["alg"] = 0
+        tune["instruments"]["organ"]["wave"] = "tri"
+        del tune["instruments"]["deep"]
+        tune["patterns"]["a"]["under"] = "r1"
+        tune["order"].append("b")
+        tune["layers"]["keys"].append(5)
+        self.assertEqual(project.to_dict(), PROJECT)
+        self.assertEqual(project.song("tune")["instruments"]["glass"], INSTRUMENTS["bell"])
+
+    def test_asking_for_a_song_the_project_does_not_hold_is_refused(self) -> None:
+        with self.assertRaises(RowSynthError) as caught:
+            Project.from_dict(PROJECT).song("march")
+        self.assertEqual(str(caught.exception), "no song named 'march'")
+
+
+class RefusedSongs(ProjectCase):
+    def channel_refused(self, channel: object, message: str) -> None:
+        channels = {"one": channel, "kit": {"inst": "hiss", "drums": True}}
+        self.song_refused(song_of(channels=channels), ".channels.one" + message)
+
+    def layers_refused(self, changes: dict, message: str) -> None:
+        layers = {
+            "groups": {"hits": ["kit"], "lines": ["one"]},
+            "versions": {"bare": ["hits"], "both": ["hits", "lines"]},
+            "keys": [0, 3],
+        }
+        self.song_refused(song_of(layers={**layers, **changes}), ".layers" + message)
+
+    def test_a_songs_table_that_is_not_a_dict_is_refused(self) -> None:
+        self.refused({"songs": [song_of()]}, "songs: must be a dict")
+
+    def test_a_song_that_is_not_a_dict_is_refused(self) -> None:
+        self.song_refused("c d e", ": must be a dict")
+
+    def test_an_unknown_song_key_is_refused_by_name(self) -> None:
+        self.song_refused(song_of(tempo=120), ": unknown key 'tempo'")
+        self.song_refused(song_of(rowsPerBeat=4), ": unknown key 'rowsPerBeat'")
+
+    def test_a_song_without_its_ticks_channels_patterns_or_order_is_refused(self) -> None:
+        for key in ("row_ticks", "channels", "patterns", "order"):
+            with self.subTest(key=key):
+                rest = {name: value for name, value in song_of().items() if name != key}
+                self.song_refused(rest, f": missing key {key!r}")
+
+    def test_a_song_value_that_is_not_a_number_is_refused(self) -> None:
+        for key in ("row_ticks", "rows_per_beat", "gain"):
+            with self.subTest(key=key):
+                self.song_refused(song_of(**{key: "6"}), f".{key}: must be a number")
+
+    def test_a_songs_own_instrument_is_checked_like_any_other(self) -> None:
+        self.song_refused(song_of(instruments=["organ"]), ".instruments: must be a dict")
+        self.song_refused(song_of(instruments={"organ": 3}), ".instruments.organ: must be a dict")
+        self.song_refused(
+            song_of(instruments={"organ": {"wave": "sine"}}),
+            ".instruments.organ.wave: must be one of 'pulse', 'saw', 'tri', 'noise', 'fm', not 'sine'")
+
+    def test_a_songs_own_instrument_naming_one_the_project_does_not_hold_is_refused(self) -> None:
+        self.song_refused(song_of(instruments={"glass": "gong"}), ".instruments.glass: no instrument named 'gong'")
+        own = {"organ": {"wave": "saw"}, "glass": "organ"}
+        self.song_refused(song_of(instruments=own), ".instruments.glass: no instrument named 'organ'")
+
+    def test_drums_of_the_wrong_shape_are_refused(self) -> None:
+        drum = {"inst": "hiss", "note": "c2"}
+        for drums, message in (
+            ([drum], ": must be a dict"),
+            ({"k": drum, "x": drum}, ": unknown key 'x'"),
+            ({"k": "hiss"}, ".k: must be a dict"),
+            ({"s": {"note": "c2"}}, ".s: missing key 'inst'"),
+            ({"h": {"inst": "hiss"}}, ".h: missing key 'note'"),
+            ({"H": {**drum, "pan": 0}}, ".H: unknown key 'pan'"),
+            ({"t": {**drum, "note": "x2"}}, ".t.note: must be a number or a note name such as 'c#4', not 'x2'"),
+            ({"k": {**drum, "rows": "2"}}, ".k.rows: must be a number"),
+            ({"k": {**drum, "vel": [1]}}, ".k.vel: must be a number"),
+        ):
+            with self.subTest(drums=drums):
+                self.song_refused(song_of(drums=drums), ".drums" + message)
+
+    def test_a_drum_naming_an_instrument_the_song_cannot_reach_is_refused(self) -> None:
+        self.song_refused(
+            song_of(drums={"k": {"inst": "thud", "note": "c2"}}), ".drums.k.inst: no instrument named 'thud'")
+        self.song_refused(
+            song_of(drums={"k": {"inst": {"wave": "tri"}, "note": "c2"}}), ".drums.k.inst: must be a string")
+
+    def test_channels_of_the_wrong_shape_are_refused(self) -> None:
+        self.song_refused(song_of(channels=["one", "kit"]), ".channels: must be a dict")
+        self.channel_refused("reed", ": must be a dict")
+        self.channel_refused({"gain": 1}, ": missing key 'inst'")
+        self.channel_refused({"inst": "reed", "volume": 1}, ": unknown key 'volume'")
+        self.channel_refused({"inst": "reed", "gain": "1"}, ".gain: must be a number")
+        self.channel_refused({"inst": "reed", "pan": "left"}, ".pan: must be a number")
+        self.channel_refused({"inst": "reed", "drums": "yes"}, ".drums: must be true or false")
+
+    def test_a_channel_naming_an_instrument_the_song_cannot_reach_is_refused(self) -> None:
+        self.channel_refused({"inst": "organ"}, ".inst: no instrument named 'organ'")
+        self.channel_refused({"inst": {"wave": "saw"}}, ".inst: must be a string")
+
+    def test_an_instrument_of_another_song_is_out_of_reach(self) -> None:
+        first = song_of(instruments={"organ": {"wave": "saw"}})
+        second = song_of(channels={"one": {"inst": "organ"}, "kit": {"inst": "hiss", "drums": True}})
+        self.refused(
+            {"instruments": INSTRUMENTS, "songs": {"first": first, "second": second}},
+            "songs.second.channels.one.inst: no instrument named 'organ'")
+
+    def test_a_channel_echo_of_the_wrong_shape_is_refused(self) -> None:
+        for echo, message in (
+            (3, ": must be a dict"),
+            ({"gain": 0.4}, ": missing key 'rows'"),
+            ({"rows": 3}, ": missing key 'gain'"),
+            ({"rows": 3, "gain": 0.4, "lp": 900}, ": unknown key 'lp'"),
+            ({"rows": "3", "gain": 0.4}, ".rows: must be a number"),
+            ({"rows": 3, "gain": None}, ".gain: must be a number"),
+        ):
+            with self.subTest(echo=echo):
+                self.channel_refused({"inst": "reed", "echo": echo}, ".echo" + message)
+
+    def test_patterns_of_the_wrong_shape_are_refused(self) -> None:
+        self.song_refused(song_of(patterns=["x", "y"]), ".patterns: must be a dict")
+        self.song_refused(song_of(patterns={"x": "c d e", "y": {}}), ".patterns.x: must be a dict")
+        self.song_refused(song_of(patterns={"x": {}, "y": {"one": ["c", "d"]}}), ".patterns.y.one: must be a string")
+
+    def test_a_pattern_naming_a_channel_the_song_does_not_hold_is_refused(self) -> None:
+        self.song_refused(
+            song_of(patterns={"x": {"one": "c"}, "y": {"one": "c", "two": "e"}}),
+            ".patterns.y: no channel named 'two'")
+
+    def test_an_instrument_named_in_pattern_text_that_the_song_cannot_reach_is_refused(self) -> None:
+        self.song_refused(
+            song_of(patterns={"x": {"one": "c d @bell e @gong f"}, "y": {}}),
+            ".patterns.x.one: no instrument named 'gong'")
+
+    def test_an_order_of_the_wrong_shape_is_refused(self) -> None:
+        self.song_refused(song_of(order="x y"), ".order: must be a list")
+        self.song_refused(song_of(order=["x", 2]), ".order[1]: must be a string")
+
+    def test_an_order_naming_a_pattern_the_song_does_not_hold_is_refused(self) -> None:
+        self.song_refused(song_of(order=["x", "y", "c"]), ".order[2]: no pattern named 'c'")
+
+    def test_a_songs_chords_of_the_wrong_shape_are_refused(self) -> None:
+        self.song_refused(song_of(chords=["Am"]), ".chords: must be a dict")
+        self.song_refused(song_of(chords={"x": "Am F"}), ".chords.x: must be a list")
+        self.song_refused(song_of(chords={"x": ["Am", 7]}), ".chords.x[1]: must be a string")
+
+    def test_chords_for_a_pattern_the_song_does_not_hold_are_refused(self) -> None:
+        self.song_refused(song_of(chords={"x": ["Am"], "z": ["F"]}), ".chords: no pattern named 'z'")
+
+    def test_a_bar_naming_a_chord_the_project_does_not_hold_is_refused(self) -> None:
+        self.song_refused(song_of(chords={"x": ["Am", "F  Dm7"]}), ".chords.x[1]: no chord named 'Dm7'")
+
+    def test_layers_of_the_wrong_shape_are_refused(self) -> None:
+        self.song_refused(song_of(layers=["one", "kit"]), ".layers: must be a dict")
+        self.layers_refused({"mode": "stack"}, ": unknown key 'mode'")
+        self.layers_refused({"groups": ["kit", "one"]}, ".groups: must be a dict")
+        self.layers_refused({"groups": {"hits": "kit", "lines": ["one"]}}, ".groups.hits: must be a list")
+        self.layers_refused({"versions": ["bare"]}, ".versions: must be a dict")
+        self.layers_refused({"versions": {"bare": "hits"}}, ".versions.bare: must be a list")
+        self.layers_refused({"keys": 2}, ".keys: must be a list")
+
+    def test_layers_without_groups_versions_or_keys_are_refused(self) -> None:
+        layers = {"groups": {"each": ["one", "kit"]}, "versions": {"entire": ["each"]}, "keys": [0]}
+        for key in layers:
+            with self.subTest(key=key):
+                rest = {name: value for name, value in layers.items() if name != key}
+                self.song_refused(song_of(layers=rest), f".layers: missing key {key!r}")
+
+    def test_a_group_naming_a_channel_the_song_does_not_hold_is_refused(self) -> None:
+        self.layers_refused(
+            {"groups": {"hits": ["kit"], "lines": ["one", "two"]}}, ".groups.lines[1]: no channel named 'two'")
+        self.layers_refused({"groups": {"hits": ["kit"], "lines": [1]}}, ".groups.lines[0]: must be a string")
+
+    def test_a_version_naming_a_group_the_song_does_not_hold_is_refused(self) -> None:
+        self.layers_refused({"versions": {"both": ["hits", "strings"]}}, ".versions.both[1]: no group named 'strings'")
+
+    def test_a_key_that_is_not_a_whole_number_is_refused(self) -> None:
+        self.layers_refused({"keys": [0, 2.5]}, ".keys[1]: must be a whole number")
+        self.layers_refused({"keys": ["0"]}, ".keys[0]: must be a whole number")
+
+    def test_a_premix_of_the_wrong_shape_is_refused(self) -> None:
+        for premix, message in (
+            ({"version": "both", "key": 0}, ": must be a list"),
+            (["both"], "[0]: must be a dict"),
+            ([{"key": 0}], "[0]: missing key 'version'"),
+            ([{"version": "both"}], "[0]: missing key 'key'"),
+            ([{"version": "both", "key": 0, "gain": 1}], "[0]: unknown key 'gain'"),
+            ([{"version": "both", "key": "0"}], "[0].key: must be a whole number"),
+            ([{"version": ["both"], "key": 0}], "[0].version: must be a string"),
+        ):
+            with self.subTest(premix=premix):
+                self.layers_refused({"premix": premix}, ".premix" + message)
+
+    def test_a_premix_naming_a_version_the_song_does_not_hold_is_refused(self) -> None:
+        self.layers_refused(
+            {"premix": [{"version": "both", "key": 0}, {"version": "loud", "key": 0}]},
+            ".premix[1].version: no version named 'loud'")
+
+    def test_an_intro_of_the_wrong_shape_is_refused(self) -> None:
+        self.song_refused(song_of(intro=["y"]), ".intro: must be a dict")
+        self.song_refused(song_of(intro={"tail": 1}), ".intro: missing key 'order'")
+        self.song_refused(song_of(intro={"order": ["y"], "bars": 1}), ".intro: unknown key 'bars'")
+        self.song_refused(song_of(intro={"order": "y"}), ".intro.order: must be a list")
+        self.song_refused(song_of(intro={"order": ["y"], "tail": "1.5"}), ".intro.tail: must be a number")
+        self.song_refused(song_of(intro={"order": ["y"], "fade": True}), ".intro.fade: must be a number")
+
+    def test_an_intro_naming_a_pattern_the_song_does_not_hold_is_refused(self) -> None:
+        self.song_refused(song_of(intro={"order": ["y", "start"]}), ".intro.order[1]: no pattern named 'start'")
+
+
+class RefusedChords(ProjectCase):
+    def chord_refused(self, chord: object, message: str) -> None:
+        self.refused({"chords": {"Am": chord}}, "chords.Am" + message)
+
+    def test_a_chords_table_that_is_not_a_dict_is_refused(self) -> None:
+        self.refused({"chords": ["Am"]}, "chords: must be a dict")
+
+    def test_a_chord_of_the_wrong_shape_is_refused(self) -> None:
+        self.chord_refused([9, 0, 4], ": must be a dict")
+        self.chord_refused({"tones": [9, 0, 4]}, ": missing key 'root'")
+        self.chord_refused({"root": 9}, ": missing key 'tones'")
+        self.chord_refused({"root": 9, "tones": [9, 0, 4], "fifth": 4}, ": unknown key 'fifth'")
+        self.chord_refused({"root": 9, "tones": 9}, ".tones: must be a list")
+
+    def test_a_root_or_a_tone_that_is_not_a_pitch_class_is_refused(self) -> None:
+        for root in (12, -1, 9.0, "a"):
+            with self.subTest(root=root):
+                self.chord_refused({"root": root, "tones": [0]}, ".root: must be a whole number from 0 to 11")
+        self.chord_refused({"root": 9, "tones": [9, 12]}, ".tones[1]: must be a whole number from 0 to 11")
+        self.chord_refused({"root": 9, "tones": ["a"]}, ".tones[0]: must be a whole number from 0 to 11")
 
 
 class Files(ProjectCase):

@@ -10,17 +10,20 @@ from typing import NoReturn
 
 from .errors import RowSynthError
 
-_TABLES = ("instruments", "sounds")
+_TABLES = ("instruments", "chords", "sounds", "songs")
 _WAVES = ("pulse", "saw", "tri", "noise", "fm")
 _NOTE = re.compile(r"[a-g][#b]?\d", re.IGNORECASE)
+_AT = re.compile(r"@(\w+)", re.ASCII)
 
 
 class Project:
-    """The instruments and sounds of a project, by name."""
+    """The instruments, chords, sounds and songs of a project, by name."""
 
     def __init__(self) -> None:
         self.instruments: dict = {}
         self.sounds: dict = {}
+        self.songs: dict = {}
+        self.chords: dict = {}
         self._keys: list[str] = []
 
     def __eq__(self, other: object) -> bool:
@@ -38,6 +41,17 @@ class Project:
                 if isinstance(voice["inst"], str):
                     voice["inst"] = copy.deepcopy(self.instruments[voice["inst"]])
         return entry
+
+    def song(self, name: str) -> dict:
+        """A copy of one song, ready to render: its instruments are the project's with its own laid over."""
+        if name not in self.songs:
+            raise RowSynthError(f"no song named {name!r}")
+        song = copy.deepcopy(self.songs[name])
+        instruments = copy.deepcopy(self.instruments)
+        for key, inst in song.get("instruments", {}).items():
+            instruments[key] = copy.deepcopy(self.instruments[inst]) if isinstance(inst, str) else inst
+        song["instruments"] = instruments
+        return song
 
     def to_dict(self) -> dict:
         """The project as plain data: the tables it was loaded with, in their order, then any filled since."""
@@ -115,6 +129,11 @@ def _flag(value: object, where: str) -> None:
         _fail(where, "must be true or false")
 
 
+def _text(value: object, where: str) -> None:
+    if not isinstance(value, str):
+        _fail(where, "must be a string")
+
+
 def _record(value: object, where: str, shape: dict, required: tuple = ()) -> None:
     """A dict with every key of `required` and no key outside `shape`, which maps each key to its check."""
     _dict(value, where)
@@ -139,6 +158,11 @@ def _project(data: object) -> None:
         _instrument(inst, f"instruments.{name}")
     for name, entry in data.get("sounds", {}).items():
         _entry(entry, f"sounds.{name}", instruments)
+    chords = data.get("chords", {})
+    for name, chord in chords.items():
+        _chord(chord, f"chords.{name}")
+    for name, song in data.get("songs", {}).items():
+        _song(song, f"songs.{name}", instruments, chords)
 
 
 def _steps(table: object, where: str, low: int | None = None, high: int | None = None) -> None:
@@ -292,3 +316,113 @@ def _sounds_in(entry: dict) -> list[dict]:
     if "held" in entry:
         found += [entry["held"]["note"], entry["held"]["end"]]
     return found
+
+
+def _known(name: object, where: str, names: dict, kind: str) -> None:
+    """A name that must point at one of `names`. `kind` says what those are, for the message."""
+    _text(name, where)
+    if name not in names:
+        _fail(where, f"no {kind} named {name!r}")
+
+
+def _names(value: object, where: str, names: dict, kind: str) -> None:
+    """A list of names, each pointing at one of `names`."""
+    _list(value, where)
+    for i, name in enumerate(value):
+        _known(name, f"{where}[{i}]", names, kind)
+
+
+def _chord(chord: object, where: str) -> None:
+    """A chord: the pitch class of its root, and the pitch classes that belong to it."""
+    _record(chord, where, {"root": lambda root, at: _whole(root, at, 0, 11), "tones": _list}, ("root", "tones"))
+    for i, tone in enumerate(chord["tones"]):
+        _whole(tone, f"{where}.tones[{i}]", 0, 11)
+
+
+def _song(song: object, where: str, shared: dict, chords: dict) -> None:
+    """One song: only the keys a song has, and every name in it pointing at something."""
+    _record(song, where, {
+        "row_ticks": _number,
+        "rows_per_beat": _number,
+        "gain": _number,
+        "instruments": _dict,
+        "drums": lambda drums, at: _record(drums, at, {letter: _dict for letter in "kshHt"}),
+        "channels": _dict,
+        "patterns": _dict,
+        "order": _list,
+        "chords": _dict,
+        "layers": _dict,
+        "intro": _dict,
+    }, ("row_ticks", "channels", "patterns", "order"))
+    for name, own in song.get("instruments", {}).items():
+        _inst(own, f"{where}.instruments.{name}", shared)
+    instruments = {**shared, **song.get("instruments", {})}
+    channels, patterns = song["channels"], song["patterns"]
+
+    def inst(name: object, at: str) -> None:
+        _known(name, at, instruments, "instrument")
+
+    for letter, drum in song.get("drums", {}).items():
+        _record(drum, f"{where}.drums.{letter}", {
+            "inst": inst,
+            "note": _note,
+            "rows": _number,
+            "vel": _number,
+        }, ("inst", "note"))
+    for name, channel in channels.items():
+        _record(channel, f"{where}.channels.{name}", {
+            "inst": inst,
+            "gain": _number,
+            "pan": _number,
+            "drums": _flag,
+            "echo": lambda echo, at: _record(echo, at, {"rows": _number, "gain": _number}, ("rows", "gain")),
+        }, ("inst",))
+    for name, pattern in patterns.items():
+        at = f"{where}.patterns.{name}"
+        _dict(pattern, at)
+        for channel, text in pattern.items():
+            if channel not in channels:
+                _fail(at, f"no channel named {channel!r}")
+            _text(text, f"{at}.{channel}")
+            for named in _AT.findall(text):
+                inst(named, f"{at}.{channel}")
+    _names(song["order"], f"{where}.order", patterns, "pattern")
+    for name, bars in song.get("chords", {}).items():
+        if name not in patterns:
+            _fail(f"{where}.chords", f"no pattern named {name!r}")
+        _list(bars, f"{where}.chords.{name}")
+        for i, bar in enumerate(bars):
+            at = f"{where}.chords.{name}[{i}]"
+            _text(bar, at)
+            for chord in bar.split():
+                _known(chord, at, chords, "chord")
+    if "layers" in song:
+        _layers(song["layers"], f"{where}.layers", channels)
+    if "intro" in song:
+        _record(song["intro"], f"{where}.intro", {
+            "order": lambda order, at: _names(order, at, patterns, "pattern"),
+            "tail": _number,
+            "fade": _number,
+        }, ("order",))
+
+
+def _layers(layers: object, where: str, channels: dict) -> None:
+    """A song's layers: groups of channels, versions made of groups, the keys, and the versions mixed ahead."""
+    _record(layers, where, {
+        "groups": _dict,
+        "versions": _dict,
+        "keys": _list,
+        "premix": _list,
+    }, ("groups", "versions", "keys"))
+    groups, versions = layers["groups"], layers["versions"]
+    for name, members in groups.items():
+        _names(members, f"{where}.groups.{name}", channels, "channel")
+    for name, members in versions.items():
+        _names(members, f"{where}.versions.{name}", groups, "group")
+    for i, key in enumerate(layers["keys"]):
+        _whole(key, f"{where}.keys[{i}]")
+    for i, mix in enumerate(layers.get("premix", [])):
+        _record(mix, f"{where}.premix[{i}]", {
+            "version": lambda version, at: _known(version, at, versions, "version"),
+            "key": _whole,
+        }, ("version", "key"))
