@@ -416,11 +416,18 @@ class RefusedSounds(ProjectCase):
                 self.sound_refused({"def": sound_of(notes=[[0, 60, 4], note])}, at + message)
 
     def test_a_note_that_is_neither_a_number_nor_a_name_is_refused(self) -> None:
-        for note in ("h4", "c", "c44", "#4", "c-1", "cb#4", "4c", "", None, True, [60]):
+        for note in ("h4", "c", "c44", "#4", "c--1", "cb#4", "4c", "", None, True, [60]):
             with self.subTest(note=note):
                 self.sound_refused(
                     {"def": sound_of(notes=[[0, note, 4]])},
                     f".def.voices[0].notes[0][1]: must be a number or a note name such as 'c#4', not {note!r}")
+
+    def test_a_name_the_note_reader_takes_is_a_note_here_too(self) -> None:
+        for note in ("c-1", "A4", "eb3", "g#9", 60.5):
+            with self.subTest(note=note):
+                project = Project.from_dict(
+                    {"instruments": INSTRUMENTS, "sounds": {"coin": {"def": sound_of(notes=[[0, note, 4]])}}})
+                self.assertEqual(project.sound("coin")["def"]["voices"][0]["notes"][0][1], note)
 
     def test_an_echo_of_the_wrong_shape_is_refused(self) -> None:
         self.sound_refused({"def": sound_of(echo=0.2)}, ".def.echo: must be a dict")

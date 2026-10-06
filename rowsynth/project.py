@@ -9,10 +9,10 @@ from pathlib import Path
 from typing import NoReturn
 
 from .errors import RowSynthError
+from .notes import midi
 
 _TABLES = ("instruments", "chords", "sounds", "songs")
 _WAVES = ("pulse", "saw", "tri", "noise", "fm")
-_NOTE = re.compile(r"[a-g][#b]?\d", re.IGNORECASE)
 _AT = re.compile(r"@(\w+)", re.ASCII)
 
 
@@ -240,13 +240,11 @@ def _inst(value: object, where: str, instruments: dict) -> None:
 
 
 def _note(value: object, where: str) -> None:
-    """A note: a number, or a name made of a letter, a sharp or a flat if it has one, and an octave digit."""
-    if isinstance(value, str):
-        if _NOTE.fullmatch(value):
-            return
-    elif isinstance(value, (int, float)) and not isinstance(value, bool):
-        return
-    _fail(where, f"must be a number or a note name such as 'c#4', not {value!r}")
+    """A note: a number, or a name. What counts as a name is settled in one place, by the note reader."""
+    try:
+        midi(value)
+    except RowSynthError:
+        _fail(where, f"must be a number or a note name such as 'c#4', not {value!r}")
 
 
 def _sound(defn: object, where: str, instruments: dict) -> None:
