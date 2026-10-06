@@ -485,6 +485,81 @@ class LowPassTest(unittest.TestCase):
         np.testing.assert_allclose(stepped * steady_level, steady * stepped_level, rtol=0, atol=1e-6)
 
 
+class ResonanceTest(unittest.TestCase):
+    def test_raises_the_level_at_the_cutoff(self):
+        # None halves a tone at the cutoff, as the plain low-pass does. From there the tone grows with the resonance.
+        plain = play({"wave": "tri", "release": 0}, 69, ticks=12)
+        for res, times in ((0, 0.5), (0.5, 1.0), (0.75, 2.0), (0.9, 5.0)):
+            got = play({"wave": "tri", "lp": 440, "res": res, "release": 0}, 69, ticks=12)
+            self.assertAlmostEqual(decibels(got[400:], plain[400:]), 20 * math.log10(times), delta=0.5, msg=res)
+
+    def test_gathers_noise_around_the_cutoff(self):
+        shares = []
+        for res in (0, 0.5, 0.9, 0.98):
+            got = play({"wave": "noise", "lp": 1000, "res": res, "release": 0}, 81, ticks=12)
+            shares.append(share_above(got, 800.0) - share_above(got, 1250.0))
+        self.assertLess(shares[0], 0.15)
+        self.assertGreater(shares[2], 0.6)
+        self.assertTrue(all(less < more for less, more in zip(shares, shares[1:])), shares)
+
+    def test_still_makes_noise_darker(self):
+        self.assertGreater(share_above(play({"wave": "noise", "release": 0}, 81, ticks=12), 2000.0), 0.4)
+        for res in (0, 0.5, 0.9):
+            got = play({"wave": "noise", "lp": 1000, "res": res, "release": 0}, 81, ticks=12)
+            self.assertLess(share_above(got, 2000.0), 0.02, res)
+
+    def test_none_is_as_loud_as_the_low_pass_without_it_but_not_the_same_samples(self):
+        for wave, note in (("pulse", 57), ("saw", 57), ("tri", 57), ("noise", 81)):
+            without = play({"wave": wave, "lp": 500, "release": 0}, note, ticks=12)
+            got = play({"wave": wave, "lp": 500, "res": 0, "release": 0}, note, ticks=12)
+            self.assertAlmostEqual(decibels(got, without), 0.0, delta=0.5, msg=wave)
+            self.assertFalse(np.array_equal(got, without), wave)
+
+    def test_without_a_cutoff_changes_nothing(self):
+        for wave in ("pulse", "noise"):
+            plain = play({"wave": wave})
+            for lp in ({}, {"lp": 0}, {"lp": -300}, {"lp": []}):
+                self.assertTrue(np.array_equal(play({"wave": wave, "res": 0.9, **lp}), plain), (wave, lp))
+
+    def test_tick_with_no_cutoff_is_wide_open(self):
+        got = play({"wave": "noise", "lp": [0, 300, 0], "res": 0.9, "release": 0}, 81)
+        plain = play({"wave": "noise", "release": 0}, 81)
+        for tick in (0, 2, 3):
+            self.assertTrue(np.array_equal(tick_of(got, tick), tick_of(plain, tick)), tick)
+        self.assertFalse(np.array_equal(tick_of(got, 1), tick_of(plain, 1)))
+
+    def test_most_is_0_98_and_least_is_0(self):
+        def ring(res: float) -> np.ndarray:
+            return play({"wave": "saw", "lp": [300, 2000], "res": res})
+
+        self.assertTrue(np.array_equal(ring(1), ring(0.98)))
+        self.assertTrue(np.array_equal(ring(7), ring(0.98)))
+        self.assertFalse(np.array_equal(ring(0.9), ring(0.98)))
+        self.assertTrue(np.array_equal(ring(-1), ring(0)))
+        self.assertFalse(np.array_equal(ring(0.1), ring(0)))
+
+    def test_most_resonance_rings_and_stays_under_25_times_the_wave(self):
+        got = play({"wave": "saw", "lp": 440, "res": 1, "release": 0}, 69, ticks=30)
+        self.assertTrue(np.isfinite(got).all())
+        self.assertGreater(float(np.abs(got).max()), 10.0)
+        self.assertLess(float(np.abs(got).max()), 25.0)
+
+    def test_cutoff_is_kept_under_0_45_of_the_rate(self):
+        def hiss(lp: float) -> np.ndarray:
+            return play({"wave": "noise", "lp": lp, "res": 0.5, "release": 0}, 81, ticks=2)
+
+        self.assertTrue(np.array_equal(hiss(3999), hiss(3600)))
+        self.assertTrue(np.array_equal(hiss(18000), hiss(3600)))
+        self.assertFalse(np.array_equal(hiss(3000), hiss(3600)))
+
+    def test_no_cutoff_is_set_above_18000_hertz(self):
+        def hiss(lp: float) -> np.ndarray:
+            return play({"wave": "noise", "lp": lp, "res": 0.5, "release": 0}, 105, ticks=1, rate=44100)
+
+        self.assertTrue(np.array_equal(hiss(19000), hiss(18000)))
+        self.assertFalse(np.array_equal(hiss(17000), hiss(18000)))
+
+
 class BufferTest(unittest.TestCase):
     def test_adds_to_what_is_there(self):
         inst = {"wave": "tri", "vol": [15, 8]}
@@ -628,6 +703,33 @@ class KnownSamplesTest(unittest.TestCase):
                          (368, -0.043465), (369, 0.004291), (500, -0.042741), (600, 0.327519), (800, 0.209496),
                          (918, 0.096309), (919, 0.0)))
 
+    def test_noise_through_a_resonant_low_pass_that_moves_and_opens(self):
+        inst = {"wave": "noise", "lp": [700, 1400, 0, 2800], "res": 0.9, "release": 1}
+        out = np.zeros(670, dtype=np.float32)
+        end = render_note(out, 0, inst, 81.0, 4, 1.0, RATE)
+        self.assertEqual(end, 667)
+        self.check(out, ((0, 0.004508), (1, 0.040321), (2, 0.134172), (3, 0.278146), (4, 0.436197), (50, 2.088130),
+                         (132, 0.601464), (133, 1.914107), (134, 1.971425), (135, 0.042643), (200, 1.858360),
+                         (266, -0.523627), (267, 1.0), (268, 1.0), (399, 1.0), (400, -1.358187), (401, -0.971637),
+                         (402, 0.742667), (600, 1.259529), (666, 0.773729), (667, 0.0)))
+
+    def test_saw_through_a_looping_resonant_low_pass_at_11025_hz(self):
+        inst = {"wave": "saw", "lp": {"v": [3000, 400], "loop": 0}, "res": 0.5, "vol": [15, 10]}
+        out = np.zeros(920, dtype=np.float32)
+        end = render_note(out, 0, inst, 52.0, 3, 1.0, 11025)
+        self.assertEqual(end, 919)
+        self.check(out, ((0, 0.0), (1, -0.034002), (2, -0.138669), (3, -0.196140), (100, -0.023009), (183, 0.458301),
+                         (184, 0.467433), (185, 0.464081), (186, 0.462526), (300, -0.071820), (367, -0.069709),
+                         (368, -0.011028), (369, 0.034704), (500, -0.042606), (600, 0.375177), (800, 0.209543),
+                         (918, 0.096354), (919, 0.0)))
+
+    def test_pulse_through_a_low_pass_with_a_resonance_of_0(self):
+        out = np.zeros(400, dtype=np.float32)
+        end = render_note(out, 0, {"lp": 1200, "res": 0}, 69.0, 1, 1.0, RATE)
+        self.assertEqual(end, 400)
+        self.check(out, ((0, 0.0), (1, 0.014199), (2, 0.075260), (3, 0.166857), (4, 0.247889), (5, 0.312577),
+                         (6, 0.365056), (100, 0.883732), (200, -0.593058), (300, 0.325630), (399, -0.332220)))
+
 
 class ErrorTest(unittest.TestCase):
     def refused(self, inst: object = None, out: object = None, at: object = 0, note: object = 69.0,
@@ -706,6 +808,10 @@ class ErrorTest(unittest.TestCase):
         self.begins("lp[1]", self.refused({"lp": [300, "0"]}))
         self.begins("lp.v[0]", self.refused({"lp": {"v": [None], "loop": 0}}))
         self.begins("lp.loop", self.refused({"lp": {"v": [300, 0], "loop": 1.5}}))
+
+    def test_refuses_a_res_that_is_not_a_number(self):
+        for res in ("0.5", None, True, [0.5], {"v": [0.5]}, float("nan")):
+            self.begins("res", self.refused({"lp": 300, "res": res}), repr(res))
 
     def test_refuses_a_release_that_is_not_a_length_of_time(self):
         for release in ("2", None, True, [2], -1, -0.5, float("nan"), float("inf")):

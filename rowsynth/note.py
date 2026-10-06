@@ -53,23 +53,30 @@ def step(seq, tick: int, fallback: float) -> float:
     return float(value)
 
 
-def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp):
+def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp, resonant, svf):
     """Adds a note to out: tick t fills the samples from edges[t] up to edges[t + 1], as far as out reaches.
 
     level is the loudness each tick heads for. Every sample the loudness covers the share slew of what is left
     to go. state, wave, rate and short are the oscillator's, and freq and duty its frequency and the width of
     its pulse at each tick. lp is the low-pass at each tick: the share of the way to its input that each of
-    its two stages covers in a sample, which is 1 when there is nothing to take off.
+    its two stages covers in a sample, which is 1 when there is nothing to take off. With resonant at 1 the
+    low-pass is a state-variable one instead, and svf holds its three coefficients at each tick, all 0 when
+    there is nothing to take off.
     """
     size = out.shape[0]
     last = 0.0
     low1 = 0.0
     low2 = 0.0
+    ic1 = 0.0
+    ic2 = 0.0
     for tick in range(level.shape[0]):
         target = float(level[tick])
         hertz = float(freq[tick])
         width = float(duty[tick])
         ease = float(lp[tick])
+        a1 = float(svf[tick, 0])
+        a2 = float(svf[tick, 1])
+        a3 = float(svf[tick, 2])
         for i in range(edges[tick], min(edges[tick + 1], size)):
             # A loudness that jumped would click.
             last += (target - last) * slew
@@ -81,7 +88,16 @@ def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp):
                 v = _k_tri(state, hertz, rate)
             else:
                 v = _k_noise(state, hertz, rate, short)
-            if ease < 1.0:
+            if resonant == 1:
+                if a1 != 0.0:
+                    # One sample through the filter: ic1 and ic2 are what its two integrators hold, v2 its low-pass.
+                    v3 = v - ic2
+                    v1 = a1 * ic1 + a2 * v3
+                    v2 = ic2 + a2 * ic1 + a3 * v3
+                    ic1 = 2.0 * v1 - ic1
+                    ic2 = 2.0 * v2 - ic2
+                    v = v2
+            elif ease < 1.0:
                 # Two poles, one feeding the other: 12 dB off for each octave above the cutoff.
                 low1 += (v - low1) * ease
                 low2 += (low1 - low2) * ease
@@ -184,6 +200,7 @@ _KEYS = {
     "gain": _number,
     "short": _flag,
     "lp": _steps,
+    "res": _number,
     "key_scale": _number,
     "gate": _unread,
 }
@@ -228,10 +245,13 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     # Every octave above middle C adds key_scale decibels to the level, and every octave below takes them off.
     gain = inst.get("gain", 1) * velocity * 10 ** ((inst.get("key_scale", 0) * (note - 60)) / 240)
     vib = inst.get("vib")
+    res = inst.get("res")
+    resonant = 0 if res is None else 1
     level = np.zeros(count)
     freq = np.zeros(count)
     duty = np.zeros(count)
     lp = np.ones(count)
+    svf = np.zeros((count, 3))
     sweep = 0.0
     for tick in range(count):
         vol = step(inst.get("vol"), tick, 15) / 15
@@ -250,9 +270,19 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
         cutoff = step(inst.get("lp"), tick, 0)
         if cutoff > 0:
             lp[tick] = 1 - math.exp((-2 * math.pi * min(cutoff, _TOP_CUTOFF)) / rate)
+            if res is not None:
+                # The tangent runs away as the cutoff nears half the rate, so the cutoff is kept short of that.
+                g = math.tan((math.pi * min(cutoff, _TOP_CUTOFF, 0.45 * rate)) / rate)
+                # Resonance thins the damping, from 2 down to 0.04 at the most: with none the filter would ring on.
+                k = 2 - 2 * min(max(res, 0), 0.98)
+                a1 = 1 / (1 + g * (g + k))
+                a2 = g * a1
+                svf[tick, 0] = a1
+                svf[tick, 1] = a2
+                svf[tick, 2] = g * a2
     edges = np.floor(at + np.arange(count + 1) * tick_samples + 0.5).astype(np.int64)
     # The level takes the same length of time to arrive at any rate.
     slew = 1 - (1 - _SLEW) ** (DEFAULT_RATE / rate)
     short = 1 if inst.get("short", False) else 0
-    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty, lp)
+    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty, lp, resonant, svf)
     return at + math.floor(total * tick_samples + 0.5)
