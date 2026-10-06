@@ -41,7 +41,7 @@ CARRIER = np.array([
 ], dtype=np.int64)
 
 # An operator's settings are one row of params; what moves while it plays is one row of state.
-_PARAMS, _STATE = 8, 6
+_PARAMS, _STATE = 14, 6
 # The oscillator in params: its multiple of the note's frequency, its detune in Hz, and its level,
 # which is an amplitude when the operator is heard and radians of bend when it is not.
 _MUL, _DET, _LEVEL = 0, 1, 2
@@ -54,6 +54,9 @@ _ATTACK, _SUSTAIN_DB, _DECAY, _SUSTAIN, _RELEASE = 3, 4, 5, 6, 7
 # The envelope in state: its stage (0 rising, 1 decaying, 2 held, 3 let go, 4 done), its level on
 # the way up, and its level in dB from there on.
 _STAGE, _AMP, _DB = 3, 4, 5
+# The wiring in params: the operator's feedback, in radians of bend by its own last sample; whether
+# it is heard; and from _BENT_BY on a cell for each of the four operators, 1 for those that bend it.
+_FEEDBACK, _HEARD, _BENT_BY = 8, 9, 10
 
 # An operator the instrument leaves out: silent, its envelope down within a millisecond.
 _SILENT = {"level": 0, "env": {"s": 0, "d": 0.001}}
@@ -98,10 +101,11 @@ def fm_voice(inst: dict, rate: int) -> tuple[np.ndarray, np.ndarray]:
     """The four operators of an FM instrument at a sample rate: their params, and a state to start from.
 
     The instrument is {"alg": 0 to 7, "fb": radians, "ops": up to four of {"mul", "det", "level", "env"}}.
-    Operators it leaves out are silent. The algorithm and the feedback are only checked here.
+    Operators it leaves out are silent. The algorithm is in params as each operator's wiring, and the
+    feedback as the first operator's, so the two arrays are all it takes to play the voice.
     """
-    _algorithm(inst)
-    _number(inst, "fb", 0.0, "")
+    alg = _algorithm(inst)
+    fb = _number(inst, "fb", 0.0, "")
     ops = inst.get("ops", [])
     if not isinstance(ops, (list, tuple)):
         raise RowSynthError(f"ops: not a list: {ops!r}")
@@ -118,6 +122,9 @@ def fm_voice(inst: dict, rate: int) -> tuple[np.ndarray, np.ndarray]:
         params[i, _DET] = _number(op, "det", 0.0, where)
         params[i, _LEVEL] = _number(op, "level", 1.0, where)
         _set_envelope(params[i], op.get("env", {}), rate, f"{where}.env")
+    params[0, _FEEDBACK] = fb
+    params[:, _HEARD] = CARRIER[alg]
+    params[:, _BENT_BY:] = INTO[alg]
     return params, state
 
 
@@ -164,16 +171,17 @@ def _k_gate_off(params, state):
         _k_release(state, op)
 
 
-def _k_fm(into, carrier, fb, params, state, freq, rate):
-    """The next sample of the voice at `freq` Hz. `into` and `carrier` are one algorithm's rows."""
+def _k_fm(params, state, freq, rate):
+    """The next sample of the voice at `freq` Hz."""
     mix = 0.0
     for i in range(4):
         # Operators run in order, so one that bends another has already made this sample.
         mod = 0.0
         for j in range(4):
-            if into[i, j] != 0:
+            if params[i, _BENT_BY + j] != 0.0:
                 mod += state[j, _OUT]
-        if i == 0 and fb != 0.0:
+        fb = params[i, _FEEDBACK]
+        if fb != 0.0:
             mod += fb * state[i, _LAST]
         s = math.sin(state[i, _PHASE] + mod) * _k_env(params, state, i)
         phase = state[i, _PHASE] + (_TAU * (freq * params[i, _MUL] + params[i, _DET])) / rate
@@ -181,7 +189,7 @@ def _k_fm(into, carrier, fb, params, state, freq, rate):
             phase -= _TAU
         state[i, _PHASE] = phase
         state[i, _LAST] = s
-        if carrier[i] != 0:
+        if params[i, _HEARD] != 0.0:
             mix += s * params[i, _LEVEL]
         else:
             state[i, _OUT] = s * params[i, _LEVEL]
@@ -196,12 +204,12 @@ def _k_envelope(out, params, state, gate):
         out[i] = _k_env(params, state, 0)
 
 
-def _k_tone(out, into, carrier, fb, params, state, freq, rate, gate):
+def _k_tone(out, params, state, freq, rate, gate):
     """Fills `out` with the voice at `freq` Hz, let go at sample `gate`."""
     for i in range(out.shape[0]):
         if i == gate:
             _k_gate_off(params, state)
-        out[i] = _k_fm(into, carrier, fb, params, state, freq, rate)
+        out[i] = _k_fm(params, state, freq, rate)
 
 
 def envelope(env: dict, held: float, seconds: float, rate: int = 44100) -> np.ndarray:
@@ -221,8 +229,6 @@ def envelope(env: dict, held: float, seconds: float, rate: int = 44100) -> np.nd
 def fm_tone(inst: dict, freq: float, held: float, seconds: float, rate: int = 44100) -> np.ndarray:
     """An FM instrument's voice on its own at `freq` Hz: `seconds` of it, let go after `held` seconds."""
     params, state = fm_voice(inst, rate)
-    alg = _algorithm(inst)
-    fb = _number(inst, "fb", 0.0, "")
     out = np.zeros(math.floor(seconds * rate + 0.5), dtype=np.float32)
-    _k_tone(out, INTO[alg], CARRIER[alg], fb, params, state, float(freq), float(rate), math.floor(held * rate + 0.5))
+    _k_tone(out, params, state, float(freq), float(rate), math.floor(held * rate + 0.5))
     return out

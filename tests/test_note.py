@@ -8,6 +8,7 @@ import unittest
 import numpy as np
 
 from rowsynth.errors import RowSynthError
+from rowsynth.fm import fm_tone
 from rowsynth.note import DEFAULT_RATE, TICK_HZ, render_note, step
 from rowsynth.notes import hz
 from rowsynth.osc import tone
@@ -15,6 +16,20 @@ from rowsynth.osc import tone
 # A tick is 133 and a third samples at 8000 Hz: ticks start at samples 0, 133, 267, 400, 533, 667, 800.
 RATE = 8000
 HISS = {"wave": "noise"}
+# An FM voice with something of everything: two pairs of operators, feedback, detune, four envelopes.
+CHIME = {
+    "wave": "fm",
+    "alg": 4,
+    "fb": 0.4,
+    "ops": [
+        {"mul": 3, "det": 0.7, "level": 1.3, "env": {"a": 0.002, "d": 0.03, "s": 0.4, "sd": 12, "r": 0.02}},
+        {"level": 0.8, "env": {"d": 0.05, "s": 0.6, "r": 0.03}},
+        {"mul": 2, "det": -1.2, "level": 1.1, "env": {"a": 0.004, "d": 0, "s": 0.7, "r": 0.02}},
+        {"det": 0.3, "level": 0.6, "env": {"a": 0.001, "d": 0.02, "s": 0.5, "sd": 30, "r": 0.04}},
+    ],
+}
+# An FM voice that is one sine, at full level from its first sample for as long as it is held.
+SINE = {"wave": "fm", "alg": 7, "ops": [{}]}
 
 
 def play(inst: dict, note: float = 69.0, ticks: float = 4, velocity: float = 1.0, rate: int = RATE) -> np.ndarray:
@@ -560,6 +575,109 @@ class ResonanceTest(unittest.TestCase):
         self.assertFalse(np.array_equal(hiss(17000), hiss(18000)))
 
 
+class FmTest(unittest.TestCase):
+    def test_fm_wave_is_its_plain_voice_under_the_level(self):
+        # Three ticks are 400 samples. The voice is let go there, and from there the note's release fades it too.
+        shape = {"vol": [15, 5, 10], "release": 3}
+        level = np.abs(play({**shape, "wave": "noise"}, ticks=3))
+        for note in (48, 60.5, 69):
+            got = play({**CHIME, **shape}, note, ticks=3)
+            plain = fm_tone(CHIME, hz(note), 400 / RATE, len(got) / RATE, RATE)
+            np.testing.assert_allclose(got, plain * level, rtol=0, atol=1e-6, err_msg=str(note))
+
+    def test_voice_is_let_go_at_the_tick_the_note_ends(self):
+        # Let go, this sine loses 0.75 dB a sample and is done 128 samples on, while the note's release has 6 ticks.
+        inst = {"wave": "fm", "alg": 7, "ops": [{"env": {"r": 0.01}}], "release": 6}
+        got = play(inst, ticks=3)
+        self.assertGreater(float(np.abs(got[380:400]).max()), 0.9)
+        self.assertTrue(got[400:520].any())
+        self.assertFalse(got[530:].any())
+        self.assertTrue(play(inst, ticks=5)[530:660].any())
+
+    def test_note_that_ends_part_of_the_way_through_a_tick_is_not_let_go(self):
+        # No tick starts where two and a half ticks end, so the envelope's release never begins.
+        quick = {"wave": "fm", "alg": 7, "ops": [{"env": {"r": 0.01}}], "release": 6}
+        slow = {"wave": "fm", "alg": 7, "ops": [{"env": {"r": 3}}], "release": 6}
+        got = play(quick, ticks=2.5)
+        self.assertTrue(np.array_equal(got, play(slow, ticks=2.5)))
+        self.assertGreater(float(np.abs(got[-150:]).max()), 0.1)
+        self.assertFalse(np.array_equal(play(quick, ticks=3), play(slow, ticks=3)))
+
+    def test_every_note_starts_the_voice_afresh(self):
+        alone = play(CHIME, ticks=2)
+        out = np.zeros(len(alone), dtype=np.float32)
+        render_note(out, 0, CHIME, 69.0, 2, 1.0, RATE)
+        render_note(out, 0, CHIME, 69.0, 2, 1.0, RATE)
+        np.testing.assert_allclose(out, 2 * alone, rtol=0, atol=1e-6)
+
+    def test_at_moves_the_whole_note_and_where_it_is_let_go(self):
+        alone = play(CHIME, ticks=2)
+        out = np.zeros(len(alone) + 150, dtype=np.float32)
+        render_note(out, 100, CHIME, 69.0, 2, 1.0, RATE)
+        self.assertFalse(out[:100].any())
+        self.assertTrue(np.array_equal(out[100:100 + len(alone)], alone))
+
+    def test_voice_with_no_operators_is_silent(self):
+        self.assertFalse(play({"wave": "fm"}).any())
+        self.assertFalse(play({"wave": "fm", "alg": 7, "fb": 0.4, "ops": []}).any())
+
+    def test_alg_left_out_is_4_and_fb_left_out_is_none(self):
+        ops = CHIME["ops"]
+        left_out = play({"wave": "fm", "ops": ops})
+        self.assertTrue(np.array_equal(left_out, play({"wave": "fm", "alg": 4, "fb": 0, "ops": ops})))
+        self.assertFalse(np.array_equal(left_out, play({"wave": "fm", "alg": 5, "ops": ops})))
+        self.assertFalse(np.array_equal(left_out, play({"wave": "fm", "fb": 0.4, "ops": ops})))
+
+    def test_arp_and_sweep_move_the_whole_note(self):
+        plain = play(CHIME)
+        self.assertTrue(np.array_equal(play({**CHIME, "arp": 12}, 57), plain))
+        self.assertTrue(np.array_equal(play({**CHIME, "pitch": [12, 0]}, 57), plain))
+        self.assertFalse(np.array_equal(play({**CHIME, "arp": 1}), plain))
+
+    def test_arp_sweep_vibrato_and_slide_set_the_pitch_of_each_tick(self):
+        # The vibrato makes a quarter of a turn a tick, and the slide climbs an octave a tick.
+        bends = (
+            ({"arp": [0, 12, 24, 12]}, (0, 12, 24, 12)),
+            ({"pitch": [0, 12, 12, -24]}, (0, 12, 24, 0)),
+            ({"vib": {"depth": 12, "rate": 15}}, (0, 12, 0, -12)),
+            ({"slide": 720}, (0, 12, 24, 36)),
+        )
+        for keys, semis in bends:
+            got = play({**SINE, **keys, "release": 0}, ticks=4)
+            want = [hz(69 + up) for up in semis]
+            np.testing.assert_allclose(pitches(got, 4), want, rtol=0, atol=fine(tick_of(got, 0)), err_msg=repr(keys))
+
+    def test_gain_velocity_and_key_scale_scale_every_sample(self):
+        plain = play(CHIME, 72)
+        np.testing.assert_allclose(play({**CHIME, "gain": 0.3}, 72), 0.3 * plain, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(play(CHIME, 72, velocity=0.7), 0.7 * plain, rtol=0, atol=1e-6)
+        np.testing.assert_allclose(play({**CHIME, "key_scale": -6}, 72), 10 ** (-6 / 20) * plain, rtol=0, atol=1e-6)
+
+    def test_low_pass_makes_a_bright_voice_darker_the_lower_its_cutoff(self):
+        bright = {"wave": "fm", "alg": 0, "ops": [{"mul": 3, "level": 2}, {"mul": 2, "level": 2}, {"level": 2}, {}]}
+        shares = [share_above(play({**bright, "release": 0, **lp}, 57, ticks=12), 1000.0)
+                  for lp in ({}, {"lp": 2000}, {"lp": 1000}, {"lp": 500}, {"lp": 250})]
+        self.assertGreater(shares[0], 0.3)
+        self.assertLess(shares[3], 0.05)
+        self.assertTrue(all(lower < higher for higher, lower in zip(shares, shares[1:])), shares)
+
+    def test_low_pass_takes_6_decibels_off_a_sine_at_its_cutoff_and_resonance_raises_it(self):
+        plain = play({**SINE, "release": 0}, 69, ticks=12)
+        got = play({**SINE, "lp": 440, "release": 0}, 69, ticks=12)
+        self.assertAlmostEqual(decibels(got[400:], plain[400:]), -6.0, delta=0.5)
+        for res, times in ((0, 0.5), (0.5, 1.0), (0.9, 5.0)):
+            got = play({**SINE, "lp": 440, "res": res, "release": 0}, 69, ticks=12)
+            self.assertAlmostEqual(decibels(got[400:], plain[400:]), 20 * math.log10(times), delta=0.5, msg=res)
+
+    def test_duty_and_short_change_nothing(self):
+        self.assertTrue(np.array_equal(play({**CHIME, "duty": [0, 3], "short": True}), play(CHIME)))
+
+    def test_alg_fb_and_ops_change_no_other_wave(self):
+        voice = {key: CHIME[key] for key in ("alg", "fb", "ops")}
+        for wave in ("pulse", "saw", "tri", "noise"):
+            self.assertTrue(np.array_equal(play({"wave": wave, **voice}), play({"wave": wave})), wave)
+
+
 class BufferTest(unittest.TestCase):
     def test_adds_to_what_is_there(self):
         inst = {"wave": "tri", "vol": [15, 8]}
@@ -731,6 +849,39 @@ class KnownSamplesTest(unittest.TestCase):
                          (6, 0.365056), (100, 0.883732), (200, -0.593058), (300, 0.325630), (399, -0.332220)))
 
 
+    def test_fm_voice_under_a_vol_list(self):
+        out = np.zeros(560, dtype=np.float32)
+        end = render_note(out, 5, {**CHIME, "vol": [15, 6, 11], "gain": 0.8}, 57.5, 2, 0.9, RATE)
+        self.assertEqual(end, 538)
+        self.check(out, ((4, 0.0), (5, 0.0), (6, 0.021170), (7, 0.068351), (8, 0.132098), (60, 0.012234),
+                         (137, -0.605099), (138, -0.574141), (139, -0.588203), (271, -0.005094), (272, -0.042406),
+                         (273, -0.083768), (300, 0.110737), (340, 0.004091), (420, -0.004569), (537, 0.000094),
+                         (538, 0.0)))
+
+    def test_three_operators_with_a_sweep_a_vibrato_and_a_resonant_low_pass_at_11025_hz(self):
+        inst = {"wave": "fm", "alg": 5, "fb": 0.3, "ops": CHIME["ops"][:3], "pitch": [0.5, 0.25, 0],
+                "vib": {"delay": 1, "depth": 0.5, "rate": 7}, "lp": [3000, 900, 0, 1500], "res": 0.7}
+        out = np.zeros(920, dtype=np.float32)
+        end = render_note(out, 0, inst, 52.0, 3, 1.0, 11025)
+        self.assertEqual(end, 919)
+        self.check(out, ((0, 0.0), (1, 0.004653), (2, 0.027822), (3, 0.070454), (100, 0.094324), (183, -1.141840),
+                         (184, -1.164064), (185, -1.173657), (300, 0.360465), (367, 0.381087), (368, -0.247667),
+                         (369, -0.432376), (500, -0.804345), (551, 0.249762), (552, 0.164410), (553, 0.209466),
+                         (600, -0.057309), (650, 0.059832), (735, -0.002108), (918, 0.000006), (919, 0.0)))
+
+    def test_chain_of_operators_let_go_during_its_attack(self):
+        ops = [{"mul": 2, "level": 1.5, "env": {"a": 0.05}}, {"level": 1.2, "env": {"a": 0.05, "r": 0.01}},
+               {"mul": 3, "env": {"a": 0.08, "r": 0.02}}, {"env": {"a": 0.05, "r": 0.01}}]
+        inst = {"wave": "fm", "alg": 0, "ops": ops, "arp": {"v": [0, 7], "loop": 0}, "key_scale": -3, "release": 3}
+        out = np.zeros(670, dtype=np.float32)
+        end = render_note(out, 0, inst, 64.0, 2, 1.0, RATE)
+        self.assertEqual(end, 667)
+        self.check(out, ((0, 0.0), (1, 0.000143), (2, 0.000604), (3, 0.001467), (50, 0.048024), (132, 0.065585),
+                         (133, 0.020328), (134, -0.043643), (200, -0.181364), (266, -0.522690), (267, -0.508696),
+                         (268, -0.385394), (269, -0.327660), (280, 0.149801), (300, 0.017335), (330, 0.001446),
+                         (400, 0.0), (666, 0.0), (667, 0.0)))
+
+
 class ErrorTest(unittest.TestCase):
     def refused(self, inst: object = None, out: object = None, at: object = 0, note: object = 69.0,
                 ticks: object = 2, velocity: object = 1.0, rate: object = RATE) -> str:
@@ -754,7 +905,7 @@ class ErrorTest(unittest.TestCase):
             self.begins("instrument", self.refused(inst))
 
     def test_refuses_a_wave_it_does_not_know(self):
-        for wave in ("square", "fm", "PULSE", "", None, 0, ["pulse"]):
+        for wave in ("square", "sine", "PULSE", "", None, 0, ["pulse"]):
             said = self.refused({"wave": wave})
             self.begins("wave", said)
             self.assertIn(repr(wave), said)
@@ -825,6 +976,28 @@ class ErrorTest(unittest.TestCase):
         for short in (1, 0, "yes", None, [True]):
             self.begins("short", self.refused({"wave": "noise", "short": short}), repr(short))
 
+    def test_refuses_an_alg_or_an_fb_that_the_fm_voice_cannot_take(self):
+        for alg in (8, -1, 2.5, "4", None, True, [4]):
+            self.begins("alg", self.refused({"wave": "fm", "alg": alg, "ops": [{}]}), repr(alg))
+        self.assertIn("0 to 7", self.refused({"wave": "fm", "alg": 8}))
+        for fb in ("0.4", None, True, [0.4]):
+            self.begins("fb", self.refused({"wave": "fm", "fb": fb, "ops": [{}]}), repr(fb))
+
+    def test_refuses_ops_that_are_not_four_operators_at_most(self):
+        for ops in ({"mul": 1}, "ops", None, 3, [{}] * 5):
+            self.begins("ops", self.refused({"wave": "fm", "ops": ops}), repr(ops))
+        self.assertIn("5 operators", self.refused({"wave": "fm", "ops": [{}] * 5}))
+        self.begins("ops[1]", self.refused({"wave": "fm", "ops": [{}, 3]}))
+        self.begins("ops[0]", self.refused({"wave": "fm", "ops": [None]}))
+
+    def test_names_the_part_of_an_operator_that_is_wrong(self):
+        self.begins("ops[2].mul", self.refused({"wave": "fm", "ops": [{}, {}, {"mul": "2"}]}))
+        self.begins("ops[0].det", self.refused({"wave": "fm", "ops": [{"det": None}]}))
+        self.begins("ops[3].level", self.refused({"wave": "fm", "ops": [{}, {}, {}, {"level": True}]}))
+        self.begins("ops[0].env", self.refused({"wave": "fm", "ops": [{"env": 0.5}]}))
+        for key in ("a", "d", "s", "sd", "r"):
+            self.begins(f"ops[1].env.{key}", self.refused({"wave": "fm", "ops": [{}, {"env": {key: "0.1"}}]}))
+
     def test_refuses_a_note_that_is_not_a_number(self):
         for note in ("a4", None, True, [69], float("nan")):
             self.begins("note", self.refused(note=note), repr(note))
@@ -853,4 +1026,5 @@ class ErrorTest(unittest.TestCase):
         out = np.full(400, 0.5, dtype=np.float32)
         self.refused({"vol": [15, 9, "4"]}, out=out)
         self.refused({"release": 1}, out=out, rate=0)
+        self.refused({"wave": "fm", "ops": [{}, {"mul": "2"}]}, out=out)
         self.assertTrue(np.array_equal(out, np.full(400, 0.5, dtype=np.float32)))

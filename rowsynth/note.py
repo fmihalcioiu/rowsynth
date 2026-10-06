@@ -7,15 +7,13 @@ from numbers import Real
 import numpy as np
 
 from .errors import RowSynthError
+from .fm import _k_fm, _k_gate_off, fm_voice
 from .notes import hz
-from .osc import DUTY, PULSE, SAW, TRI, WAVES, _k_noise, _k_pulse, _k_saw, _k_tri, new_state
+from .osc import DUTY, FM, NOISE, PULSE, SAW, TRI, WAVES, _k_noise, _k_pulse, _k_saw, _k_tri, new_state
 
 # A tick is a sixtieth of a second at any sample rate. An instrument's step tables move on once a tick.
 TICK_HZ = 60
 DEFAULT_RATE = 44100
-
-# The waves a note can be played with.
-_WAVES = ("pulse", "saw", "tri", "noise")
 
 # The share of the way to its target that the level covers in one sample at 44100 Hz.
 _SLEW = 0.012
@@ -53,15 +51,17 @@ def step(seq, tick: int, fallback: float) -> float:
     return float(value)
 
 
-def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp, resonant, svf):
+def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, fm_params, fm_state, gate,
+            lp, resonant, svf):
     """Adds a note to out: tick t fills the samples from edges[t] up to edges[t + 1], as far as out reaches.
 
     level is the loudness each tick heads for. Every sample the loudness covers the share slew of what is left
     to go. state, wave, rate and short are the oscillator's, and freq and duty its frequency and the width of
-    its pulse at each tick. lp is the low-pass at each tick: the share of the way to its input that each of
-    its two stages covers in a sample, which is 1 when there is nothing to take off. With resonant at 1 the
-    low-pass is a state-variable one instead, and svf holds its three coefficients at each tick, all 0 when
-    there is nothing to take off.
+    its pulse at each tick. The FM wave has its voice in fm_params and fm_state, and lets it go as tick gate
+    starts: a gate that is no tick of the note's leaves it held. lp is the low-pass at each tick: the share of
+    the way to its input that each of its two stages covers in a sample, which is 1 when there is nothing to
+    take off. With resonant at 1 the low-pass is a state-variable one instead, and svf holds its three
+    coefficients at each tick, all 0 when there is nothing to take off.
     """
     size = out.shape[0]
     last = 0.0
@@ -70,6 +70,8 @@ def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp, r
     ic1 = 0.0
     ic2 = 0.0
     for tick in range(level.shape[0]):
+        if wave == FM and tick == gate:
+            _k_gate_off(fm_params, fm_state)
         target = float(level[tick])
         hertz = float(freq[tick])
         width = float(duty[tick])
@@ -86,8 +88,10 @@ def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, lp, r
                 v = _k_saw(state, hertz, rate)
             elif wave == TRI:
                 v = _k_tri(state, hertz, rate)
-            else:
+            elif wave == NOISE:
                 v = _k_noise(state, hertz, rate, short)
+            else:
+                v = _k_fm(fm_params, fm_state, hertz, rate)
             if resonant == 1:
                 if a1 != 0.0:
                     # One sample through the filter: ic1 and ic2 are what its two integrators hold, v2 its low-pass.
@@ -137,8 +141,8 @@ def _flag(value: object, where: str) -> None:
 
 
 def _wave(value: object, where: str) -> None:
-    """Refuses what is not the name of a wave a note can be played with."""
-    if not isinstance(value, str) or value not in _WAVES:
+    """Refuses what is not the name of a wave."""
+    if not isinstance(value, str) or value not in WAVES:
         raise RowSynthError(f"{where}: unknown wave {value!r}")
 
 
@@ -187,7 +191,7 @@ def _unread(value: object, where: str) -> None:
 
 
 # What each key of an instrument must be. "gate" says how long a note is held, which whoever asks for the
-# note has settled already.
+# note has settled already. "alg", "fb" and "ops" are the FM voice's, which checks them as it is built.
 _KEYS = {
     "wave": _wave,
     "vol": _steps,
@@ -203,6 +207,9 @@ _KEYS = {
     "res": _number,
     "key_scale": _number,
     "gate": _unread,
+    "alg": _unread,
+    "fb": _unread,
+    "ops": _unread,
 }
 
 
@@ -238,6 +245,10 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     _count(rate, "rate", 1)
     at = int(at)
     wave = inst.get("wave", "pulse")
+    # Only the FM wave has a voice. The kernel takes one whatever the wave, so the others hand it an empty one.
+    fm_params = fm_state = np.zeros((0, 0))
+    if wave == "fm":
+        fm_params, fm_state = fm_voice(inst, rate)
     release = inst.get("release", 2)
     total = ticks + release
     count = math.ceil(total)
@@ -284,5 +295,9 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     # The level takes the same length of time to arrive at any rate.
     slew = 1 - (1 - _SLEW) ** (DEFAULT_RATE / rate)
     short = 1 if inst.get("short", False) else 0
-    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty, lp, resonant, svf)
+    # The voice is let go as the first tick of the release starts. A note that ends part of the way through a
+    # tick has no tick starting there, and its voice stays held.
+    gate = int(ticks) if ticks == int(ticks) else -1
+    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty, fm_params, fm_state,
+            gate, lp, resonant, svf)
     return at + math.floor(total * tick_samples + 0.5)

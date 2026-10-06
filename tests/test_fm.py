@@ -171,21 +171,22 @@ class AlgorithmTest(unittest.TestCase):
 class VoiceTest(unittest.TestCase):
     def test_params_and_state_are_four_rows_of_float64(self):
         params, state = fm_voice(VOICE, RATE)
-        self.assertEqual((params.shape, params.dtype), ((4, 8), np.float64))
+        self.assertEqual((params.shape, params.dtype), ((4, 14), np.float64))
         self.assertEqual((state.shape, state.dtype), ((4, 6), np.float64))
         self.assertFalse(state.any())
 
-    def test_row_of_params_is_mul_det_level_and_the_envelope_as_steps_a_sample(self):
+    def test_row_of_params_starts_with_mul_det_level_and_the_envelope_as_steps_a_sample(self):
         op = {"mul": 2, "det": 1.5, "level": 0.7, "env": {"a": 0.01, "d": 0.02, "s": 0.5, "sd": 40, "r": 0.1}}
         params, _ = fm_voice({"ops": [op]}, RATE)
         # 80 samples of attack; 6.02 dB over 160 samples of decay; 40 dB a second; 60 dB over 800 samples.
         half_db = 20 * math.log10(0.5)
-        np.testing.assert_allclose(params[0], [2, 1.5, 0.7, 1 / 80, half_db, -half_db / 160, 40 / 8000, 60 / 800], rtol=1e-12)
+        want = [2, 1.5, 0.7, 1 / 80, half_db, -half_db / 160, 40 / 8000, 60 / 800]
+        np.testing.assert_allclose(params[0, :8], want, rtol=1e-12)
 
     def test_operator_with_nothing_set_is_a_sine_at_full_level_with_no_attack(self):
         params, _ = fm_voice({"ops": [{}]}, RATE)
         # A decay of 0.3 s to a sustain of 1 is no fall at all; a release of 0.2 s is 60 dB over 1600 samples.
-        np.testing.assert_allclose(params[0], [1, 0, 1, 1, 0, 0, 0, 60 / 1600], rtol=1e-12)
+        np.testing.assert_allclose(params[0, :8], [1, 0, 1, 1, 0, 0, 0, 60 / 1600], rtol=1e-12)
 
     def test_decay_of_zero_is_an_endless_step(self):
         params, _ = fm_voice({"ops": [{"env": {"d": 0, "s": 0.5}}]}, RATE)
@@ -194,18 +195,45 @@ class VoiceTest(unittest.TestCase):
     def test_operators_left_out_are_silent_and_80_decibels_down_in_a_millisecond(self):
         params, _ = fm_voice({"ops": [{}, {}]}, RATE)
         for row in (2, 3):
-            np.testing.assert_allclose(params[row], [1, 0, 0, 1, -80, 80 / 8, 0, 60 / 1600], rtol=1e-12)
+            np.testing.assert_allclose(params[row, :8], [1, 0, 0, 1, -80, 80 / 8, 0, 60 / 1600], rtol=1e-12)
         params, _ = fm_voice({}, RATE)
         self.assertFalse(params[:, 2].any())
 
     def test_steps_follow_the_sample_rate(self):
         slow, _ = fm_voice(VOICE, 22050)
         fast, _ = fm_voice(VOICE, 44100)
-        # Half the samples in every second, so every step is twice as large; levels stay as they are.
-        np.testing.assert_allclose(slow[:, 5:], 2 * fast[:, 5:], rtol=1e-12)
+        # Half the samples in every second, so every step is twice as large; levels and wiring stay as they are.
+        np.testing.assert_allclose(slow[:, 5:8], 2 * fast[:, 5:8], rtol=1e-12)
         np.testing.assert_allclose(slow[0, 3], 2 * fast[0, 3], rtol=1e-12)
         np.testing.assert_array_equal(slow[:, :3], fast[:, :3])
         np.testing.assert_array_equal(slow[:, 4], fast[:, 4])
+        np.testing.assert_array_equal(slow[:, 8:], fast[:, 8:])
+
+    def test_row_of_params_ends_with_the_operators_wiring_in_the_algorithm(self):
+        for alg, (bends, heard) in enumerate(WIRING):
+            params, _ = fm_voice({"alg": alg}, RATE)
+            for i in range(4):
+                with self.subTest(alg=alg, operator=i):
+                    self.assertEqual(params[i, 9], 1.0 if i in heard else 0.0)
+                    self.assertEqual([j for j in range(4) if params[i, 10 + j] == 1.0], bends[i])
+            self.assertTrue(np.all((params[:, 9:] == 0.0) | (params[:, 9:] == 1.0)), alg)
+
+    def test_algorithm_left_out_is_4(self):
+        left_out, _ = fm_voice({"ops": [{}, {}]}, RATE)
+        named, _ = fm_voice({"alg": 4, "ops": [{}, {}]}, RATE)
+        np.testing.assert_array_equal(left_out, named)
+        np.testing.assert_array_equal(left_out[:, 9], CARRIER[4])
+        np.testing.assert_array_equal(left_out[:, 10:], INTO[4])
+
+    def test_feedback_is_in_the_first_operators_row_alone(self):
+        params, _ = fm_voice({"fb": 0.4, "ops": [{}, {}, {}, {}]}, RATE)
+        np.testing.assert_array_equal(params[:, 8], [0.4, 0, 0, 0])
+
+    def test_feedback_left_out_is_none(self):
+        params, _ = fm_voice(VOICE | {"fb": 0}, RATE)
+        left_out, _ = fm_voice({key: value for key, value in VOICE.items() if key != "fb"}, RATE)
+        np.testing.assert_array_equal(left_out, params)
+        self.assertFalse(left_out[:, 8].any())
 
     def test_gate_off_lets_every_operator_go(self):
         params, state = fm_voice(VOICE, RATE)
