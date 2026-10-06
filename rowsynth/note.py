@@ -50,21 +50,24 @@ def step(seq, tick: int, fallback: float) -> float:
     return float(value)
 
 
-def _k_note(out, edges, level, slew, state, wave, rate, hertz, short):
+def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty):
     """Adds a note to out: tick t fills the samples from edges[t] up to edges[t + 1], as far as out reaches.
 
     level is the loudness each tick heads for. Every sample the loudness covers the share slew of what is left
-    to go. state, wave, rate, hertz and short are the oscillator's.
+    to go. state, wave, rate and short are the oscillator's, and freq and duty its frequency and the width of
+    its pulse at each tick.
     """
     size = out.shape[0]
     last = 0.0
     for tick in range(level.shape[0]):
         target = float(level[tick])
+        hertz = float(freq[tick])
+        width = float(duty[tick])
         for i in range(edges[tick], min(edges[tick + 1], size)):
             # A loudness that jumped would click.
             last += (target - last) * slew
             if wave == PULSE:
-                v = _k_pulse(state, hertz, rate, DUTY[2])
+                v = _k_pulse(state, hertz, rate, width)
             elif wave == SAW:
                 v = _k_saw(state, hertz, rate)
             elif wave == TRI:
@@ -86,7 +89,7 @@ def _number(value: object, where: str) -> None:
 
 
 def _length(value: object, where: str) -> None:
-    """Refuses a length of time that is not a number, or is less than none."""
+    """Refuses a length of time that is not a number or is below 0."""
     _number(value, where)
     if value < 0:
         raise RowSynthError(f"{where}: must be 0 or more, not {value!r}")
@@ -106,7 +109,7 @@ def _flag(value: object, where: str) -> None:
 
 
 def _wave(value: object, where: str) -> None:
-    """Refuses the name of a wave there is no playing."""
+    """Refuses what is not the name of a wave a note can be played with."""
     if not isinstance(value, str) or value not in _WAVES:
         raise RowSynthError(f"{where}: unknown wave {value!r}")
 
@@ -130,6 +133,27 @@ def _steps(table: object, where: str) -> None:
         raise RowSynthError(f"{where}: must be a number, a list or {{'v': list, 'loop': index}}, not {table!r}")
 
 
+def _duty(table: object, where: str) -> None:
+    """Refuses a step table that asks for a pulse width there is not: they are numbered 0 to 3."""
+    _steps(table, where)
+    values = table.get("v") if isinstance(table, dict) else table
+    for value in values if isinstance(values, (list, tuple)) else (values,):
+        if value not in range(len(DUTY)):
+            raise RowSynthError(f"{where}: must hold whole numbers from 0 to 3, not {value!r}")
+
+
+def _vib(vib: object, where: str) -> None:
+    """Refuses what is not a vibrato: {"delay": ticks, "depth": semitones, "rate": Hz}, the depth at least."""
+    if not isinstance(vib, dict):
+        raise RowSynthError(f"{where}: must be a dict, not {vib!r}")
+    for key, value in vib.items():
+        if key not in ("delay", "depth", "rate"):
+            raise RowSynthError(f"{where}: unknown key {key!r}")
+        _number(value, f"{where}.{key}")
+    if "depth" not in vib:
+        raise RowSynthError(f"{where}: missing key 'depth'")
+
+
 def _unread(value: object, where: str) -> None:
     """Lets through a key that is not read here."""
 
@@ -139,9 +163,15 @@ def _unread(value: object, where: str) -> None:
 _KEYS = {
     "wave": _wave,
     "vol": _steps,
+    "duty": _duty,
+    "arp": _steps,
+    "pitch": _steps,
+    "vib": _vib,
+    "slide": _number,
     "release": _length,
     "gain": _number,
     "short": _flag,
+    "key_scale": _number,
     "gate": _unread,
 }
 
@@ -182,17 +212,30 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     total = ticks + release
     count = math.ceil(total)
     tick_samples = rate / TICK_HZ
-    gain = inst.get("gain", 1) * velocity
-    freq = _noise_rate(note) if wave == "noise" else hz(note)
+    # Every octave above middle C adds key_scale decibels to the level, and every octave below takes them off.
+    gain = inst.get("gain", 1) * velocity * 10 ** ((inst.get("key_scale", 0) * (note - 60)) / 240)
+    vib = inst.get("vib")
     level = np.zeros(count)
+    freq = np.zeros(count)
+    duty = np.zeros(count)
+    sweep = 0.0
     for tick in range(count):
         vol = step(inst.get("vol"), tick, 15) / 15
         if tick >= ticks:
             vol *= 1 - (tick - ticks + 1) / (release + 1)
         level[tick] = vol * gain
+        sweep += step(inst.get("pitch"), tick, 0)
+        wobble = 0.0
+        if vib is not None and tick >= vib.get("delay", 0):
+            # A rate of 0 is taken as a rate left out.
+            angle = (2 * math.pi * (vib.get("rate") or 6) * (tick - vib.get("delay", 0))) / TICK_HZ
+            wobble = vib["depth"] * math.sin(angle)
+        semis = note + step(inst.get("arp"), tick, 0) + sweep + wobble + inst.get("slide", 0) * (tick / TICK_HZ)
+        freq[tick] = _noise_rate(semis) if wave == "noise" else hz(semis)
+        duty[tick] = DUTY[int(step(inst.get("duty"), tick, 2))]
     edges = np.floor(at + np.arange(count + 1) * tick_samples + 0.5).astype(np.int64)
     # The level takes the same length of time to arrive at any rate.
     slew = 1 - (1 - _SLEW) ** (DEFAULT_RATE / rate)
     short = 1 if inst.get("short", False) else 0
-    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), float(freq), short)
+    _k_note(out, edges, level, slew, new_state(), WAVES[wave], float(rate), freq, short, duty)
     return at + math.floor(total * tick_samples + 0.5)

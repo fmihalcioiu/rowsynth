@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import re
 import unittest
 
 import numpy as np
@@ -29,9 +30,9 @@ def tick_of(samples: np.ndarray, tick: int) -> np.ndarray:
     return samples[math.floor(tick * RATE / TICK_HZ + 0.5):math.floor((tick + 1) * RATE / TICK_HZ + 0.5)]
 
 
-def levels(inst: dict, ticks: float = 4, velocity: float = 1.0) -> list[float]:
+def levels(inst: dict, ticks: float = 4, velocity: float = 1.0, note: float = 69.0) -> list[float]:
     """The level a note has come to by the last sample of each tick. Noise is 1 or -1, so its size is the level."""
-    out = np.abs(play({**inst, "wave": "noise"}, 69.0, ticks, velocity))
+    out = np.abs(play({**inst, "wave": "noise"}, note, ticks, velocity))
     return [float(tick_of(out, tick)[-1]) for tick in range(math.ceil(ticks + inst.get("release", 2)))]
 
 
@@ -44,6 +45,16 @@ def pitch(samples: np.ndarray) -> float:
 def fine(samples: np.ndarray) -> float:
     """How far off `pitch` can be, in hertz: one climb in the length of the samples."""
     return RATE / (len(samples) - 1)
+
+
+def pitches(samples: np.ndarray, count: int) -> list[float]:
+    """The pitch of each of the first ticks of a note."""
+    return [pitch(tick_of(samples, tick)) for tick in range(count)]
+
+
+def share_high(samples: np.ndarray) -> float:
+    """The share of its period a pulse is high for. It has no offset, so the higher its top, the shorter its stay."""
+    return float(-samples.min() / (samples.max() - samples.min()))
 
 
 class ConstantsTest(unittest.TestCase):
@@ -229,6 +240,165 @@ class WaveTest(unittest.TestCase):
             self.assertTrue(np.array_equal(play({"wave": wave, "gate": 0.5}), play({"wave": wave})), wave)
 
 
+class ArpTest(unittest.TestCase):
+    def test_number_moves_the_whole_note(self):
+        for wave in ("pulse", "saw", "tri", "noise"):
+            plain = play({"wave": wave})
+            self.assertTrue(np.array_equal(play({"wave": wave, "arp": 12}, 57), plain), wave)
+            self.assertTrue(np.array_equal(play({"wave": wave, "arp": -7}, 76), plain), wave)
+            self.assertFalse(np.array_equal(play({"wave": wave, "arp": 1}), plain), wave)
+
+    def test_list_sets_the_pitch_of_each_tick_and_holds_its_last(self):
+        for wave in ("pulse", "saw", "tri"):
+            got = play({"wave": wave, "arp": [0, 12, 24], "release": 0}, ticks=5)
+            want = [hz(69 + semis) for semis in (0, 12, 24, 24, 24)]
+            np.testing.assert_allclose(pitches(got, 5), want, rtol=0, atol=fine(tick_of(got, 0)), err_msg=wave)
+
+    def test_loop_goes_round(self):
+        got = play({"wave": "saw", "arp": {"v": [0, 12, 24], "loop": 1}, "release": 0}, ticks=7)
+        want = [hz(69 + semis) for semis in (0, 12, 24, 12, 24, 12, 24)]
+        np.testing.assert_allclose(pitches(got, 7), want, rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_a_tick_at_0_is_the_plain_note(self):
+        got = play({"wave": "saw", "arp": [0, 0, 7]})
+        plain = play({"wave": "saw"})
+        self.assertTrue(np.array_equal(got[:267], plain[:267]))
+        self.assertFalse(np.array_equal(got[267:400], plain[267:400]))
+
+
+class SweepTest(unittest.TestCase):
+    def test_number_is_added_again_every_tick(self):
+        got = play({"wave": "saw", "pitch": 12, "release": 0}, 45, ticks=4)
+        want = [hz(45 + semis) for semis in (12, 24, 36, 48)]
+        np.testing.assert_allclose(pitches(got, 4), want, rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_list_adds_a_step_a_tick(self):
+        got = play({"wave": "saw", "pitch": [0, 0, 12, 0, 12, 0], "release": 0}, 57, ticks=7)
+        want = [hz(57 + semis) for semis in (0, 0, 12, 12, 24, 24, 24)]
+        np.testing.assert_allclose(pitches(got, 7), want, rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_one_step_then_nothing_moves_the_whole_note(self):
+        for wave in ("pulse", "saw", "tri", "noise"):
+            self.assertTrue(np.array_equal(play({"wave": wave, "pitch": [12, 0]}, 57), play({"wave": wave})), wave)
+
+    def test_list_keeps_adding_its_last_step(self):
+        self.assertTrue(np.array_equal(play({"pitch": [3]}), play({"pitch": 3})))
+        self.assertTrue(np.array_equal(play({"pitch": [5, 3]}, 64), play({"pitch": 3}, 66)))
+
+    def test_loop_goes_round(self):
+        got = play({"wave": "saw", "pitch": {"v": [12, -12], "loop": 0}, "release": 0}, 57, ticks=6)
+        want = [hz(57 + semis) for semis in (12, 0, 12, 0, 12, 0)]
+        np.testing.assert_allclose(pitches(got, 6), want, rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_sweep_and_arp_add_up(self):
+        self.assertTrue(np.array_equal(play({"pitch": [5, 0], "arp": 7}, 57), play({})))
+
+
+class VibTest(unittest.TestCase):
+    def test_bends_the_pitch_up_and_down_by_its_depth(self):
+        # Fifteen times a second is a quarter of a turn a tick: none, all the way up, none, all the way down.
+        got = play({"wave": "saw", "vib": {"depth": 12, "rate": 15}, "release": 0}, ticks=6)
+        want = [hz(69 + semis) for semis in (0, 12, 0, -12, 0, 12)]
+        np.testing.assert_allclose(pitches(got, 6), want, rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_starts_after_its_delay(self):
+        got = play({"wave": "saw", "vib": {"delay": 3, "depth": 12, "rate": 15}, "release": 0}, ticks=6)
+        self.assertTrue(np.array_equal(got[:533], play({"wave": "saw", "release": 0}, ticks=6)[:533]))
+        self.assertAlmostEqual(pitch(tick_of(got, 4)), 880.0, delta=fine(tick_of(got, 4)))
+
+    def test_delay_past_the_end_leaves_the_note_plain(self):
+        self.assertTrue(np.array_equal(play({"vib": {"delay": 50, "depth": 3}}), play({})))
+
+    def test_delay_left_out_is_none(self):
+        self.assertTrue(np.array_equal(play({"vib": {"depth": 2}}), play({"vib": {"depth": 2, "delay": 0}})))
+
+    def test_rate_left_out_is_six_times_a_second(self):
+        left_out = play({"vib": {"depth": 2}})
+        self.assertTrue(np.array_equal(left_out, play({"vib": {"depth": 2, "rate": 6}})))
+        self.assertFalse(np.array_equal(left_out, play({"vib": {"depth": 2, "rate": 5}})))
+
+    def test_rate_of_0_is_a_rate_left_out(self):
+        self.assertTrue(np.array_equal(play({"vib": {"depth": 2, "rate": 0}}), play({"vib": {"depth": 2}})))
+
+    def test_depth_of_0_leaves_the_note_plain(self):
+        self.assertTrue(np.array_equal(play({"vib": {"depth": 0}}), play({})))
+
+    def test_bends_the_clock_of_the_noise(self):
+        got = play({"wave": "noise", "vib": {"depth": 6, "rate": 15}})
+        self.assertTrue(np.array_equal(got[:133], play(HISS)[:133]))
+        self.assertFalse(np.array_equal(got[133:267], play(HISS)[133:267]))
+
+
+class SlideTest(unittest.TestCase):
+    def test_moves_the_pitch_by_its_semitones_every_second(self):
+        # Sixty semitones a second is one a tick.
+        got = play({"wave": "saw", "slide": 60, "release": 0}, 57, ticks=25)
+        heard = [pitch(tick_of(got, tick)) for tick in (0, 12, 24)]
+        np.testing.assert_allclose(heard, [hz(57), hz(69), hz(81)], rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_below_0_slides_down(self):
+        got = play({"wave": "saw", "slide": -60, "release": 0}, 81, ticks=25)
+        heard = [pitch(tick_of(got, tick)) for tick in (0, 12, 24)]
+        np.testing.assert_allclose(heard, [hz(81), hz(69), hz(57)], rtol=0, atol=fine(tick_of(got, 0)))
+
+    def test_first_tick_is_the_plain_note(self):
+        self.assertTrue(np.array_equal(play({"slide": 60})[:133], play({})[:133]))
+
+    def test_slide_of_0_leaves_the_note_plain(self):
+        self.assertTrue(np.array_equal(play({"slide": 0}), play({})))
+
+
+class DutyTest(unittest.TestCase):
+    def test_number_picks_the_width_of_the_pulse(self):
+        level = np.abs(play(HISS))
+        for duty in range(4):
+            got = play({"duty": duty}, 60.5)
+            plain = tone("pulse", hz(60.5), len(got) / RATE, RATE, duty=duty)
+            np.testing.assert_allclose(got, plain * level, rtol=0, atol=1e-6, err_msg=str(duty))
+
+    def test_duty_left_out_is_the_square(self):
+        self.assertTrue(np.array_equal(play({}), play({"duty": 2})))
+
+    def test_list_sets_the_width_of_each_tick_and_holds_its_last(self):
+        got = play({"duty": [0, 1, 2, 3], "release": 0}, 45, ticks=6)
+        shares = [share_high(tick_of(got, tick)) for tick in range(6)]
+        np.testing.assert_allclose(shares, [0.125, 0.25, 0.5, 0.75, 0.75, 0.75], rtol=0, atol=0.02)
+
+    def test_loop_goes_round(self):
+        got = play({"duty": {"v": [1, 0, 3], "loop": 1}, "release": 0}, 45, ticks=7)
+        shares = [share_high(tick_of(got, tick)) for tick in range(7)]
+        np.testing.assert_allclose(shares, [0.25, 0.125, 0.75, 0.125, 0.75, 0.125, 0.75], rtol=0, atol=0.02)
+
+    def test_duty_changes_no_other_wave(self):
+        for wave in ("saw", "tri", "noise"):
+            self.assertTrue(np.array_equal(play({"wave": wave, "duty": [0, 3]}), play({"wave": wave})), wave)
+
+
+class KeyScaleTest(unittest.TestCase):
+    def level(self, key_scale: float, note: float) -> float:
+        return levels({"key_scale": key_scale, "release": 0}, ticks=2, note=note)[-1]
+
+    def test_adds_its_decibels_for_every_octave_above_middle_c(self):
+        self.assertAlmostEqual(self.level(-6, 72), 10 ** (-6 / 20), places=3)
+        self.assertAlmostEqual(self.level(-6, 84), 10 ** (-12 / 20), places=3)
+        self.assertAlmostEqual(self.level(-6, 66), 10 ** (-3 / 20), places=3)
+        self.assertAlmostEqual(self.level(3, 84), 10 ** (6 / 20), places=3)
+
+    def test_takes_them_off_below_middle_c(self):
+        self.assertAlmostEqual(self.level(-6, 48), 10 ** (6 / 20), places=3)
+        self.assertAlmostEqual(self.level(3, 36), 10 ** (-6 / 20), places=3)
+
+    def test_middle_c_stays_as_it_is(self):
+        for wave in ("pulse", "noise"):
+            self.assertTrue(np.array_equal(play({"wave": wave, "key_scale": -6}, 60), play({"wave": wave}, 60)), wave)
+
+    def test_key_scale_of_0_changes_no_note(self):
+        self.assertTrue(np.array_equal(play({"key_scale": 0}, 84), play({}, 84)))
+
+    def test_goes_by_the_note_and_not_by_where_the_arp_takes_it(self):
+        np.testing.assert_allclose(play({"key_scale": -6, "arp": 12}, 60), play({"arp": 12}, 60), rtol=0, atol=1e-6)
+
+
 class BufferTest(unittest.TestCase):
     def test_adds_to_what_is_there(self):
         inst = {"wave": "tri", "vol": [15, 8]}
@@ -333,6 +503,26 @@ class KnownSamplesTest(unittest.TestCase):
         self.check(out, ((0, 0.096576), (1, 0.186934), (2, -0.271474), (3, 0.350572), (4, 0.424576), (5, 0.493816),
                          (6, 0.558599), (200, -0.807579), (400, 0.516200), (532, 0.266705), (533, 0.0)))
 
+    def test_saw_with_an_arp_a_sweep_a_slide_and_a_key_scale(self):
+        inst = {"wave": "saw", "arp": {"v": [0, 7, 12], "loop": 1}, "pitch": [0.5, 0.25], "slide": -12, "key_scale": -3,
+                "release": 1}
+        out = np.zeros(670, dtype=np.float32)
+        end = render_note(out, 0, inst, 64.0, 4, 1.0, RATE)
+        self.assertEqual(end, 667)
+        self.check(out, ((1, -0.101649), (2, -0.133938), (3, -0.155294), (132, 0.175062), (133, 0.250651),
+                         (134, 0.364234), (135, 0.477819), (266, -0.683616), (267, -0.570021), (268, -0.417950),
+                         (400, 0.047837), (500, 0.778095), (600, 0.271052), (666, -0.031964), (667, 0.0)))
+
+    def test_pulse_with_duty_steps_and_a_vibrato_at_11025_hz(self):
+        inst = {"duty": [0, 3, 1], "vib": {"delay": 1, "depth": 0.5, "rate": 7}, "vol": 12}
+        out = np.zeros(920, dtype=np.float32)
+        end = render_note(out, 0, inst, 76.0, 3, 0.8, 11025)
+        self.assertEqual(end, 919)
+        self.check(out, ((0, 0.022629), (1, 0.103111), (2, 0.079640), (3, -0.027185), (183, -0.158828),
+                         (184, -0.266865), (185, 0.319960), (186, 0.319962), (367, -0.955401), (368, 0.421999),
+                         (369, 0.960000), (370, 0.960000), (500, 0.946809), (700, -0.213410), (918, -0.106681),
+                         (919, 0.0)))
+
 
 class ErrorTest(unittest.TestCase):
     def refused(self, inst: object = None, out: object = None, at: object = 0, note: object = 69.0,
@@ -344,69 +534,102 @@ class ErrorTest(unittest.TestCase):
             render_note(out, at, {} if inst is None else inst, note, ticks, velocity, rate)
         return str(caught.exception)
 
+    def begins(self, start: str, said: str, about: object = None) -> None:
+        """Holds that an error opens with the key or the argument it is about, or with a part of that."""
+        self.assertRegex(said, "^" + re.escape(start) + r"[:.\[]", about)
+
     def test_refuses_a_key_an_instrument_does_not_have(self):
         for key in ("volume", "echo", "Wave", "", 3):
             self.assertIn(repr(key), self.refused({"vol": 12, key: 1}))
 
     def test_refuses_what_is_not_an_instrument(self):
         for inst in ("pulse", ["pulse"], 3, True):
-            self.assertIn("instrument", self.refused(inst))
+            self.begins("instrument", self.refused(inst))
 
     def test_refuses_a_wave_it_does_not_know(self):
         for wave in ("square", "fm", "PULSE", "", None, 0, ["pulse"]):
             said = self.refused({"wave": wave})
-            self.assertIn("wave", said)
+            self.begins("wave", said)
             self.assertIn(repr(wave), said)
 
     def test_refuses_a_vol_that_is_not_a_step_table(self):
         for vol in ("15", None, True, {"v": 15}, {"loop": 1}, {"v": None}, float("nan"), ("15",)):
-            self.assertIn("vol", self.refused({"vol": vol}), repr(vol))
+            self.begins("vol", self.refused({"vol": vol}), repr(vol))
 
     def test_names_the_part_of_a_step_table_that_is_wrong(self):
-        self.assertIn("vol[1]", self.refused({"vol": [15, "9", 4]}))
-        self.assertIn("vol[2]", self.refused({"vol": [15, 9, None]}))
-        self.assertIn("vol[0]", self.refused({"vol": [float("inf")]}))
-        self.assertIn("vol.v[1]", self.refused({"vol": {"v": [15, True], "loop": 0}}))
-        self.assertIn("vol.v", self.refused({"vol": {"v": "15", "loop": 0}}))
-        self.assertIn("vol.loop", self.refused({"vol": {"v": [15, 9], "loop": 0.5}}))
-        self.assertIn("vol.loop", self.refused({"vol": {"v": [15, 9], "loop": None}}))
+        self.begins("vol[1]", self.refused({"vol": [15, "9", 4]}))
+        self.begins("vol[2]", self.refused({"vol": [15, 9, None]}))
+        self.begins("vol[0]", self.refused({"vol": [float("inf")]}))
+        self.begins("vol.v[1]", self.refused({"vol": {"v": [15, True], "loop": 0}}))
+        self.begins("vol.v", self.refused({"vol": {"v": "15", "loop": 0}}))
+        self.begins("vol.loop", self.refused({"vol": {"v": [15, 9], "loop": 0.5}}))
+        self.begins("vol.loop", self.refused({"vol": {"v": [15, 9], "loop": None}}))
         self.assertIn("'again'", self.refused({"vol": {"v": [15, 9], "again": 0}}))
+
+    def test_refuses_an_arp_or_a_pitch_that_is_not_a_step_table(self):
+        for key in ("arp", "pitch"):
+            for table in ("7", None, True, {"v": 7}, {"loop": 0}, float("nan")):
+                self.begins(key, self.refused({key: table}), repr(table))
+            self.begins(f"{key}[1]", self.refused({key: [0, "7"]}))
+            self.begins(f"{key}.v[0]", self.refused({key: {"v": [None], "loop": 0}}))
+            self.begins(f"{key}.loop", self.refused({key: {"v": [0, 7], "loop": "0"}}))
+
+    def test_refuses_a_duty_that_is_not_a_step_table_of_0_to_3(self):
+        for duty in (4, -1, 1.5, [0, 4], [2, 2.5], {"v": [0, 7], "loop": 0}, "2", None, True, {"v": 2}, [0, None]):
+            self.begins("duty", self.refused({"duty": duty}), repr(duty))
+        self.begins("duty", self.refused({"wave": "saw", "duty": 4}))
+        self.assertIn("4", self.refused({"duty": [0, 4]}))
+
+    def test_refuses_a_vib_that_is_not_a_vibrato(self):
+        for vib in (None, 3, "wide", [], True, {}, {"delay": 2}, {"depth": "1"}, {"depth": None}, {"depth": True},
+                    {"depth": 1, "rate": "6"}, {"depth": 1, "delay": [2]}, {"depth": 1, "speed": 6}):
+            self.begins("vib", self.refused({"vib": vib}), repr(vib))
+        self.assertIn("'depth'", self.refused({"vib": {"delay": 2, "rate": 6}}))
+        self.begins("vib.depth", self.refused({"vib": {"depth": "1"}}))
+        self.begins("vib.rate", self.refused({"vib": {"depth": 1, "rate": None}}))
+        self.begins("vib.delay", self.refused({"vib": {"depth": 1, "delay": "2"}}))
+        self.assertIn("'speed'", self.refused({"vib": {"depth": 1, "speed": 6}}))
+
+    def test_refuses_a_slide_or_a_key_scale_that_is_not_a_number(self):
+        for key in ("slide", "key_scale"):
+            for value in ("1", None, True, [1], {"v": [1]}, float("inf")):
+                self.begins(key, self.refused({key: value}), repr(value))
 
     def test_refuses_a_release_that_is_not_a_length_of_time(self):
         for release in ("2", None, True, [2], -1, -0.5, float("nan"), float("inf")):
-            self.assertIn("release", self.refused({"release": release}), repr(release))
+            self.begins("release", self.refused({"release": release}), repr(release))
 
     def test_refuses_a_gain_that_is_not_a_number(self):
         for gain in ("1", None, True, [1], float("nan")):
-            self.assertIn("gain", self.refused({"gain": gain}), repr(gain))
+            self.begins("gain", self.refused({"gain": gain}), repr(gain))
 
     def test_refuses_a_short_that_is_not_true_or_false(self):
         for short in (1, 0, "yes", None, [True]):
-            self.assertIn("short", self.refused({"wave": "noise", "short": short}), repr(short))
+            self.begins("short", self.refused({"wave": "noise", "short": short}), repr(short))
 
     def test_refuses_a_note_that_is_not_a_number(self):
         for note in ("a4", None, True, [69], float("nan")):
-            self.assertIn("note", self.refused(note=note), repr(note))
+            self.begins("note", self.refused(note=note), repr(note))
 
     def test_refuses_ticks_that_are_not_a_length_of_time(self):
         for ticks in ("2", None, True, -1, -0.5, float("inf")):
-            self.assertIn("ticks", self.refused(ticks=ticks), repr(ticks))
+            self.begins("ticks", self.refused(ticks=ticks), repr(ticks))
 
     def test_refuses_a_velocity_that_is_not_a_number(self):
         for velocity in ("1", None, True, float("nan")):
-            self.assertIn("velocity", self.refused(velocity=velocity), repr(velocity))
+            self.begins("velocity", self.refused(velocity=velocity), repr(velocity))
 
     def test_refuses_a_rate_that_makes_no_sense(self):
         for rate in (0, -8000, 8000.5, "8000", None, True, float("inf")):
-            self.assertIn("rate", self.refused(rate=rate), repr(rate))
+            self.begins("rate", self.refused(rate=rate), repr(rate))
 
-    def test_refuses_a_start_that_is_not_a_sample_of_the_buffer_or_after_it(self):
+    def test_refuses_a_start_that_is_not_a_whole_number_from_0_up(self):
         for at in (-1, 1.5, "0", None, True, float("nan")):
-            self.assertIn("at", self.refused(at=at), repr(at))
+            self.begins("at", self.refused(at=at), repr(at))
 
     def test_refuses_a_buffer_that_is_not_float32_samples(self):
         for out in ([0.0] * 400, np.zeros(400), np.zeros(400, dtype=np.int16), np.zeros((2, 200), dtype=np.float32)):
-            self.assertIn("out", self.refused(out=out))
+            self.begins("out", self.refused(out=out))
 
     def test_refusing_leaves_the_buffer_as_it_was(self):
         out = np.full(400, 0.5, dtype=np.float32)
