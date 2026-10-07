@@ -230,7 +230,7 @@ def _read(defn: object) -> _Sound:
     return _Sound(notes, gain, defn.get("echo"))
 
 
-def render_sound(defn: dict, rate: int = DEFAULT_RATE) -> np.ndarray:
+def render_sound(defn: dict, rate: int = DEFAULT_RATE, gain: float | None = None) -> np.ndarray:
     """A sound as samples: every note of every voice added into one buffer, and that put through `finish`.
 
     defn is {"voices": [{"inst": instrument, "notes": [[tick, note, ticks, velocity], ...]}, ...], "gain": level,
@@ -239,9 +239,14 @@ def render_sound(defn: dict, rate: int = DEFAULT_RATE) -> np.ndarray:
     velocity can be left out. So can the gain, which is then 0.5. The buffer runs until two ticks after the
     last release is over. An echo is added by `echo` before the output stage, and makes the buffer longer by
     its returns. Of its settings only the time is needed, and that can be a list of times.
+    A gain handed in beside the definition is the one the sound goes through the output stage at, in place of
+    the definition's own.
     """
     sound = _read(defn)
     _count(rate, "rate", 1)
+    if gain is None:
+        gain = sound.gain
+    _number(gain, "gain")
     tick_samples = rate / TICK_HZ
     end = max((tick + ticks + inst.get("release", _RELEASE) for inst, tick, _, ticks, _ in sound.notes), default=0)
     out = np.zeros(math.ceil((end + _TAIL) * tick_samples), dtype=np.float32)
@@ -249,4 +254,4 @@ def render_sound(defn: dict, rate: int = DEFAULT_RATE) -> np.ndarray:
         render_note(out, math.floor(tick * tick_samples + 0.5), inst, note, ticks, velocity, rate)
     if sound.echo is not None:
         out = echo(out, **sound.echo, rate=rate)
-    return finish(out, sound.gain, rate)
+    return finish(out, gain, rate)

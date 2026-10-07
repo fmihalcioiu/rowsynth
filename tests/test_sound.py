@@ -170,6 +170,12 @@ class NotesTest(unittest.TestCase):
         quiet = sound([[0, 69, 3]], HUM, gain=0.2)
         np.testing.assert_allclose(quiet, 0.4 * sound([[0, 69, 3]], HUM, gain=0.5), rtol=0, atol=1e-6)
 
+    def test_gain_handed_in_takes_the_place_of_the_definitions_own(self):
+        defn = {"voices": [{"inst": HUM, "notes": [[0, 69, 3]]}], "gain": 0.4}
+        self.assertTrue(np.array_equal(render_sound(defn, RATE, 0.2), render_sound({**defn, "gain": 0.2}, RATE)))
+        self.assertTrue(np.array_equal(render_sound(defn, RATE, None), render_sound(defn, RATE)))
+        self.assertFalse(np.array_equal(render_sound(defn, RATE, 0.2), render_sound(defn, RATE)))
+
     def test_sound_ends_on_silence(self):
         # The note is over at sample 533, two ticks before the end, and the high-pass is still settling from it.
         out = sound([[0, "a2", 4]], {"wave": "saw", "release": 0})
@@ -670,6 +676,16 @@ class ErrorTest(unittest.TestCase):
     def test_refuses_a_gain_that_is_not_a_number(self):
         for gain in ("0.5", None, True, [0.5], float("nan"), float("inf")):
             self.at("gain", self.refused({"voices": [self.GOOD], "gain": gain}), gain)
+
+    def test_refuses_a_gain_handed_in_that_is_not_a_number_and_still_checks_the_definitions_own(self):
+        wrong = [({"voices": [self.GOOD]}, gain) for gain in ("0.5", True, [0.5], float("nan"), float("inf"))]
+        wrong.append(({"voices": [self.GOOD], "gain": "0.5"}, 0.2))
+        for defn, gain in wrong:
+            with mock.patch("rowsynth.sound.render_note") as played:
+                with self.assertRaises(RowSynthError, msg=repr((defn, gain))) as caught:
+                    render_sound(defn, RATE, gain)
+            self.at("gain", str(caught.exception), (defn, gain))
+            played.assert_not_called()
 
     def test_refuses_an_echo_that_is_not_a_dict_of_settings(self):
         for room in (None, 1, 0.05, True, "room", [], [0.05], [{"time": 0.05}]):
