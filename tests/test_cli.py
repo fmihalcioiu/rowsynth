@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import os
 import subprocess
 import sys
 import tempfile
@@ -184,9 +185,25 @@ class Refusals(CommandLineCase):
 
 
 class Process(CommandLineCase):
-    def test_python_m_rowsynth_info_prints_the_same_json_as_a_process(self) -> None:
+    def run_process(self, *argv: str, encoding: str) -> subprocess.CompletedProcess:
+        """`python -m rowsynth` run as a process of its own, whose output Python would write in `encoding`."""
         above = Path(rowsynth.__file__).resolve().parents[1]
-        done = subprocess.run(
-            [sys.executable, "-m", "rowsynth", "info", str(self.saved(PROJECT))], cwd=above, capture_output=True)
+        return subprocess.run([sys.executable, "-m", "rowsynth", *argv], cwd=above, capture_output=True,
+                              env={**os.environ, "PYTHONIOENCODING": encoding})
+
+    def test_python_m_rowsynth_info_prints_the_same_json_as_a_process(self) -> None:
+        done = self.run_process("info", str(self.saved(PROJECT)), encoding="utf-8")
         self.assertEqual(done.returncode, 0, done.stderr)
         self.assertEqual(json.dumps(json.loads(done.stdout)), json.dumps(INFO))
+
+    def test_a_process_prints_utf_8_whatever_encoding_its_output_was_given(self) -> None:
+        named = {"instruments": {"kő": {"wave": "tri", "vol": 12}}}
+        done = self.run_process("info", str(self.saved(named)), encoding="ascii")
+        self.assertEqual(done.returncode, 0, done.stderr)
+        self.assertEqual(json.loads(done.stdout.decode("utf-8"))["instruments"], ["kő"])
+
+    def test_a_process_names_a_missing_file_in_utf_8_too(self) -> None:
+        path = self.folder / "kő.json"
+        done = self.run_process("info", str(path), encoding="ascii")
+        self.assertEqual(done.returncode, 2)
+        self.assertEqual(done.stderr.decode("utf-8").splitlines(), [f"error: {path}: no such file"])

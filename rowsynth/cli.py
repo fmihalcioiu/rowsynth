@@ -29,12 +29,22 @@ def _parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _utf8(stream: object) -> None:
+    """Has a stream of the process write UTF-8. One that is not the process's own, as in a test, is left alone."""
+    reconfigure = getattr(stream, "reconfigure", None)
+    if reconfigure:
+        reconfigure(encoding="utf-8")
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     """Run the command that `argv` names and give its exit code. With None, `argv` is the process's own.
 
     A command that stops on a RowSynthError or an OSError has the message printed to standard error after
     "error: ", and the code is 2. With no command named the help goes to standard error, and the code is 2 again.
+    What is printed is UTF-8 whatever the console is set to, so a name in any script comes through a pipe whole.
     """
+    _utf8(sys.stdout)
+    _utf8(sys.stderr)
     parser = _parser()
     args = parser.parse_args(argv)
     if not hasattr(args, "run"):
