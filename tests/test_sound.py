@@ -10,12 +10,20 @@ import numpy as np
 
 from rowsynth.errors import RowSynthError
 from rowsynth.note import render_note
-from rowsynth.sound import finish, render_sound
+from rowsynth.sound import echo, finish, render_sound
 
 # A tick is 133 and a third samples at 8000 Hz: ticks start at samples 0, 133, 267, 400, 533, 667, 800.
 RATE = 8000
 # The share of itself the high-pass keeps from one sample to the next at 8000 Hz.
 KEPT = 1 - 2 * math.pi * 30 / RATE
+# A sixty-fourth of a second is 125 samples at 8000 Hz, and a time that is held with nothing rounded off.
+LATER = 1 / 64
+GAP = 125
+# A cutoff so far up that the echo's low-pass covers the whole way to its input in one sample: what goes into it
+# comes out as it went in.
+OPEN = 1e6
+# One sample of 0.5 and then silence.
+CLICK = np.array([0.5] + [0.0] * 59)
 # Noise at full level from its first tick to its last. Its first sample is never 0.
 HISS = {"wave": "noise", "release": 0}
 # A triangle that stays well under the knee.
@@ -45,6 +53,22 @@ def sound(notes: list, inst: dict = HISS, rate: int = RATE, **keys: object) -> n
 def stage(samples: object, gain: float = 1.0, rate: int = RATE, fade: bool = True) -> np.ndarray:
     """Samples through the output stage, in doubles. What was handed in is left as it was."""
     return finish(np.array(samples, dtype=np.float32), gain, rate, fade).astype(np.float64)
+
+
+def wet(samples: object, time: object, *settings: float, rate: int = RATE) -> np.ndarray:
+    """Samples with their echo, in doubles. The settings are the feedback, the mix and the cutoff, in that order."""
+    return echo(np.array(samples, dtype=np.float32), time, *settings, rate=rate).astype(np.float64)
+
+
+def covered(lp: float) -> float:
+    """The share of the way to its input that the echo's low-pass covers in one sample at 8000 Hz."""
+    return 1 - math.exp(-2 * math.pi * lp / RATE)
+
+
+def top_share(samples: np.ndarray) -> float:
+    """How bright samples are: the level of what flips at every sample in them, against that of what holds steady."""
+    flips = 1 - 2 * (np.arange(len(samples)) % 2)
+    return abs(float((samples * flips).sum())) / abs(float(samples.sum()))
 
 
 def peak(samples: np.ndarray) -> float:
@@ -166,7 +190,8 @@ class NotesTest(unittest.TestCase):
 
     def test_definition_is_left_as_it_was(self):
         defn = {"voices": [{"inst": dict(BLIP), "notes": [[0, "c4", 2], [1, 64, 2, 0.5]]},
-                           {"inst": copy.deepcopy(GLASS), "notes": [[0, 55, 2]]}], "gain": 0.4}
+                           {"inst": copy.deepcopy(GLASS), "notes": [[0, 55, 2]]}], "gain": 0.4,
+                "echo": {"time": [0.004, 0, 0.01], "feedback": 0.5}}
         before = copy.deepcopy(defn)
         render_sound(defn, RATE)
         self.assertEqual(defn, before)
@@ -307,6 +332,214 @@ class BufferTest(unittest.TestCase):
             self.assertFalse(stage(np.zeros(300), fade=fade).any())
 
 
+class EchoTest(unittest.TestCase):
+    def test_first_return_comes_its_time_after_the_sound_at_mix_of_its_level(self):
+        # With the low-pass wide open a return is the sound over again, later and at another level.
+        for mix in (0.3, 0.5, 1.0, -0.2):
+            out = wet(CLICK, LATER, 0.0, mix, OPEN)
+            self.assertEqual(np.flatnonzero(out).tolist(), [0, GAP], mix)
+            self.assertEqual(out[0], 0.5, mix)
+            self.assertAlmostEqual(out[GAP], mix * 0.5, places=6, msg=mix)
+        out = wet(WASH[:100], LATER, 0.0, 0.4, OPEN)
+        self.assertFalse(out[100:GAP].any())
+        np.testing.assert_allclose(out[GAP:], 0.4 * out[:100], rtol=0, atol=1e-6)
+
+    def test_low_pass_spreads_a_return_out_and_keeps_its_level(self):
+        # What is left of a click after the low-pass adds up to the click.
+        for lp in (300, 3000):
+            out = wet(CLICK, LATER, 0.0, 0.4, lp)
+            self.assertFalse(out[1:GAP].any(), lp)
+            self.assertAlmostEqual(out[GAP], 0.4 * 0.5 * covered(lp), places=6, msg=lp)
+            self.assertTrue((out[GAP + 1:GAP + 20] < out[GAP:GAP + 19]).all(), lp)
+            self.assertAlmostEqual(float(out[GAP:].sum()), 0.4 * 0.5, places=5, msg=lp)
+
+    def test_delay_is_the_time_in_samples_with_a_half_rounded_up(self):
+        for seconds, rate, delay in ((0.0125, 8000, 100), (0.0125, 11025, 138), (0.5, 11025, 5513), (0.001, 44100, 44)):
+            out = wet(CLICK, seconds, 0.0, 1.0, OPEN, rate=rate)
+            self.assertEqual(np.flatnonzero(out).tolist(), [0, delay], (seconds, rate))
+
+    def test_time_shorter_than_a_sample_is_a_delay_of_one_sample(self):
+        for seconds in (1e-9, 0.00001, 0.00006, 1 / RATE):
+            out = wet(CLICK, seconds, 0.0, 1.0, OPEN)
+            self.assertEqual(out[:3].tolist(), [0.5, 0.5, 0.0], seconds)
+
+    def test_each_return_is_quieter_by_the_feedback(self):
+        for feedback in (0.5, 0.8):
+            out = wet(CLICK, LATER, feedback, 0.4, OPEN)
+            self.assertEqual(np.flatnonzero(out[:8 * GAP]).tolist(), [n * GAP for n in range(8)], feedback)
+            for n in range(1, 8):
+                self.assertAlmostEqual(out[n * GAP], 0.4 * 0.5 * feedback ** (n - 1), places=6, msg=(feedback, n))
+
+    def test_each_return_is_darker_than_the_one_before(self):
+        # A return has been through the low-pass once for every time it has gone round, and the low-pass lets
+        # this share of the highest tone through each time.
+        through = covered(500) / (2 - covered(500))
+        out = wet(CLICK, LATER, 0.6, 0.4, 500)
+        returns = [out[n * GAP:(n + 1) * GAP] for n in range(1, 5)]
+        for n, back in enumerate(returns, 1):
+            self.assertAlmostEqual(float(back.sum()), 0.4 * 0.5 * 0.6 ** (n - 1), places=6, msg=n)
+            self.assertAlmostEqual(top_share(back), through ** n, places=5, msg=n)
+        shares = [top_share(back) for back in returns]
+        self.assertTrue(all(later < 0.25 * earlier for earlier, later in zip(shares, shares[1:])), shares)
+
+    def test_lower_cutoff_gives_darker_returns(self):
+        shares = [top_share(wet(CLICK, LATER, 0.0, 0.4, lp)[GAP:]) for lp in (200, 1000, 3000, OPEN)]
+        self.assertTrue(all(darker < brighter for darker, brighter in zip(shares, shares[1:])), shares)
+        self.assertAlmostEqual(shares[-1], 1.0, places=6)
+
+    def test_cutoff_of_0_lets_nothing_come_back(self):
+        # The buffer is as long as it would be with returns in it.
+        out = wet(WASH[:100], LATER, 0.5, 0.4, 0)
+        self.assertEqual(len(out), 100 + 10 * GAP)
+        self.assertTrue(np.array_equal(out[:100], WASH[:100].astype(np.float32)))
+        self.assertFalse(out[100:].any())
+
+    def test_buffer_grows_by_the_time_for_every_return_less_than_60_decibels_under_the_first(self):
+        # A thousandth is sixty decibels. At a feedback of 0.5 the tenth return is at 0.00195 of the first, and
+        # the eleventh at 0.00098.
+        for feedback, returns in ((0, 1), (0.3, 6), (0.5, 10), (0.9, 66), (0.95, 135)):
+            self.assertEqual(len(wet(WASH[:60], LATER, feedback)), 60 + returns * GAP, feedback)
+
+    def test_buffer_grows_by_the_longest_time_and_a_part_of_a_sample_rounds_up(self):
+        self.assertEqual(len(wet(WASH[:60], [LATER, 2 * LATER, LATER / 2], 0.5)), 60 + 10 * 2 * GAP)
+        # Ten returns, 172.265625 samples apart at 11025 Hz.
+        self.assertEqual(len(wet(WASH[:60], LATER, 0.5, rate=11025)), 60 + 1723)
+
+    def test_feedback_is_held_between_0_and_0_95(self):
+        most = wet(WASH[:60], 0.004, 0.95)
+        for feedback in (0.96, 1, 5):
+            self.assertTrue(np.array_equal(wet(WASH[:60], 0.004, feedback), most), feedback)
+        self.assertFalse(np.array_equal(wet(WASH[:60], 0.004, 0.94), most))
+        least = wet(WASH[:60], 0.004, 0)
+        for feedback in (-0.1, -5):
+            self.assertTrue(np.array_equal(wet(WASH[:60], 0.004, feedback), least), feedback)
+        self.assertFalse(np.array_equal(wet(WASH[:60], 0.004, 0.01), least))
+
+    def test_returns_die_away_whatever_the_feedback(self):
+        out = wet(CLICK, LATER, 50, 0.5, OPEN)
+        self.assertEqual(len(out), 60 + 135 * GAP)
+        self.assertAlmostEqual(out[20 * GAP] / out[19 * GAP], 0.95, places=5)
+        self.assertAlmostEqual(out[135 * GAP], 0.5 * 0.5 * 0.95 ** 134, places=6)
+        self.assertLess(out[135 * GAP], 0.0011 * out[GAP])
+
+    def test_several_times_are_lines_of_their_own_that_share_the_mix(self):
+        # 0.01 seconds are 80 samples.
+        out = wet(CLICK, [LATER, 0.01], 0.0, 0.6, OPEN)
+        self.assertEqual(np.flatnonzero(out).tolist(), [0, 80, GAP])
+        self.assertAlmostEqual(out[80], 0.3 * 0.5, places=6)
+        self.assertAlmostEqual(out[GAP], 0.3 * 0.5, places=6)
+        out = wet(CLICK, [0.01, 0.02, LATER], 0.0, 0.6, OPEN)
+        self.assertEqual(np.flatnonzero(out).tolist(), [0, 80, GAP, 160])
+        np.testing.assert_allclose(out[[80, GAP, 160]], 0.2 * 0.5, rtol=0, atol=1e-6)
+
+    def test_return_of_one_line_does_not_go_round_another(self):
+        out = wet(CLICK, [LATER, 0.01], 0.5, 0.6, OPEN)
+        self.assertEqual(np.flatnonzero(out[:300]).tolist(), [0, 80, GAP, 160, 240, 2 * GAP])
+        self.assertAlmostEqual(out[160], 0.3 * 0.5 * 0.5, places=6)
+        self.assertAlmostEqual(out[2 * GAP], 0.3 * 0.5 * 0.5, places=6)
+        self.assertEqual(out[80 + GAP], 0.0)
+
+    def test_time_given_twice_is_one_line_at_the_whole_mix(self):
+        twice = wet(WASH[:90], [0.004, 0.004], 0.5, 0.4)
+        np.testing.assert_allclose(twice, wet(WASH[:90], 0.004, 0.5, 0.4), rtol=0, atol=1e-6)
+
+    def test_time_that_is_not_above_0_is_no_line(self):
+        alone = wet(WASH[:90], LATER, 0.5, 0.4)
+        for times in ([LATER, 0], [-0.5, LATER], [0, LATER, -LATER, 0.0]):
+            self.assertTrue(np.array_equal(wet(WASH[:90], times, 0.5, 0.4), alone), times)
+        self.assertFalse(np.array_equal(wet(WASH[:90], [LATER, 0.0001], 0.5, 0.4), alone))
+
+    def test_sound_with_no_usable_time_is_left_as_it_was(self):
+        dry = WASH[:90].astype(np.float32)
+        for times in (0, -0.5, 0.0, [], (), [0], [0, -0.5]):
+            self.assertTrue(np.array_equal(echo(dry, times, 0.9, 0.8, 500.0, RATE), dry), times)
+
+    def test_dry_is_left_as_it_was_and_a_buffer_of_its_own_comes_back(self):
+        dry = WASH[:90].astype(np.float32)
+        before = dry.copy()
+        for times in (LATER, [0.004, 0.01], 0):
+            out = echo(dry, times, 0.5, 0.4, 3000.0, RATE)
+            self.assertFalse(np.shares_memory(out, dry), times)
+            self.assertTrue(np.array_equal(dry, before), times)
+
+    def test_gives_float32_samples(self):
+        for times in (LATER, 0):
+            out = echo(WASH[:90].astype(np.float32), times, rate=RATE)
+            self.assertIs(type(out), np.ndarray)
+            self.assertEqual(out.dtype, np.float32)
+            self.assertEqual(out.ndim, 1)
+
+    def test_settings_left_out_are_0_3_0_3_3000_and_44100(self):
+        dry = WASH[:90].astype(np.float32)
+        left_out = echo(dry, 0.002)
+        self.assertTrue(np.array_equal(left_out, echo(dry, 0.002, 0.3, 0.3, 3000.0, 44100)))
+        for other in ((0.31, 0.3, 3000.0, 44100), (0.3, 0.31, 3000.0, 44100), (0.3, 0.3, 2900.0, 44100),
+                      (0.3, 0.3, 3000.0, 48000)):
+            self.assertFalse(np.array_equal(left_out, echo(dry, 0.002, *other)), other)
+
+    def test_tuple_does_for_a_list_of_times(self):
+        self.assertTrue(np.array_equal(wet(WASH[:90], (0.004, 0.01)), wet(WASH[:90], [0.004, 0.01])))
+
+    def test_silence_comes_back_as_silence(self):
+        out = wet(np.zeros(90), LATER, 0.5)
+        self.assertEqual(len(out), 90 + 10 * GAP)
+        self.assertFalse(out.any())
+        self.assertFalse(wet([], LATER, 0.5).any())
+
+
+class EchoInASoundTest(unittest.TestCase):
+    def test_echo_comes_between_the_notes_and_the_output_stage(self):
+        voices = [{"inst": BLIP, "notes": [[0, "c4", 3], [2, "e4", 3, 0.5]]}]
+        room = {"time": [LATER, 0.004], "feedback": 0.5, "mix": 0.4, "lp": 2000}
+        # Two ticks are 367.5 samples at 11025 Hz.
+        for rate, second in ((RATE, 267), (11025, 368)):
+            got = render_sound({"voices": voices, "gain": 0.4, "echo": room}, rate)
+            out = np.zeros(len(render_sound({"voices": voices}, rate)), dtype=np.float32)
+            render_note(out, 0, BLIP, 60.0, 3, 1.0, rate)
+            render_note(out, second, BLIP, 64.0, 3, 0.5, rate)
+            out = echo(out, [LATER, 0.004], 0.5, 0.4, 2000, rate)
+            self.assertTrue(np.array_equal(got, finish(out, 0.4, rate)), rate)
+
+    def test_sound_is_as_it_was_until_its_first_return(self):
+        # The noise's first sample is never 0, so its return shows on the sample it lands on.
+        plain = sound([[0, 81, 1]])
+        for seconds, delay in ((LATER, GAP), (0.004, 32), (0.0301, 241)):
+            out = sound([[0, 81, 1]], echo={"time": seconds})
+            self.assertTrue(np.array_equal(out[:delay], plain[:delay]), seconds)
+            self.assertNotEqual(float(out[delay]), float(plain[delay]), seconds)
+
+    def test_echo_makes_a_sound_longer_by_its_returns(self):
+        # A tick held and two more are 400 samples.
+        for feedback, returns in ((0, 1), (0.5, 10), (0.95, 135)):
+            out = sound([[0, 81, 1]], echo={"time": LATER, "feedback": feedback})
+            self.assertEqual(len(out), 400 + returns * GAP, feedback)
+        self.assertEqual(len(sound([[0, 81, 1]], echo={"time": [0.004, 2 * LATER, LATER]})), 400 + 6 * 2 * GAP)
+        self.assertEqual(len(render_sound({"voices": [], "echo": {"time": LATER}}, RATE)), 267 + 6 * GAP)
+
+    def test_settings_left_out_of_an_echo_are_0_3_0_3_and_3000(self):
+        left_out = sound([[0, 81, 1]], echo={"time": 0.004})
+        whole = {"time": 0.004, "feedback": 0.3, "mix": 0.3, "lp": 3000}
+        self.assertTrue(np.array_equal(left_out, sound([[0, 81, 1]], echo=whole)))
+        for key, other in (("time", 0.005), ("feedback", 0.31), ("mix", 0.31), ("lp", 2900)):
+            self.assertFalse(np.array_equal(left_out, sound([[0, 81, 1]], echo={**whole, key: other})), key)
+
+    def test_echo_with_no_usable_time_leaves_a_sound_as_it_was(self):
+        notes = [[0, "a3", 3], [2, "e4", 2, 0.5]]
+        plain = sound(notes, BLIP)
+        for times in (0, -0.5, [], [0, -0.5]):
+            self.assertTrue(np.array_equal(sound(notes, BLIP, echo={"time": times, "feedback": 0.9}), plain), times)
+        self.assertFalse(np.array_equal(sound(notes, BLIP, echo={"time": [0, 0.004]}), plain))
+
+    def test_sound_with_an_echo_stays_under_full_scale_and_ends_on_silence(self):
+        out = sound([[0, "a3", 4]], {"wave": "saw"}, gain=3, echo={"time": 0.004, "feedback": 0.95, "mix": 2})
+        self.assertGreater(peak(out), 0.98)
+        self.assertLess(peak(out), 1.0)
+        self.assertEqual(float(out[-1]), 0.0)
+
+    def test_echo_of_nothing_is_silence(self):
+        self.assertFalse(render_sound({"voices": [], "echo": {"time": [LATER, 0.004], "feedback": 0.9}}, RATE).any())
+
+
 class KnownSamplesTest(unittest.TestCase):
     def check(self, out: np.ndarray, known: tuple) -> None:
         spots = [spot for spot, sample in known]
@@ -332,6 +565,47 @@ class KnownSamplesTest(unittest.TestCase):
                          (368, -0.060194), (369, -0.382793), (500, -0.069744), (643, -0.984739), (644, -0.860699),
                          (700, 0.853307), (900, 0.804854), (1100, 0.412408), (1194, -0.005665), (1300, -0.000922),
                          (1561, 0.0)))
+
+    def test_pulse_voice_with_an_echo(self):
+        # The first return lands on sample 240, and the buffer is longer by ten times that.
+        out = render_sound({"voices": [{"inst": BLIP, "notes": [[0, "a4", 2], [2, "c#5", 2, 0.6]]}],
+                            "echo": {"time": 0.03, "feedback": 0.5, "mix": 0.4}}, RATE)
+        self.assertEqual(len(out), 3334)
+        self.check(out, ((0, 0.015717), (1, 0.090894), (100, -0.258479), (239, 0.537074), (240, 0.527141),
+                         (241, 0.125292), (242, -0.156034), (300, -0.256345), (479, 0.110394), (480, 0.109625),
+                         (481, -0.031256), (533, -0.101043), (600, -0.013767), (720, 0.065342), (934, -0.030301),
+                         (1000, -0.008782), (1200, 0.016295), (1500, -0.003513), (2000, -0.001758), (2400, 0.000492),
+                         (3333, 0.0)))
+
+    def test_chip_and_fm_voices_with_an_echo_of_two_times_and_feedback_over_the_cap_at_11025_hz(self):
+        # The lines are 37 and 56 samples long.
+        defn = {"voices": [{"inst": HUM, "notes": [[0, "a2", 4]]},
+                           {"inst": GLASS, "notes": [[0, 57, 2], [1.5, "e4", 2, 0.7]]},
+                           {"inst": HISS, "notes": [[1, 87, 1, 0.5]]}], "gain": 1.6,
+                "echo": {"time": [0.0051, 0.0034], "feedback": 2, "mix": 0.5, "lp": 1200}}
+        out = render_sound(defn, 11025)
+        self.assertEqual(len(out), 9153)
+        self.check(out, ((0, 0.059311), (1, 0.135301), (2, 0.233344), (37, -0.989556), (38, -0.989777), (56, 0.983978),
+                         (58, 0.976834), (100, 0.814662), (184, -0.969127), (276, 0.989049), (500, 0.273601),
+                         (900, 0.529766), (1300, 0.116030), (1561, -0.017378), (1562, -0.010346), (1700, -0.016451),
+                         (2500, -0.003656), (4000, -0.000924), (6000, -0.000170), (9152, 0.0)))
+
+    def test_echo_with_its_settings_left_out_at_44100_and_48000_hz(self):
+        defn = {"voices": [{"inst": HUM, "notes": [[0, "e4", 1]]}], "echo": {"time": 0.0125}}
+        # The first return lands on sample 551.
+        out = render_sound(defn)
+        self.assertEqual(len(out), 6983)
+        self.check(out, ((0, 0.004779), (1, 0.009481), (2, 0.014106), (300, -0.001118), (550, 0.217022),
+                         (551, 0.216597), (552, 0.163454), (553, 0.163779), (700, 0.056463), (1102, 0.067039),
+                         (1103, 0.060123), (1800, -0.135729), (2400, -0.004057), (3000, 0.012147), (3675, 0.004476),
+                         (4500, 0.000366), (6982, 0.0)))
+        # And here on sample 600.
+        out = render_sound(defn, 48000)
+        self.assertEqual(len(out), 7601)
+        self.check(out, ((0, 0.004395), (1, 0.008724), (2, 0.012988), (300, 0.321055), (599, 0.216559), (600, 0.216140),
+                         (601, 0.162950), (602, 0.163213), (700, 0.087252), (1200, 0.067350), (1201, 0.060758),
+                         (1800, -0.053285), (2400, -0.012885), (3000, -0.026899), (4000, 0.004431), (4500, -0.000373),
+                         (5500, 0.000102), (7600, 0.0)))
 
     def test_output_stage_on_samples_that_go_over_the_knee(self):
         samples = (3.4 * WASH[:300]).astype(np.float32)
@@ -365,6 +639,10 @@ class ErrorTest(unittest.TestCase):
         """What the error says when the instrument of the second voice is refused."""
         return self.refused({"voices": [self.GOOD, {"inst": inst, "notes": [[0, "a4", 1]]}]})
 
+    def refused_echo(self, room: object) -> str:
+        """What the error says when the echo of a sound is refused."""
+        return self.refused({"voices": [self.GOOD], "echo": room})
+
     def at(self, place: str, said: str, about: object = None) -> None:
         """Holds that an error opens with the place of what is wrong."""
         self.assertTrue(said.startswith(place + ": "), (said, about))
@@ -374,7 +652,7 @@ class ErrorTest(unittest.TestCase):
             self.at("sound", self.refused(defn), defn)
 
     def test_refuses_a_key_a_definition_does_not_have(self):
-        for key in ("volume", "echo", "Voices", "inst", "", 3):
+        for key in ("volume", "Echo", "Voices", "inst", "", 3):
             said = self.refused({"voices": [], key: 1})
             self.at("sound", said, key)
             self.assertIn(repr(key), said)
@@ -392,6 +670,39 @@ class ErrorTest(unittest.TestCase):
     def test_refuses_a_gain_that_is_not_a_number(self):
         for gain in ("0.5", None, True, [0.5], float("nan"), float("inf")):
             self.at("gain", self.refused({"voices": [self.GOOD], "gain": gain}), gain)
+
+    def test_refuses_an_echo_that_is_not_a_dict_of_settings(self):
+        for room in (None, 1, 0.05, True, "room", [], [0.05], [{"time": 0.05}]):
+            self.at("echo", self.refused_echo(room), room)
+
+    def test_refuses_a_key_an_echo_does_not_have(self):
+        for key in ("delay", "Time", "gain", "rate", "", 3):
+            said = self.refused_echo({"time": 0.05, key: 1})
+            self.at("echo", said, key)
+            self.assertIn(repr(key), said)
+
+    def test_refuses_an_echo_without_its_time(self):
+        for room in ({}, {"feedback": 0.5}, {"feedback": 0.5, "mix": 0.3, "lp": 3000}):
+            said = self.refused_echo(room)
+            self.at("echo", said, room)
+            self.assertIn("'time'", said)
+
+    def test_refuses_a_time_that_is_neither_a_number_nor_a_list_of_numbers(self):
+        for time in ("0.05", None, True, {}, float("nan"), float("inf")):
+            self.at("echo.time", self.refused_echo({"time": time}), time)
+        for time in ([0.05, "0.02"], [0.05, None], [0.05, True], (0.05, [0.02]), [0.05, float("nan"), "0.02"]):
+            self.at("echo.time[1]", self.refused_echo({"time": time}), time)
+
+    def test_refuses_a_feedback_a_mix_or_a_cutoff_that_is_not_a_number(self):
+        for key in ("feedback", "mix", "lp"):
+            for value in ("0.5", None, True, [0.5], float("nan"), float("inf")):
+                self.at(f"echo.{key}", self.refused_echo({"time": 0.05, key: value}), (key, value))
+
+    def test_refuses_a_cutoff_below_0(self):
+        for lp in (-0.001, -1, -3000):
+            said = self.refused_echo({"time": 0.05, "lp": lp})
+            self.at("echo.lp", said, lp)
+            self.assertIn(repr(lp), said)
 
     def test_refuses_a_voice_that_is_not_an_instrument_and_its_notes(self):
         for voice in (None, [], "voice", 3, [{}, []]):
@@ -463,7 +774,9 @@ class ErrorTest(unittest.TestCase):
     def test_nothing_is_played_when_a_sound_is_refused(self):
         late = {"voices": [self.GOOD, {"inst": {}, "notes": [[0, "a4", 1], [1, "h4", 1]]}]}
         cases = ((late, RATE), ({"voices": [self.GOOD], "gain": None}, RATE), ({"voices": [self.GOOD]}, 0),
-                 ({"voices": [self.GOOD, {"inst": {"wave": "fm", "ops": [3]}, "notes": []}]}, RATE))
+                 ({"voices": [self.GOOD, {"inst": {"wave": "fm", "ops": [3]}, "notes": []}]}, RATE),
+                 ({"voices": [self.GOOD], "echo": {"time": [0.05, "0.02"]}}, RATE),
+                 ({"voices": [self.GOOD], "echo": {"time": 0.05, "lp": -1}}, RATE))
         for defn, rate in cases:
             with mock.patch("rowsynth.sound.render_note") as played:
                 self.refused(defn, rate)
@@ -485,3 +798,23 @@ class ErrorTest(unittest.TestCase):
                 finish(out, *given)
             self.at(name, str(caught.exception), given)
         self.assertTrue(np.array_equal(out, np.full(300, 0.5, dtype=np.float32)))
+
+    def test_echo_refuses_a_buffer_that_is_not_float32_samples(self):
+        for dry in ([0.0] * 300, np.zeros(300), np.zeros(300, dtype=np.int16), np.zeros((2, 150), dtype=np.float32)):
+            with self.assertRaises(RowSynthError) as caught:
+                echo(dry, 0.05, rate=RATE)
+            self.at("dry", str(caught.exception))
+
+    def test_echo_refuses_a_setting_or_a_rate_of_the_wrong_kind(self):
+        wrong = [("time", (time, 0.3, 0.3, 3000.0, RATE)) for time in ("0.05", None, True, {}, float("nan"))]
+        wrong += [("time[1]", ([0.05, time], 0.3, 0.3, 3000.0, RATE)) for time in ("0.02", None, True, [0.02])]
+        wrong += [("feedback", (0.05, feedback, 0.3, 3000.0, RATE)) for feedback in ("0.3", None, True, float("nan"))]
+        wrong += [("mix", (0.05, 0.3, mix, 3000.0, RATE)) for mix in ("0.3", None, True, float("nan"))]
+        wrong += [("lp", (0.05, 0.3, 0.3, lp, RATE)) for lp in ("3000", None, True, float("inf"), -1)]
+        wrong += [("rate", (0.05, 0.3, 0.3, 3000.0, rate)) for rate in (0, -8000, 8000.5, "8000", None, True)]
+        dry = np.full(300, 0.5, dtype=np.float32)
+        for name, given in wrong:
+            with self.assertRaises(RowSynthError, msg=repr(given)) as caught:
+                echo(dry, *given)
+            self.at(name, str(caught.exception), given)
+        self.assertTrue(np.array_equal(dry, np.full(300, 0.5, dtype=np.float32)))

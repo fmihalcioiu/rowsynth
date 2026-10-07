@@ -1,16 +1,25 @@
-"""A sound: voices playing notes into one buffer, and the output stage that buffer leaves through."""
+"""A sound: voices playing notes into one buffer, the echo it can be given, and the output stage it leaves through."""
 from __future__ import annotations
 
 import math
+from typing import NamedTuple
 
 import numpy as np
 
 from .errors import RowSynthError
-from .note import DEFAULT_RATE, TICK_HZ, _RELEASE, _buffer, _count, _flag, _instrument, _length, _number, render_note
+from .note import (DEFAULT_RATE, TICK_HZ, _RELEASE, _buffer, _count, _flag, _instrument, _is_number, _length, _number,
+                   render_note)
 from .notes import midi
 
 # The ticks a sound's buffer runs on for after its last release is over.
 _TAIL = 2
+
+# The most of what comes back that a delay line takes in again. With all of it the returns would never die away.
+_TOP_FEEDBACK = 0.95
+
+# A buffer with an echo is made long enough for every return that is less than this many powers of ten under the
+# first. Three powers of ten are sixty decibels.
+_HEARD = 3
 
 # The high-pass takes off what lies under about this many hertz.
 _LOW_HZ = 30
@@ -96,15 +105,105 @@ def _list(value: object, where: str) -> None:
         raise RowSynthError(f"{where}: must be a list, not {value!r}")
 
 
-def _read(defn: object) -> tuple[list[tuple], float]:
-    """Checks a sound definition from end to end, and returns its notes and its gain.
+def _times(value: object, where: str) -> None:
+    """Refuses what is neither a number nor a list of numbers. A tuple does for a list."""
+    if isinstance(value, (list, tuple)):
+        for i, item in enumerate(value):
+            _number(item, f"{where}[{i}]")
+    elif not _is_number(value):
+        raise RowSynthError(f"{where}: must be a number or a list of numbers, not {value!r}")
 
-    A note comes back as (instrument, tick, note number, ticks, velocity). Whatever is wrong is refused with
-    the place it sits at: "voices[1].notes[0][2]" is the third value of the first note of the second voice.
+
+# What each setting of an echo must be. Under 0 the cutoff would have the low-pass run away, so it is held to
+# what a length of time is held to: 0 or more.
+_ECHO = {"time": _times, "feedback": _number, "mix": _number, "lp": _length}
+
+
+def _settings(settings: object, where: str = "") -> None:
+    """Refuses settings of an echo that lack their time, have a key they should not have, or a value of the wrong kind.
+
+    where is the place the settings sit at in a sound definition, and the error opens with it. Settings that
+    sit nowhere have their keys named on their own.
     """
-    _keys(defn, "sound", ("voices",), ("gain",))
+    _keys(settings, where or "echo", ("time",), tuple(_ECHO))
+    for key, value in settings.items():
+        _ECHO[key](value, f"{where}.{key}" if where else key)
+
+
+def _k_line(out, dry, line, delay, feedback, ease, level):
+    """Adds to out what one delay line gives back of dry.
+
+    line is the delay line, as long as out. Each of its cells takes the sample of dry at its place, where dry
+    has one, and feedback of what is coming back there. What comes back at a sample is the cell delay samples
+    before it, through a low-pass that covers the share ease of the way to its input every sample, and it is
+    added to out at level. Every cell is written before it is read, so what line holds on the way in does not
+    matter.
+    """
+    size = dry.shape[0]
+    back = 0.0
+    for i in range(out.shape[0]):
+        sent = 0.0
+        if i >= delay:
+            sent = float(line[i - delay])
+        back += (sent - back) * ease
+        fresh = 0.0
+        if i < size:
+            fresh = float(dry[i])
+        line[i] = fresh + feedback * back
+        out[i] = float(out[i]) + level * back
+
+
+def echo(dry: np.ndarray, time: float | list[float], feedback: float = 0.3, mix: float = 0.3, lp: float = 3000.0,
+         rate: int = DEFAULT_RATE) -> np.ndarray:
+    """dry with its echo added, in a new and longer buffer. dry is left as it was.
+
+    The sound comes back `time` seconds after itself, then again that much later at `feedback` of the level it
+    came back at, and so on. Every return has been through a low-pass at `lp` Hz once more than the one before
+    it, so each is darker than the last. time can be a list: every time in it is a delay line of its own, and
+    the lines share `mix` between them. With one line the first return is at `mix` of the sound, with two each
+    line's is at half of that. A time that is not above 0 is no line, and with no line at all what comes back
+    is dry as it is. feedback is held between 0 and 0.95. The buffer is longer than dry by the longest time,
+    once for every return that is less than sixty decibels under the first.
+    """
+    _buffer(dry, "dry")
+    _settings({"time": time, "feedback": feedback, "mix": mix, "lp": lp})
+    _count(rate, "rate", 1)
+    times = [seconds for seconds in (time if isinstance(time, (list, tuple)) else (time,)) if seconds > 0]
+    if not times:
+        return dry.copy()
+    kept = min(max(feedback, 0), _TOP_FEEDBACK)
+    returns = math.ceil(-_HEARD / math.log10(kept)) if kept > 0 else 1
+    out = np.zeros(len(dry) + math.ceil(returns * max(times) * rate), dtype=np.float32)
+    out[:len(dry)] = dry
+    ease = 1 - math.exp((-2 * math.pi * lp) / rate)
+    line = np.zeros(len(out), dtype=np.float32)
+    for seconds in times:
+        # A time under half a sample would be no delay at all, and a line cannot read the cell it is writing.
+        delay = max(1, math.floor(seconds * rate + 0.5))
+        _k_line(out, dry, line, delay, float(kept), ease, mix / len(times))
+    return out
+
+
+class _Sound(NamedTuple):
+    """What a sound definition says, once it has been checked."""
+
+    notes: list[tuple]
+    gain: float
+    echo: dict | None
+
+
+def _read(defn: object) -> _Sound:
+    """Checks a sound definition from end to end, and returns what it says: its notes, its gain and its echo.
+
+    A note comes back as (instrument, tick, note number, ticks, velocity). The echo comes back as its settings,
+    or as None from a sound that has none. Whatever is wrong is refused with the place it sits at:
+    "voices[1].notes[0][2]" is the third value of the first note of the second voice.
+    """
+    _keys(defn, "sound", ("voices",), ("gain", "echo"))
     gain = defn.get("gain", 0.5)
     _number(gain, "gain")
+    if "echo" in defn:
+        _settings(defn["echo"], "echo")
     _list(defn["voices"], "voices")
     notes = []
     for i, voice in enumerate(defn["voices"]):
@@ -128,22 +227,26 @@ def _read(defn: object) -> tuple[list[tuple], float]:
             _length(ticks, f"{spot}[2]")
             _number(velocity, f"{spot}[3]")
             notes.append((voice["inst"], tick, number, ticks, velocity))
-    return notes, gain
+    return _Sound(notes, gain, defn.get("echo"))
 
 
 def render_sound(defn: dict, rate: int = DEFAULT_RATE) -> np.ndarray:
     """A sound as samples: every note of every voice added into one buffer, and that put through `finish`.
 
-    defn is {"voices": [{"inst": instrument, "notes": [[tick, note, ticks, velocity], ...]}, ...], "gain": level}.
+    defn is {"voices": [{"inst": instrument, "notes": [[tick, note, ticks, velocity], ...]}, ...], "gain": level,
+    "echo": {"time": seconds, "feedback": 0.3, "mix": 0.3, "lp": 3000}}.
     A note starts at its tick and is held for its ticks. It is a name such as "c#4" or a number, and its
     velocity can be left out. So can the gain, which is then 0.5. The buffer runs until two ticks after the
-    last release is over.
+    last release is over. An echo is added by `echo` before the output stage, and makes the buffer longer by
+    its returns. Of its settings only the time is needed, and that can be a list of times.
     """
-    notes, gain = _read(defn)
+    sound = _read(defn)
     _count(rate, "rate", 1)
     tick_samples = rate / TICK_HZ
-    end = max((tick + ticks + inst.get("release", _RELEASE) for inst, tick, _, ticks, _ in notes), default=0)
+    end = max((tick + ticks + inst.get("release", _RELEASE) for inst, tick, _, ticks, _ in sound.notes), default=0)
     out = np.zeros(math.ceil((end + _TAIL) * tick_samples), dtype=np.float32)
-    for inst, tick, note, ticks, velocity in notes:
+    for inst, tick, note, ticks, velocity in sound.notes:
         render_note(out, math.floor(tick * tick_samples + 0.5), inst, note, ticks, velocity, rate)
-    return finish(out, gain, rate)
+    if sound.echo is not None:
+        out = echo(out, **sound.echo, rate=rate)
+    return finish(out, sound.gain, rate)
