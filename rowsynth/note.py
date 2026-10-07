@@ -21,6 +21,9 @@ _SLEW = 0.012
 # The highest cutoff the low-pass is given, in hertz.
 _TOP_CUTOFF = 18000
 
+# The ticks a note fades for once it is let go, when its instrument does not say.
+_RELEASE = 2
+
 
 def step(seq, tick: int, fallback: float) -> float:
     """The value of a step table at a tick.
@@ -140,6 +143,12 @@ def _flag(value: object, where: str) -> None:
         raise RowSynthError(f"{where}: must be true or false, not {value!r}")
 
 
+def _buffer(out: object, where: str) -> None:
+    """Refuses what is not a buffer of samples."""
+    if not isinstance(out, np.ndarray) or out.dtype != np.float32 or out.ndim != 1:
+        raise RowSynthError(f"{where}: must be a float32 array of one dimension")
+
+
 def _wave(value: object, where: str) -> None:
     """Refuses what is not the name of a wave."""
     if not isinstance(value, str) or value not in WAVES:
@@ -191,7 +200,8 @@ def _unread(value: object, where: str) -> None:
 
 
 # What each key of an instrument must be. "gate" says how long a note is held, which whoever asks for the
-# note has settled already. "alg", "fb" and "ops" are the FM voice's, which checks them as it is built.
+# note has settled already. "alg", "fb" and "ops" are the FM voice's, which checks them as it is built: only
+# an instrument with that wave has them read.
 _KEYS = {
     "wave": _wave,
     "vol": _steps,
@@ -213,14 +223,26 @@ _KEYS = {
 }
 
 
-def _instrument(inst: object) -> None:
-    """Refuses an instrument that has a key it should not have, or a value of the wrong kind."""
+def _instrument(inst: object, where: str = "") -> None:
+    """Refuses an instrument that has a key it should not have, or a value of the wrong kind.
+
+    where is the place the instrument sits at in the data it comes from, and the error opens with it. An
+    instrument that sits nowhere has its keys named on their own.
+    """
+    whole = where or "instrument"
+    under = f"{where}." if where else ""
     if not isinstance(inst, dict):
-        raise RowSynthError(f"instrument: must be a dict, not {inst!r}")
+        raise RowSynthError(f"{whole}: must be a dict, not {inst!r}")
     for key, value in inst.items():
         if key not in _KEYS:
-            raise RowSynthError(f"instrument: unknown key {key!r}")
-        _KEYS[key](value, key)
+            raise RowSynthError(f"{whole}: unknown key {key!r}")
+        _KEYS[key](value, under + key)
+    if inst.get("wave") == "fm":
+        try:
+            # Whatever is wrong with a voice is wrong with it at any rate.
+            fm_voice(inst, DEFAULT_RATE)
+        except RowSynthError as error:
+            raise RowSynthError(f"{under}{error}") from None
 
 
 def _noise_rate(note: float) -> float:
@@ -235,8 +257,7 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     out is a float32 array. What is in it stays, and whatever of the note falls past its end is dropped.
     note is a number (69 is a4), ticks is how long it is held, and velocity scales its level.
     """
-    if not isinstance(out, np.ndarray) or out.dtype != np.float32 or out.ndim != 1:
-        raise RowSynthError("out: must be a float32 array of one dimension")
+    _buffer(out, "out")
     _count(at, "at", 0)
     _instrument(inst)
     _number(note, "note")
@@ -249,7 +270,7 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     fm_params = fm_state = np.zeros((0, 0))
     if wave == "fm":
         fm_params, fm_state = fm_voice(inst, rate)
-    release = inst.get("release", 2)
+    release = inst.get("release", _RELEASE)
     total = ticks + release
     count = math.ceil(total)
     tick_samples = rate / TICK_HZ
