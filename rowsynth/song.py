@@ -1,4 +1,4 @@
-"""A song: the small language its channels are written in, its patterns laid end to end, and the whole of it played."""
+"""A song: the small language of its channels, its patterns laid end to end, and it played as a mix or as stems."""
 from __future__ import annotations
 
 import math
@@ -9,7 +9,7 @@ from contextlib import contextmanager
 import numpy as np
 
 from .errors import RowSynthError
-from .note import DEFAULT_RATE, TICK_HZ, _count, _flag, render_note
+from .note import DEFAULT_RATE, TICK_HZ, _RELEASE, _count, _flag, render_note
 from .notes import midi
 from .sound import finish
 
@@ -206,7 +206,7 @@ def lay(song: dict) -> tuple[dict[str, list[dict]], float]:
 # The share of its rows a note is held for, when its instrument does not say.
 _GATE = 0.9
 
-# The gain a song leaves through, when it does not say.
+# The gain of a song that does not say.
 _GAIN = 0.35
 
 # The seconds the two sides run on for after the last row, for what is still sounding there.
@@ -216,6 +216,39 @@ _TAIL = 0.5
 def _held(song: dict, inst: dict, event: dict) -> int:
     """The ticks a note is held for: the share of its rows that its instrument's gate keeps, and one at the least."""
     return max(1, math.floor(event["rows"] * song["row_ticks"] * inst.get("gate", _GATE) + 0.5))
+
+
+def _row_samples(song: dict, rate: int) -> float:
+    """The samples a row of a song takes, which need not be a whole number of them."""
+    return song["row_ticks"] * rate / TICK_HZ
+
+
+def _notes(song: dict, events: list[dict], echo: dict | None, rate: int) -> list[tuple]:
+    """What a channel plays, in the order it plays it: each note as (sample, instrument, note, ticks, velocity).
+
+    A note starts at the sample nearest to its row. With an echo, every note is followed by itself again,
+    `rows` later and at `gain` of its velocity.
+    """
+    row_samples = _row_samples(song, rate)
+    notes = []
+    for event in events:
+        inst = song["instruments"][event["inst"]]
+        ticks = _held(song, inst, event)
+        starts = [(event["row"], event["vel"])]
+        if echo:
+            # This echo is no delay line. The note itself is played a second time.
+            starts.append((event["row"] + echo["rows"], event["vel"] * echo["gain"]))
+        for row, velocity in starts:
+            notes.append((math.floor(row * row_samples + 0.5), inst, event["note"], ticks, velocity))
+    return notes
+
+
+def _play(notes: list[tuple], size: int, rate: int) -> np.ndarray:
+    """A buffer of `size` samples with those notes added into it. Whatever falls past its end is dropped."""
+    out = np.zeros(size, dtype=np.float32)
+    for at, inst, note, ticks, velocity in notes:
+        render_note(out, at, inst, note, ticks, velocity, rate)
+    return out
 
 
 def render_song(song: dict, only: list[str] | None = None, dry: bool = False, rate: int = DEFAULT_RATE) -> dict:
@@ -231,7 +264,7 @@ def render_song(song: dict, only: list[str] | None = None, dry: bool = False, ra
     _flag(dry, "dry")
     _count(rate, "rate", 1)
     laid, rows = lay(song)
-    row_samples = song["row_ticks"] * rate / TICK_HZ
+    row_samples = _row_samples(song, rate)
     total = math.ceil(rows * row_samples + rate * _TAIL)
     left = np.zeros(total, dtype=np.float32)
     right = np.zeros(total, dtype=np.float32)
@@ -239,17 +272,7 @@ def render_song(song: dict, only: list[str] | None = None, dry: bool = False, ra
         if only is not None and name not in only:
             continue
         channel = song["channels"][name]
-        echo = None if dry else channel.get("echo")
-        mono = np.zeros(total, dtype=np.float32)
-        for event in events:
-            inst = song["instruments"][event["inst"]]
-            ticks = _held(song, inst, event)
-            render_note(mono, math.floor(event["row"] * row_samples + 0.5), inst, event["note"], ticks,
-                        event["vel"], rate)
-            if echo:
-                # This echo is no delay line. The note itself is played a second time.
-                render_note(mono, math.floor((event["row"] + echo["rows"]) * row_samples + 0.5), inst,
-                            event["note"], ticks, event["vel"] * echo["gain"], rate)
+        mono = _play(_notes(song, events, None if dry else channel.get("echo"), rate), total, rate)
         level = channel.get("gain", 1)
         angle = (channel.get("pan", 0) + 1) * math.pi / 4
         # The sums are worked out in doubles, and only what a side then holds is rounded to float32.
@@ -259,3 +282,44 @@ def render_song(song: dict, only: list[str] | None = None, dry: bool = False, ra
     gain = song.get("gain", _GAIN)
     return {"left": finish(left, gain, rate), "right": finish(right, gain, rate), "rows": rows,
             "seconds": rows * row_samples / rate}
+
+
+def render_stems(song: dict, rate: int = DEFAULT_RATE) -> dict:
+    """A song a channel at a time: {"stems": [{"name", "pan", "samples"}], "rows", "loop_samples", "seconds"}.
+
+    A stem is one channel in mono, `loop_samples` long, made to be played round and round. What the channel is
+    still sounding when the rows end, a release or an echo, is added back on at the start of its stem, which
+    is where it is heard once the loop has come round. For the same reason a stem leaves through `finish`
+    with no fade at its end. It has the channel's echo, and its level is the channel's gain times the song's,
+    0.35 if the song has none. It is not panned: the channel's pan comes back beside it, 0 if it has none, for
+    whoever mixes the stems. They come in the order `lay` gives the channels in. "seconds" is how long the
+    loop lasts. A song with no rows has nothing to loop, and is refused.
+    """
+    _count(rate, "rate", 1)
+    laid, rows = lay(song)
+    # The rows are turned into ticks first and into samples after. Multiplied by `_row_samples` instead, the last
+    # digit can differ, and a length that sits on a half would round the other way.
+    loop_samples = math.floor(rows * song["row_ticks"] * rate / TICK_HZ + 0.5)
+    if not loop_samples:
+        if rows:
+            raise RowSynthError(f"the song's rows come to no samples at a rate of {rate}, so there is nothing to loop")
+        raise RowSynthError("the song has no rows, so there is nothing to loop")
+    tick_samples = rate / TICK_HZ
+    gain = song.get("gain", _GAIN)
+    stems = []
+    for name, events in laid.items():
+        channel = song["channels"][name]
+        notes = _notes(song, events, channel.get("echo"), rate)
+        # The channel is played into a buffer that runs on past the loop, as far as its last release does.
+        ends = [at + math.ceil((ticks + inst.get("release", _RELEASE)) * tick_samples)
+                for at, inst, _, ticks, _ in notes]
+        wide = _play(notes, max([loop_samples, *ends]), rate).astype(np.float64)
+        level = channel.get("gain", 1) * gain
+        samples = np.zeros(loop_samples, dtype=np.float32)
+        # The buffer goes into the loop a lap at a time, and a tail longer than the loop goes round more than
+        # once. Each lap is added in doubles, and what the loop then holds is rounded to float32 before the next.
+        for start in range(0, len(wide), loop_samples):
+            lap = wide[start:start + loop_samples]
+            samples[:len(lap)] += lap * level
+        stems.append({"name": name, "pan": channel.get("pan", 0), "samples": finish(samples, 1, rate, fade=False)})
+    return {"stems": stems, "rows": rows, "loop_samples": loop_samples, "seconds": loop_samples / rate}
