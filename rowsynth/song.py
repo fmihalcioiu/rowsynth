@@ -1,10 +1,17 @@
-"""The small language a song's channels are written in."""
+"""A song: the small language its channels are written in, its patterns laid end to end, and the whole of it played."""
 from __future__ import annotations
 
+import math
 import re
+from collections.abc import Iterator
+from contextlib import contextmanager
+
+import numpy as np
 
 from .errors import RowSynthError
+from .note import DEFAULT_RATE, TICK_HZ, _count, _flag, render_note
 from .notes import midi
+from .sound import finish
 
 # Everything a channel's text can hold, one kind to a line.
 _TOKEN = re.compile("|".join((
@@ -134,22 +141,121 @@ def transpose(text: str, semis: int) -> str:
     return " ".join(out)
 
 
+def _channels(song: dict, name: str) -> Iterator[tuple[str, dict, str]]:
+    """What a pattern holds: for each channel it has text for, the channel's name, its settings and that text."""
+    channels = song["channels"]
+    for channel, text in song["patterns"][name].items():
+        if channel not in channels:
+            raise RowSynthError(f"pattern {name!r}: no channel called {channel!r}")
+        yield channel, channels[channel], text
+
+
+@contextmanager
+def _within(pattern: str, channel: str) -> Iterator[None]:
+    """Has whatever is refused inside it say which of a song's many texts it was refused in."""
+    try:
+        yield
+    except RowSynthError as error:
+        raise RowSynthError(f"pattern {pattern!r}, channel {channel!r}: {error}") from None
+
+
 def up(song: dict, semis: int) -> dict:
     """A copy of a song with its tuned channels `semis` semitones higher. Drum channels keep their text."""
-    channels = song["channels"]
     patterns = {}
-    for name, pattern in song["patterns"].items():
+    for name in song["patterns"]:
         moved = {}
-        for channel, text in pattern.items():
-            if channel not in channels:
-                raise RowSynthError(f"pattern {name!r}: no channel called {channel!r}")
-            if channels[channel].get("drums"):
+        for channel, settings, text in _channels(song, name):
+            if settings.get("drums"):
                 moved[channel] = text
-                continue
-            try:
-                moved[channel] = transpose(text, semis)
-            except RowSynthError as error:
-                # A song has many texts: say which one could not be read.
-                raise RowSynthError(f"pattern {name!r}, channel {channel!r}: {error}") from None
+            else:
+                with _within(name, channel):
+                    moved[channel] = transpose(text, semis)
         patterns[name] = moved
     return {**song, "patterns": patterns}
+
+
+def lay(song: dict) -> tuple[dict[str, list[dict]], float]:
+    """A song's patterns laid end to end in its order. Gives each channel's events, and the rows the song fills.
+
+    An event's row is counted from the start of the song. A pattern lasts as long as the longest of its
+    channels, and the next one starts where it ends. A channel is left out when no pattern in the order has
+    text for it.
+    """
+    rows_per_beat = song.get("rows_per_beat", 4)
+    instruments = song.get("instruments", {})
+    laid: dict[str, list[dict]] = {}
+    start = 0.0
+    for name in song["order"]:
+        if name not in song["patterns"]:
+            raise RowSynthError(f"order: no pattern called {name!r}")
+        longest = 0.0
+        for channel, settings, text in _channels(song, name):
+            with _within(name, channel):
+                events, rows = parse(text, settings["inst"], rows_per_beat,
+                                     song.get("drums") if settings.get("drums") else None)
+                for found in events:
+                    if found["inst"] not in instruments:
+                        raise RowSynthError(f"no instrument called {found['inst']!r}")
+                    found["row"] += start
+            longest = max(longest, rows)
+            laid.setdefault(channel, []).extend(events)
+        start += longest
+    return laid, start
+
+
+# The share of its rows a note is held for, when its instrument does not say.
+_GATE = 0.9
+
+# The gain a song leaves through, when it does not say.
+_GAIN = 0.35
+
+# The seconds the two sides run on for after the last row, for what is still sounding there.
+_TAIL = 0.5
+
+
+def _held(song: dict, inst: dict, event: dict) -> int:
+    """The ticks a note is held for: the share of its rows that its instrument's gate keeps, and one at the least."""
+    return max(1, math.floor(event["rows"] * song["row_ticks"] * inst.get("gate", _GATE) + 0.5))
+
+
+def render_song(song: dict, only: list[str] | None = None, dry: bool = False, rate: int = DEFAULT_RATE) -> dict:
+    """A song as samples: {"left", "right", "rows", "seconds"}, the two sides and how long its rows take.
+
+    Every channel plays its notes into a buffer of its own, which goes to both sides at the channel's gain. Its
+    pan shares it between them: -1 is all left, 1 all right, and at 0, where a pan left out puts it, each side
+    has it 3 dB down. A channel with an echo plays every note again `rows` later at `gain` of its level, and
+    dry=True leaves those out. `only` names the channels to play, and the rest stay silent. The two sides
+    leave through `finish` at the song's gain, 0.35 if it has none. They run half a second past the last row
+    for what is still sounding there, which "seconds" does not count.
+    """
+    _flag(dry, "dry")
+    _count(rate, "rate", 1)
+    laid, rows = lay(song)
+    row_samples = song["row_ticks"] * rate / TICK_HZ
+    total = math.ceil(rows * row_samples + rate * _TAIL)
+    left = np.zeros(total, dtype=np.float32)
+    right = np.zeros(total, dtype=np.float32)
+    for name, events in laid.items():
+        if only is not None and name not in only:
+            continue
+        channel = song["channels"][name]
+        echo = None if dry else channel.get("echo")
+        mono = np.zeros(total, dtype=np.float32)
+        for event in events:
+            inst = song["instruments"][event["inst"]]
+            ticks = _held(song, inst, event)
+            render_note(mono, math.floor(event["row"] * row_samples + 0.5), inst, event["note"], ticks,
+                        event["vel"], rate)
+            if echo:
+                # This echo is no delay line. The note itself is played a second time.
+                render_note(mono, math.floor((event["row"] + echo["rows"]) * row_samples + 0.5), inst,
+                            event["note"], ticks, event["vel"] * echo["gain"], rate)
+        level = channel.get("gain", 1)
+        angle = (channel.get("pan", 0) + 1) * math.pi / 4
+        # The sums are worked out in doubles, and only what a side then holds is rounded to float32.
+        wide = mono.astype(np.float64)
+        left += wide * (level * math.cos(angle))
+        right += wide * (level * math.sin(angle))
+    gain = song.get("gain", _GAIN)
+    return {"left": finish(left, gain, rate), "right": finish(right, gain, rate), "rows": rows,
+            "seconds": rows * row_samples / rate}
