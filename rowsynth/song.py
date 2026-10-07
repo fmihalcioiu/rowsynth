@@ -137,7 +137,19 @@ def transpose(text: str, semis: int) -> str:
 def up(song: dict, semis: int) -> dict:
     """A copy of a song with its tuned channels `semis` semitones higher. Drum channels keep their text."""
     channels = song["channels"]
-    patterns = {name: {channel: text if channels[channel].get("drums") else transpose(text, semis)
-                       for channel, text in pattern.items()}
-                for name, pattern in song["patterns"].items()}
+    patterns = {}
+    for name, pattern in song["patterns"].items():
+        moved = {}
+        for channel, text in pattern.items():
+            if channel not in channels:
+                raise RowSynthError(f"pattern {name!r}: no channel called {channel!r}")
+            if channels[channel].get("drums"):
+                moved[channel] = text
+                continue
+            try:
+                moved[channel] = transpose(text, semis)
+            except RowSynthError as error:
+                # A song has many texts: say which one could not be read.
+                raise RowSynthError(f"pattern {name!r}, channel {channel!r}: {error}") from None
+        patterns[name] = moved
     return {**song, "patterns": patterns}

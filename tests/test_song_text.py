@@ -363,11 +363,18 @@ class UpTest(unittest.TestCase):
         song = {"channels": {"one": {"inst": "lead", "drums": False}}, "patterns": {"x": {"one": "c e g"}, "y": {}}}
         self.assertEqual(up(song, 12)["patterns"], {"x": {"one": "o5 c o5 e o5 g"}, "y": {}})
 
-    def test_text_that_cannot_be_read_is_refused(self):
-        song = {"channels": {"one": {"inst": "lead"}}, "patterns": {"x": {"one": "c e ? g"}}}
+    def test_text_that_cannot_be_read_is_refused_by_its_pattern_and_channel(self):
+        song = {"channels": {"one": {"inst": "lead"}, "two": {"inst": "lead"}},
+                "patterns": {"x": {"one": "c e g"}, "y": {"one": "c", "two": "c e ? g"}}}
         with self.assertRaises(RowSynthError) as caught:
             up(song, 2)
-        self.assertEqual(str(caught.exception), 'cannot read "? g" in a channel')
+        self.assertEqual(str(caught.exception), "pattern 'y', channel 'two': cannot read \"? g\" in a channel")
+
+    def test_a_pattern_naming_a_channel_the_song_lacks_is_refused(self):
+        song = {"channels": {"one": {"inst": "lead"}}, "patterns": {"x": {"one": "c", "two": "e"}}}
+        with self.assertRaises(RowSynthError) as caught:
+            up(song, 2)
+        self.assertEqual(str(caught.exception), "pattern 'x': no channel called 'two'")
 
 
 if __name__ == "__main__":
