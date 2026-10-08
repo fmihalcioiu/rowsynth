@@ -405,19 +405,25 @@ def _song(song: object, where: str, shared: dict, chords: dict) -> None:
 
 
 def _layers(layers: object, where: str, channels: dict) -> None:
-    """A song's layers: groups of channels, versions made of groups, the keys, and the versions mixed ahead."""
+    """A song's layers: groups of channels, versions made of groups, the keys, and the versions mixed ahead.
+
+    The keys may be left out, and the song is then heard in the one key it is written in.
+    """
     _record(layers, where, {
         "groups": _dict,
         "versions": _dict,
         "keys": _list,
         "premix": _list,
-    }, ("groups", "versions", "keys"))
+    }, ("groups", "versions"))
     groups, versions = layers["groups"], layers["versions"]
     for name, members in groups.items():
         _names(members, f"{where}.groups.{name}", channels, "channel")
     for name, members in versions.items():
         _names(members, f"{where}.versions.{name}", groups, "group")
-    for i, key in enumerate(layers["keys"]):
+    keys = layers.get("keys", [0])
+    if not keys:
+        _fail(f"{where}.keys", "must hold at least one key")
+    for i, key in enumerate(keys):
         _whole(key, f"{where}.keys[{i}]")
     for i, mix in enumerate(layers.get("premix", [])):
         _record(mix, f"{where}.premix[{i}]", {

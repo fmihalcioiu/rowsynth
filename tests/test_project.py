@@ -563,6 +563,11 @@ class Songs(ProjectCase):
         self.assertEqual(project.to_dict(), PROJECT)
         self.assertEqual(project.song("tune")["instruments"]["glass"], INSTRUMENTS["bell"])
 
+    def test_layers_may_leave_their_keys_out(self) -> None:
+        layers = {"groups": {"each": ["one", "kit"]}, "versions": {"entire": ["each"]}}
+        project = Project.from_dict({"instruments": INSTRUMENTS, "songs": {"tune": song_of(layers=layers)}})
+        self.assertEqual(project.song("tune")["layers"], layers)
+
     def test_asking_for_a_song_the_project_does_not_hold_is_refused(self) -> None:
         with self.assertRaises(RowSynthError) as caught:
             Project.from_dict(PROJECT).song("march")
@@ -711,8 +716,8 @@ class RefusedSongs(ProjectCase):
         self.layers_refused({"versions": {"bare": "hits"}}, ".versions.bare: must be a list")
         self.layers_refused({"keys": 2}, ".keys: must be a list")
 
-    def test_layers_without_groups_versions_or_keys_are_refused(self) -> None:
-        layers = {"groups": {"each": ["one", "kit"]}, "versions": {"entire": ["each"]}, "keys": [0]}
+    def test_layers_without_groups_or_versions_are_refused(self) -> None:
+        layers = {"groups": {"each": ["one", "kit"]}, "versions": {"entire": ["each"]}}
         for key in layers:
             with self.subTest(key=key):
                 rest = {name: value for name, value in layers.items() if name != key}
@@ -725,6 +730,9 @@ class RefusedSongs(ProjectCase):
 
     def test_a_version_naming_a_group_the_song_does_not_hold_is_refused(self) -> None:
         self.layers_refused({"versions": {"both": ["hits", "strings"]}}, ".versions.both[1]: no group named 'strings'")
+
+    def test_an_empty_list_of_keys_is_refused(self) -> None:
+        self.layers_refused({"keys": []}, ".keys: must hold at least one key")
 
     def test_a_key_that_is_not_a_whole_number_is_refused(self) -> None:
         self.layers_refused({"keys": [0, 2.5]}, ".keys[1]: must be a whole number")
