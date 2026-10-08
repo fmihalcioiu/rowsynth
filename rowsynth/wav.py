@@ -86,6 +86,8 @@ def load_wav(path: str | Path) -> tuple[list[np.ndarray], int]:
                 raise RowSynthError(f"{path}: not 16-bit, it has {bits} bits a sample")
             if count not in (1, 2):
                 raise RowSynthError(f"{path}: {count} channels, only mono and stereo are read")
+            if rate == 0:
+                raise RowSynthError(f"{path}: its header gives a rate of 0, so its samples have no length in time")
         elif tag == b"data":
             if count == 0:
                 raise RowSynthError(f"{path}: the data chunk comes before any fmt chunk")

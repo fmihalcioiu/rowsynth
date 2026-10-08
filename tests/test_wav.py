@@ -286,6 +286,9 @@ class LoadWavTest(WavCase):
         self.bad("3 channels", riff(fmt(channels=3), data(1, 2, 3)))
         self.bad("0 channels", riff(fmt(channels=0), data(1, 2, 3)))
 
+    def test_a_file_whose_header_gives_a_rate_of_0_is_refused(self) -> None:
+        self.bad("a rate of 0", riff(fmt(rate=0), data(1, 2)))
+
     def test_a_file_cut_short_is_refused(self) -> None:
         good = riff(fmt(), data(1, 2, 3, 4))
         self.assertEqual(len(good), 52)
