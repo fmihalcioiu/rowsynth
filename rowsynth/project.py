@@ -92,6 +92,24 @@ def _fail(where: str, what: str) -> NoReturn:
     raise RowSynthError(f"{where}: {what}")
 
 
+# What a file name may not hold on one system or another.
+_NOT_IN_FILE_NAMES = frozenset('/\\:*?"<>|')
+
+
+def _file_name(name: str, where: str) -> None:
+    """A name that files are called by: a sound, a song, a channel, a group or a version. `where` is its table.
+
+    A name with a path in it would have a file written outside the folder that was asked for.
+    """
+    if not name:
+        _fail(where, "a name cannot be empty")
+    if name in (".", ".."):
+        _fail(where, f"name {name!r} means a folder, and files are called by it")
+    for char in name:
+        if char in _NOT_IN_FILE_NAMES or ord(char) < 32:
+            _fail(where, f"name {name!r} cannot hold {char!r}, since files are called by it")
+
+
 def _dict(value: object, where: str) -> None:
     if not isinstance(value, dict):
         _fail(where, "must be a dict")
@@ -157,11 +175,13 @@ def _project(data: object) -> None:
     for name, inst in instruments.items():
         _instrument(inst, f"instruments.{name}")
     for name, entry in data.get("sounds", {}).items():
+        _file_name(name, "sounds")
         _entry(entry, f"sounds.{name}", instruments)
     chords = data.get("chords", {})
     for name, chord in chords.items():
         _chord(chord, f"chords.{name}")
     for name, song in data.get("songs", {}).items():
+        _file_name(name, "songs")
         _song(song, f"songs.{name}", instruments, chords)
 
 
@@ -375,6 +395,7 @@ def _song(song: object, where: str, shared: dict, chords: dict) -> None:
             "vel": _number,
         }, ("inst", "note"))
     for name, channel in channels.items():
+        _file_name(name, f"{where}.channels")
         _record(channel, f"{where}.channels.{name}", {
             "inst": inst,
             "gain": _number,
@@ -424,8 +445,10 @@ def _layers(layers: object, where: str, channels: dict) -> None:
     }, ("groups", "versions"))
     groups, versions = layers["groups"], layers["versions"]
     for name, members in groups.items():
+        _file_name(name, f"{where}.groups")
         _names(members, f"{where}.groups.{name}", channels, "channel")
     for name, members in versions.items():
+        _file_name(name, f"{where}.versions")
         _names(members, f"{where}.versions.{name}", groups, "group")
     keys = layers.get("keys", [0])
     if not keys:

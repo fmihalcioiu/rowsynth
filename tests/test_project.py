@@ -780,6 +780,37 @@ class RefusedSongs(ProjectCase):
         self.song_refused(song_of(intro={"order": ["y", "start"]}), ".intro.order[1]: no pattern named 'start'")
 
 
+class RefusedNames(ProjectCase):
+    """Sounds, songs, channels, groups and versions give files their names."""
+
+    def test_a_sound_or_a_song_named_with_a_path_is_refused(self) -> None:
+        self.refused({"instruments": INSTRUMENTS, "sounds": {"up/coin": {"def": sound_of()}}},
+                     "sounds: name 'up/coin' cannot hold '/', since files are called by it")
+        self.refused({"instruments": INSTRUMENTS, "songs": {"..": song_of()}},
+                     "songs: name '..' means a folder, and files are called by it")
+
+    def test_a_channel_named_with_a_path_is_refused(self) -> None:
+        name = "up\\one"
+        channels = {"one": {"inst": "reed"}, "kit": {"inst": "hiss", "drums": True}, name: {"inst": "reed"}}
+        self.song_refused(song_of(channels=channels),
+                          f".channels: name {name!r} cannot hold {name[2]!r}, since files are called by it")
+
+    def test_a_group_or_a_version_that_cannot_name_a_file_is_refused(self) -> None:
+        layers = {"groups": {"hits": ["kit"], "li:nes": ["one"]}, "versions": {"bare": ["hits"]}}
+        self.song_refused(song_of(layers=layers),
+                          ".layers.groups: name 'li:nes' cannot hold ':', since files are called by it")
+        layers = {"groups": {"hits": ["kit"], "lines": ["one"]}, "versions": {"": ["hits"]}}
+        self.song_refused(song_of(layers=layers), ".layers.versions: a name cannot be empty")
+
+    def test_a_name_with_a_control_character_is_refused(self) -> None:
+        self.refused({"instruments": INSTRUMENTS, "sounds": {"co\tin": {"def": sound_of()}}},
+                     "sounds: name 'co\\tin' cannot hold '\\t', since files are called by it")
+
+    def test_names_in_any_script_and_with_spaces_or_dots_inside_are_taken(self) -> None:
+        sounds = {"k\u0151 2": {"def": sound_of()}, "coin.low": {"def": sound_of()}}
+        self.assertEqual(list(Project.from_dict({"instruments": INSTRUMENTS, "sounds": sounds}).sounds), list(sounds))
+
+
 class RefusedChords(ProjectCase):
     def chord_refused(self, chord: object, message: str) -> None:
         self.refused({"chords": {"Am": chord}}, "chords.Am" + message)
