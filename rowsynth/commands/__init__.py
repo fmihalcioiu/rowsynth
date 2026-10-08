@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import json
 import math
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import TypeVar
+
+import numpy as np
 
 from ..errors import RowSynthError
 from ..project import Project
@@ -44,3 +46,8 @@ def load_file(read: Callable[[str | Path], Read], path: str | Path) -> Read:
 def load_project(path: str | Path) -> Project:
     """The project a file holds. A file that is not there is refused by its path, as one that is not JSON is."""
     return load_file(Project.load, path)
+
+
+def mono(sides: Sequence[np.ndarray]) -> np.ndarray:
+    """The sides of a sound as one row of doubles: their mean, which for a sound of one side is that side."""
+    return np.mean(sides, axis=0, dtype=np.float64)

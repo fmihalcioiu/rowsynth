@@ -3,12 +3,10 @@ from __future__ import annotations
 
 import argparse
 
-import numpy as np
-
 from ..errors import RowSynthError
 from ..measure import brightness, measure, pitch_at
 from ..wav import load_wav
-from . import emit, load_file
+from . import emit, load_file, mono
 
 NAME = "measure"
 HELP = "give the numbers of a WAV file: its length, its level, its brightness and, when asked, its pitch"
@@ -24,8 +22,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
 def run(args: argparse.Namespace) -> int:
     """Print the numbers of the file, with its pitch at the time asked for when one is, and return 0."""
     channels, rate = load_file(load_wav, args.wav)
-    # One row is measured: the mean of the sides, which for a mono file is the one side it has.
-    row = np.mean(channels, axis=0, dtype=np.float64)
+    row = mono(channels)
     seconds = len(row) / rate
     told = {
         "rate": rate,

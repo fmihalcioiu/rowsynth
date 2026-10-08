@@ -16,11 +16,13 @@ from pathlib import Path
 import numpy as np
 
 import rowsynth
+from rowsynth.bank import render_entry
 from rowsynth.cli import main
-from rowsynth.commands import emit, load_file, load_project
+from rowsynth.commands import emit, load_file, load_project, mono
 from rowsynth.errors import RowSynthError
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
+from rowsynth.song import render_song, render_stems
 from rowsynth.wav import load_wav, save_wav
 
 
@@ -64,11 +66,12 @@ PROJECT = {
                 "keys": [0, 3],
             },
         },
-        # Two eighths and a dotted quarter are 10 rows. At 3 ticks a row that is half a second.
+        # Two eighths and a dotted quarter are 10 rows, and so are a half and an eighth. At 3 ticks a row that is
+        # half a second. The first channel sits to the left, and the second in the middle, having no pan.
         "sting": {
             "row_ticks": 3,
-            "channels": {"one": {"inst": "pipe"}},
-            "patterns": {"x": {"one": "l8 c e g4."}},
+            "channels": {"one": {"inst": "pipe", "pan": -0.5}, "under": {"inst": "pipe"}},
+            "patterns": {"x": {"one": "l8 c e g4.", "under": "o2 l2 c g8"}},
             "order": ["x"],
         },
     },
@@ -91,7 +94,7 @@ INFO = {
             "seconds": 4.0,
             "layers": {"groups": ["hits", "lines"], "versions": ["whole", "bare"], "keys": [0, 3]},
         },
-        "sting": {"channels": ["one"], "patterns": ["x"], "order": ["x"], "rows": 10.0, "seconds": 0.5},
+        "sting": {"channels": ["one", "under"], "patterns": ["x"], "order": ["x"], "rows": 10.0, "seconds": 0.5},
     },
     "chords": ["Dm", "A7"],
 }
@@ -100,6 +103,10 @@ INFO = {
 def tone(hz: float, level: float, rate: int) -> np.ndarray:
     """Half a second of a sine that starts at zero."""
     return level * np.sin(2 * np.pi * hz * np.arange(rate // 2) / rate)
+
+
+# One step of a 16-bit file. A sample read back from a file is nearer than this to the sample that was written.
+STEP = 1 / 32767
 
 
 class CommandLineCase(unittest.TestCase):
@@ -150,6 +157,15 @@ class Shared(CommandLineCase):
         self.assertEqual(str(refused.exception), f"{path}: no such file")
         path.write_text("here\n", encoding="utf-8")
         self.assertEqual(load_file(Path.read_text, path), "here\n")
+
+    def test_mono_gives_one_side_as_it_is_and_two_as_their_mean_worked_out_in_doubles(self) -> None:
+        left, right = np.float32([0.1, -0.5]), np.float32([0.2, 0.25])
+        self.assertEqual(mono([left]).tolist(), left.astype(np.float64).tolist())
+        mean = mono([left, right])
+        self.assertEqual(mean.dtype, np.float64)
+        self.assertEqual(mean.tolist(), ((left.astype(np.float64) + right) / 2).tolist())
+        # Worked out in single precision, the first of them comes out a little off.
+        self.assertNotEqual(mean[0], (left[0] + right[0]) / np.float32(2))
 
 
 class Info(CommandLineCase):
@@ -234,6 +250,110 @@ class Measure(CommandLineCase):
                               "error: --at must be 0 or more and under the file's 0.5 seconds, not 2.0\n"))
 
 
+class Render(CommandLineCase):
+    def render(self, name: str, out: Path, *flags: str, data: dict = PROJECT) -> int:
+        """What main returns for rendering `name`, out of a project file holding `data`, to `out`."""
+        return self.run_main("render", str(self.saved(data)), name, "--out", str(out), *flags)
+
+    def refusal(self, name: str, *flags: str, data: dict = PROJECT) -> str:
+        """The errors printed so far, after a rendering that is refused with code 2 and writes nothing."""
+        out = self.folder / "refused.wav"
+        self.assertEqual(self.render(name, out, *flags, data=data), 2)
+        self.assertEqual(self.out.getvalue(), "")
+        self.assertFalse(out.exists())
+        return self.err.getvalue()
+
+    def test_a_sound_is_written_as_a_mono_file_at_the_level_the_bank_gives_it(self) -> None:
+        path = self.folder / "made" / "tap.wav"
+        self.assertEqual(self.render("tap", path), 0)
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"))
+        (row,), rate = load_wav(path)
+        self.assertEqual((rate, len(row)), (44100, len(buffer)))
+        self.assertLess(float(np.abs(row - buffer).max()), STEP)
+        told = {"file": str(path), "rate": 44100, "channels": 1, "seconds": len(buffer) / 44100,
+                "measure": measure(buffer, 44100)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        # A bank brings the loudest sample of every sound to 3 dB under full scale.
+        self.assertEqual(told["measure"]["peak_db"], -3.0)
+
+    def test_variant_picks_one_of_a_sound_counted_from_0_and_the_first_is_written_without_it(self) -> None:
+        buffers = render_entry(Project.from_dict(PROJECT).sound("drip"), 8000)
+        first, third = self.folder / "first.wav", self.folder / "third.wav"
+        self.assertEqual(self.render("drip", first, "--rate", "8000"), 0)
+        self.assertEqual(self.render("drip", third, "--rate", "8000", "--variant", "2"), 0)
+        # Each variant has a level of its own under the bank's peak of -3 dB: the first is 2 dB down, the third 4.
+        for path, buffer, peak in ((first, buffers[0], -5.0), (third, buffers[2], -7.0)):
+            (row,), _ = load_wav(path)
+            self.assertEqual(len(row), len(buffer))
+            self.assertLess(float(np.abs(row - buffer).max()), STEP)
+            self.assertEqual(measure(row, 8000)["peak_db"], peak)
+
+    def test_rate_is_the_samples_a_second_a_file_is_rendered_at(self) -> None:
+        path = self.folder / "tap.wav"
+        self.assertEqual(self.render("tap", path, "--rate", "8000"), 0)
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"), 8000)
+        (row,), rate = load_wav(path)
+        self.assertEqual((rate, len(row)), (8000, len(buffer)))
+        self.assertLess(float(np.abs(row - buffer).max()), STEP)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual((told["rate"], told["seconds"], told["measure"]),
+                         (8000, len(buffer) / 8000, measure(buffer, 8000)))
+
+    def test_a_song_is_written_as_a_stereo_file_and_measured_as_the_mean_of_its_two_sides(self) -> None:
+        path = self.folder / "sting.wav"
+        self.assertEqual(self.render("sting", path, "--rate", "8000"), 0)
+        mix = render_song(Project.from_dict(PROJECT).song("sting"), rate=8000)
+        # The sides are not alike, so a file that had them crossed, or one of them twice, would not pass.
+        self.assertGreater(float(np.abs(mix["left"] - mix["right"]).max()), 0.01)
+        sides, rate = load_wav(path)
+        self.assertEqual((rate, len(sides)), (8000, 2))
+        for side, rendered in zip(sides, (mix["left"], mix["right"])):
+            self.assertEqual(len(side), len(rendered))
+            self.assertLess(float(np.abs(side - rendered).max()), STEP)
+        mean = (mix["left"].astype(np.float64) + mix["right"]) / 2
+        # The file is the half second of the song's rows and the half second it runs on for after them.
+        told = {"file": str(path), "rate": 8000, "channels": 2, "seconds": 1.0, "measure": measure(mean, 8000)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+
+    def test_stems_writes_a_song_as_one_mono_loop_a_channel_into_a_folder_it_makes(self) -> None:
+        folder = self.folder / "loops" / "sting"
+        self.assertEqual(self.render("sting", folder, "--stems", "--rate", "8000"), 0)
+        self.assertEqual(sorted(found.name for found in folder.iterdir()), ["one.wav", "under.wav"])
+        files = []
+        for stem in render_stems(Project.from_dict(PROJECT).song("sting"), 8000)["stems"]:
+            file = f"{stem['name']}.wav"
+            (row,), rate = load_wav(folder / file)
+            self.assertEqual((rate, len(row)), (8000, 4000))
+            self.assertLess(float(np.abs(row - stem["samples"]).max()), STEP)
+            files.append({"channel": stem["name"], "file": file, "pan": stem["pan"],
+                          "measure": measure(stem["samples"], 8000)})
+        told = {"folder": str(folder), "rate": 8000, "loop_samples": 4000, "seconds": 0.5, "files": files}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        self.assertEqual([(file["channel"], file["pan"]) for file in files], [("one", -0.5), ("under", 0)])
+
+    def test_a_name_that_is_both_a_sound_and_a_song_is_refused_with_code_2(self) -> None:
+        both = {**PROJECT, "sounds": {**PROJECT["sounds"], "sting": PROJECT["sounds"]["tap"]}}
+        self.assertEqual(self.refusal("sting", data=both),
+                         f"error: 'sting' is both a sound and a song of {self.folder / 'project.json'}\n")
+
+    def test_a_name_that_is_neither_a_sound_nor_a_song_is_refused_with_code_2(self) -> None:
+        self.assertEqual(self.refusal("pipe"),
+                         f"error: 'pipe' is no sound and no song of {self.folder / 'project.json'}\n")
+
+    def test_a_variant_the_sound_does_not_have_is_refused_saying_how_many_it_has(self) -> None:
+        self.refusal("drip", "--rate", "8000", "--variant", "3")
+        self.assertEqual(self.refusal("drip", "--rate", "8000", "--variant", "-1"),
+                         "error: 'drip' has no variant 3: it has 3, counted from 0\n"
+                         "error: 'drip' has no variant -1: it has 3, counted from 0\n")
+
+    def test_variant_with_a_song_is_refused_with_code_2_even_when_it_is_0(self) -> None:
+        self.assertEqual(self.refusal("sting", "--variant", "0"),
+                         "error: --variant is for a sound, and 'sting' is a song\n")
+
+    def test_stems_with_a_sound_is_refused_with_code_2(self) -> None:
+        self.assertEqual(self.refusal("tap", "--stems"), "error: --stems is for a song, and 'tap' is a sound\n")
+
+
 class Refusals(CommandLineCase):
     def test_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
         path = self.folder / "nowhere.json"
@@ -287,7 +407,7 @@ class Refusals(CommandLineCase):
     def test_the_help_lists_the_commands_in_name_order(self) -> None:
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
-        self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()), ["info", "measure"])
+        self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()), ["info", "measure", "render"])
 
 
 class Process(CommandLineCase):
