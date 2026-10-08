@@ -298,7 +298,14 @@ def _entry(entry: object, where: str, instruments: dict) -> None:
         if len(part) != 2:
             _fail(at, "must be [seconds, entry]")
         _number(part[0], f"{at}[0]")
+        if part[0] < 0:
+            _fail(f"{at}[0]", "must be 0 or more")
         _entry(part[1], f"{at}[1]", instruments)
+        # The bank lays one buffer of each part on the timeline, so variants or parts inside a part would be lost.
+        if "def" not in part[1]:
+            _fail(f"{at}[1]", "a part is one sound: it must hold 'def'")
+    if "parts" in entry and "db" in entry:
+        _fail(f"{where}.db", "an entry of parts has no level of its own: each part has its 'db'")
     levels = entry.get("db")
     if isinstance(levels, list) and ("defs" not in entry or len(levels) != len(entry["defs"])):
         _fail(f"{where}.db", "a list of levels must hold one for each of 'defs'")

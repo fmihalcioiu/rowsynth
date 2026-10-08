@@ -69,7 +69,7 @@ SOUNDS = {
     "door": {
         "parts": [
             [0, {"def": {"voices": [{"inst": "buzz", "notes": [[0, "Eb2", 12]]}]}, "db": -2}],
-            [0.25, {"defs": [{"voices": [{"inst": "bell", "notes": [[0, "c#5", 20]]}]}]}],
+            [0.25, {"def": {"voices": [{"inst": "bell", "notes": [[0, "c#5", 20]]}]}}],
         ],
     },
     "hum": {
@@ -315,7 +315,7 @@ class Sounds(ProjectCase):
         self.assertEqual(project.sound("step")["defs"][0]["voices"][0]["inst"], INSTRUMENTS["hiss"])
         door = project.sound("door")
         self.assertEqual(door["parts"][0][1]["def"]["voices"][0]["inst"], INSTRUMENTS["buzz"])
-        self.assertEqual(door["parts"][1][1]["defs"][0]["voices"][0]["inst"], INSTRUMENTS["bell"])
+        self.assertEqual(door["parts"][1][1]["def"]["voices"][0]["inst"], INSTRUMENTS["bell"])
         held = project.sound("hum")["held"]
         self.assertEqual(held["note"]["voices"][0]["inst"], INSTRUMENTS["deep"])
         self.assertEqual([voice["inst"] for voice in held["end"]["voices"]], [INSTRUMENTS["deep"], INSTRUMENTS["hiss"]])
@@ -463,6 +463,7 @@ class RefusedSounds(ProjectCase):
         self.sound_refused({"parts": [[0, part], [0.5]]}, ".parts[1]: must be [seconds, entry]")
         self.sound_refused({"parts": [[0, part, part]]}, ".parts[0]: must be [seconds, entry]")
         self.sound_refused({"parts": [["0", part]]}, ".parts[0][0]: must be a number")
+        self.sound_refused({"parts": [[0, part], [-0.5, part]]}, ".parts[1][0]: must be 0 or more")
 
     def test_an_entry_inside_parts_is_checked_like_any_other(self) -> None:
         part = {"def": sound_of()}
@@ -472,6 +473,17 @@ class RefusedSounds(ProjectCase):
         self.sound_refused(
             {"parts": [[0, {"db": 1}]]},
             ".parts[0][1]: must hold one of 'def', 'defs', 'parts' and 'held', and only one")
+
+    def test_a_part_that_is_not_one_sound_is_refused(self) -> None:
+        part = {"def": sound_of()}
+        message = ".parts[1][1]: a part is one sound: it must hold 'def'"
+        self.sound_refused({"parts": [[0, part], [0.5, {"defs": [sound_of(), sound_of()]}]]}, message)
+        self.sound_refused({"parts": [[0, part], [0.5, {"parts": [[0, part]]}]]}, message)
+
+    def test_a_level_on_an_entry_of_parts_is_refused(self) -> None:
+        part = {"def": sound_of(), "db": -2}
+        self.sound_refused(
+            {"parts": [[0, part]], "db": -6}, ".db: an entry of parts has no level of its own: each part has its 'db'")
 
     def test_a_held_sound_of_the_wrong_shape_is_refused(self) -> None:
         held = {"note": sound_of(), "start": 10, "loop": 40, "join": 4, "end": sound_of(), "let_go": 3}
