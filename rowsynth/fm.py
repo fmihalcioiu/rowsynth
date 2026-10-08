@@ -5,6 +5,7 @@ import math
 
 import numpy as np
 
+from ._jit import kernel
 from .errors import RowSynthError
 
 _TAU = 2.0 * math.pi
@@ -128,6 +129,7 @@ def fm_voice(inst: dict, rate: int) -> tuple[np.ndarray, np.ndarray]:
     return params, state
 
 
+@kernel
 def _k_env(params, state, op):
     """The next sample of operator `op`'s envelope, a level from 0 to 1."""
     stage = state[op, _STAGE]
@@ -157,6 +159,7 @@ def _k_env(params, state, op):
     return 10.0 ** (db / 20.0)
 
 
+@kernel
 def _k_release(state, op):
     """Lets operator `op`'s envelope go. Let go on the way up, it falls from the level it had reached."""
     if state[op, _STAGE] == 0.0:
@@ -165,12 +168,14 @@ def _k_release(state, op):
         state[op, _STAGE] = 3.0
 
 
+@kernel
 def _k_gate_off(params, state):
     """Lets every operator's envelope go: the note has ended."""
     for op in range(params.shape[0]):
         _k_release(state, op)
 
 
+@kernel
 def _k_fm(params, state, freq, rate):
     """The next sample of the voice at `freq` Hz."""
     mix = 0.0
@@ -196,6 +201,7 @@ def _k_fm(params, state, freq, rate):
     return mix
 
 
+@kernel
 def _k_envelope(out, params, state, gate):
     """Fills `out` with the first operator's envelope, let go at sample `gate`."""
     for i in range(out.shape[0]):
@@ -204,6 +210,7 @@ def _k_envelope(out, params, state, gate):
         out[i] = _k_env(params, state, 0)
 
 
+@kernel
 def _k_tone(out, params, state, freq, rate, gate):
     """Fills `out` with the voice at `freq` Hz, let go at sample `gate`."""
     for i in range(out.shape[0]):

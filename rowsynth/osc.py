@@ -6,6 +6,7 @@ from numbers import Real
 
 import numpy as np
 
+from ._jit import kernel
 from .errors import RowSynthError
 
 # Waves by number, for the loops over samples, which cannot take a name.
@@ -24,6 +25,7 @@ def new_state() -> np.ndarray:
     return np.array([0.0, 1.0, 0.0, 1.0])
 
 
+@kernel
 def _k_blep(t: float, dt: float) -> float:
     """What smooths a jump at phase 0 over the sample on each side of it. dt is the phase one sample covers."""
     if t < dt:
@@ -35,6 +37,7 @@ def _k_blep(t: float, dt: float) -> float:
     return 0.0
 
 
+@kernel
 def _k_pulse(state: np.ndarray, freq: float, rate: float, duty: float) -> float:
     """The next sample of a pulse that is high for the share duty of each period, both edges smoothed."""
     dt = freq / rate
@@ -47,6 +50,7 @@ def _k_pulse(state: np.ndarray, freq: float, rate: float, duty: float) -> float:
     return v - (2.0 * duty - 1.0)
 
 
+@kernel
 def _k_saw(state: np.ndarray, freq: float, rate: float) -> float:
     """The next sample of a sawtooth: a straight climb through each period, the drop back smoothed."""
     dt = freq / rate
@@ -56,6 +60,7 @@ def _k_saw(state: np.ndarray, freq: float, rate: float) -> float:
     return v
 
 
+@kernel
 def _k_tri(state: np.ndarray, freq: float, rate: float) -> float:
     """The next sample of the stepped triangle: 32 steps a period over 16 levels, down then up, not smoothed."""
     t = float(state[0])
@@ -65,6 +70,7 @@ def _k_tri(state: np.ndarray, freq: float, rate: float) -> float:
     return level / 7.5 - 1.0
 
 
+@kernel
 def _k_noise(state: np.ndarray, freq: float, rate: float, short: int) -> float:
     """The next sample of noise: the low bit of a 15-bit shift register that is clocked freq times a second.
 
@@ -86,6 +92,7 @@ def _k_noise(state: np.ndarray, freq: float, rate: float, short: int) -> float:
     return out
 
 
+@kernel
 def _k_tone(out: np.ndarray, state: np.ndarray, wave: int, freq: float, rate: float, duty: float, short: int) -> None:
     """Fills out with one wave held at one frequency."""
     for i in range(len(out)):

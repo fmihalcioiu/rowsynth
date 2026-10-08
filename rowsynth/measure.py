@@ -7,6 +7,7 @@ from fractions import Fraction
 
 import numpy as np
 
+from ._jit import kernel
 from .errors import RowSynthError
 
 
@@ -111,6 +112,7 @@ def brightness(samples, size: int = 2048, rate: int = 44100) -> dict:
     return {"centroid_hz": math.floor(centre / energy + 0.5), "above_4k": _fixed(high / energy, 2)}
 
 
+@kernel
 def _k_period(corr, low, high) -> float:
     """One period as a lag from `low` to `high`, with a fraction, or 0.0 when no lag stands out."""
     # At small lags a wave still overlaps itself, so the search waits until the match has fallen to zero or below.

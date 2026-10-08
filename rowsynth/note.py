@@ -6,6 +6,7 @@ from numbers import Real
 
 import numpy as np
 
+from ._jit import kernel
 from .errors import RowSynthError
 from .fm import _k_fm, _k_gate_off, fm_voice
 from .notes import hz
@@ -54,6 +55,7 @@ def step(seq, tick: int, fallback: float) -> float:
     return float(value)
 
 
+@kernel
 def _k_note(out, edges, level, slew, state, wave, rate, freq, short, duty, fm_params, fm_state, gate,
             lp, resonant, svf):
     """Adds a note to out: tick t fills the samples from edges[t] up to edges[t + 1], as far as out reaches.

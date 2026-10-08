@@ -7,7 +7,7 @@ name = "rowsynth"
 version = "0.1.0"
 description = "A chip synth driven by text: sound effects and songs written as data, rendered to WAV."
 requires-python = ">=3.10"
-dependencies = ["numpy>=1.24"]
+dependencies = ["numpy>=1.24", "numba>=0.60"]
 
 [tool.setuptools.packages.find]
 include = ["rowsynth*"]

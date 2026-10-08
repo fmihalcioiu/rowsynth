@@ -6,6 +6,7 @@ from typing import NamedTuple
 
 import numpy as np
 
+from ._jit import kernel
 from .errors import RowSynthError
 from .note import (DEFAULT_RATE, TICK_HZ, _RELEASE, _buffer, _count, _flag, _instrument, _is_number, _length, _number,
                    render_note)
@@ -33,6 +34,7 @@ _ROOM = 0.29
 _FADE = 220
 
 
+@kernel
 def _k_output(out, gain, keep, memory):
     """Puts out through its gain, the high-pass and the knee, in place.
 
@@ -55,6 +57,7 @@ def _k_output(out, gain, keep, memory):
     memory[1] = last_out
 
 
+@kernel
 def _k_fade(out, count):
     """Fades the last count samples of out: the last one to nothing, each one before it a step less far."""
     last = out.shape[0] - 1
@@ -130,6 +133,7 @@ def _settings(settings: object, where: str = "") -> None:
         _ECHO[key](value, f"{where}.{key}" if where else key)
 
 
+@kernel
 def _k_line(out, dry, line, delay, feedback, ease, level):
     """Adds to out what one delay line gives back of dry.
 
