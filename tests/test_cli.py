@@ -1,20 +1,26 @@
-"""Tests for the command line and its info command."""
+"""Tests for the command line and its commands."""
 from __future__ import annotations
 
 import contextlib
 import io
 import json
 import os
+import re
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
 
+import numpy as np
+
 import rowsynth
 from rowsynth.cli import main
-from rowsynth.commands import emit, load_project
+from rowsynth.commands import emit, load_file, load_project
+from rowsynth.errors import RowSynthError
+from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
+from rowsynth.wav import load_wav, save_wav
 
 
 def blip(inst: str, note: object) -> dict:
@@ -90,8 +96,13 @@ INFO = {
 }
 
 
+def tone(hz: float, level: float, rate: int) -> np.ndarray:
+    """Half a second of a sine that starts at zero."""
+    return level * np.sin(2 * np.pi * hz * np.arange(rate // 2) / rate)
+
+
 class CommandLineCase(unittest.TestCase):
-    """What the tests below share: a folder for project files, and main run with what it prints caught."""
+    """What the tests below share: a folder for their files, and main run with what it prints caught."""
 
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -124,6 +135,14 @@ class Shared(CommandLineCase):
     def test_load_project_gives_the_project_in_the_file(self) -> None:
         self.assertEqual(load_project(self.saved(PROJECT)), Project.from_dict(PROJECT))
 
+    def test_load_file_gives_what_the_reader_makes_of_a_file_and_refuses_a_missing_one_by_its_path(self) -> None:
+        path = self.folder / "words.txt"
+        with self.assertRaises(RowSynthError) as refused:
+            load_file(Path.read_text, path)
+        self.assertEqual(str(refused.exception), f"{path}: no such file")
+        path.write_text("here\n", encoding="utf-8")
+        self.assertEqual(load_file(Path.read_text, path), "here\n")
+
 
 class Info(CommandLineCase):
     def test_info_prints_what_a_project_holds_by_name_in_the_order_of_the_file(self) -> None:
@@ -141,6 +160,64 @@ class Info(CommandLineCase):
         out, err = self.printed()
         self.assertEqual(out, "")
         self.assertTrue(err.startswith("error: songs.sting: pattern 'x', channel 'one': "), err)
+
+
+class Measure(CommandLineCase):
+    def wav(self, samples: object, rate: int) -> Path:
+        """The path of a WAV file holding `samples`."""
+        path = self.folder / "sound.wav"
+        save_wav(path, samples, rate)
+        return path
+
+    def test_measure_prints_the_numbers_of_a_mono_file(self) -> None:
+        path = self.wav(tone(440, 0.5, 8000), 8000)
+        self.assertEqual(self.run_main("measure", str(path)), 0)
+        (row,), _ = load_wav(path)
+        told = {"rate": 8000, "channels": 1, "seconds": 0.5,
+                "measure": measure(row, 8000), "brightness": brightness(row, rate=8000)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        # Half of full scale is 6 dB down, and a sine has all its energy at its own pitch.
+        self.assertEqual((told["measure"]["peak_db"], told["brightness"]["centroid_hz"]), (-6.0, 440))
+
+    def test_a_stereo_file_is_measured_as_the_mean_of_its_two_sides(self) -> None:
+        path = self.wav([tone(440, 0.5, 16000), tone(1320, 0.25, 16000)], 16000)
+        self.assertEqual(self.run_main("measure", str(path)), 0)
+        (left, right), _ = load_wav(path)
+        mean = (left.astype(np.float64) + right) / 2
+        told = {"rate": 16000, "channels": 2, "seconds": 0.5,
+                "measure": measure(mean, 16000), "brightness": brightness(mean, rate=16000)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        for side in (left, right):
+            self.assertNotEqual(measure(side, 16000), told["measure"])
+
+    def test_at_adds_the_pitch_sounding_at_that_time(self) -> None:
+        # One note for half a second and then another.
+        path = self.wav(np.concatenate((tone(440, 0.5, 8000), tone(660, 0.5, 8000))), 8000)
+        self.assertEqual(self.run_main("measure", str(path), "--at", "0.6"), 0)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual(list(told), ["rate", "channels", "seconds", "measure", "brightness", "pitch"])
+        self.assertEqual(list(told["pitch"]), ["at", "hz"])
+        self.assertEqual(told["pitch"]["at"], 0.6)
+        self.assertAlmostEqual(told["pitch"]["hz"], 660, delta=1)
+
+    def test_at_0_reads_the_pitch_the_file_starts_on(self) -> None:
+        path = self.wav(np.concatenate((tone(440, 0.5, 8000), tone(660, 0.5, 8000))), 8000)
+        self.assertEqual(self.run_main("measure", str(path), "--at", "0"), 0)
+        self.assertAlmostEqual(json.loads(self.out.getvalue())["pitch"]["hz"], 440, delta=1)
+
+    def test_at_below_0_is_refused_with_code_2(self) -> None:
+        path = self.wav(tone(440, 0.5, 8000), 8000)
+        self.assertEqual(self.run_main("measure", str(path), "--at", "-0.1"), 2)
+        self.assertEqual(self.printed(),
+                         ("", "error: --at must be 0 or more and under the file's 0.5 seconds, not -0.1\n"))
+
+    def test_at_the_end_of_the_file_or_past_it_is_refused_with_code_2(self) -> None:
+        path = self.wav(tone(440, 0.5, 8000), 8000)
+        for at in ("0.5", "2"):
+            self.assertEqual(self.run_main("measure", str(path), "--at", at), 2)
+        self.assertEqual(self.printed(),
+                         ("", "error: --at must be 0 or more and under the file's 0.5 seconds, not 0.5\n"
+                              "error: --at must be 0 or more and under the file's 0.5 seconds, not 2.0\n"))
 
 
 class Refusals(CommandLineCase):
@@ -168,6 +245,17 @@ class Refusals(CommandLineCase):
         self.assertEqual(out, "")
         self.assertTrue(err.startswith("error: ") and err.endswith("\n"), err)
 
+    def test_a_missing_wav_is_an_error_naming_it_with_code_2(self) -> None:
+        path = self.folder / "nowhere.wav"
+        self.assertEqual(self.run_main("measure", str(path)), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: no such file\n"))
+
+    def test_a_file_that_is_not_a_wav_is_an_error_naming_it_with_code_2(self) -> None:
+        path = self.folder / "notes.wav"
+        path.write_text("o4 l8 c e g\n", encoding="utf-8")
+        self.assertEqual(self.run_main("measure", str(path)), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: not a RIFF/WAVE file\n"))
+
     def test_an_unknown_command_is_refused_with_code_2(self) -> None:
         with self.assertRaises(SystemExit) as left:
             self.run_main("play", "project.json")
@@ -181,7 +269,11 @@ class Refusals(CommandLineCase):
         out, err = self.printed()
         self.assertEqual(out, "")
         self.assertTrue(err.startswith("usage: rowsynth "), err)
-        self.assertRegex(err, r"(?m)^\s+info\s")
+
+    def test_the_help_lists_the_commands_in_name_order(self) -> None:
+        self.run_main()
+        # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
+        self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()), ["info", "measure"])
 
 
 class Process(CommandLineCase):

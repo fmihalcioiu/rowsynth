@@ -2,10 +2,14 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
+from typing import TypeVar
 
 from ..errors import RowSynthError
 from ..project import Project
+
+Read = TypeVar("Read")
 
 
 def emit(data: object) -> None:
@@ -13,9 +17,14 @@ def emit(data: object) -> None:
     print(json.dumps(data, indent=2, ensure_ascii=False))
 
 
-def load_project(path: str | Path) -> Project:
-    """The project a file holds. A file that is not there is refused by its path, as one that is not JSON is."""
+def load_file(read: Callable[[str | Path], Read], path: str | Path) -> Read:
+    """What `read` makes of the file at `path`. A file that is not there is refused by its path."""
     try:
-        return Project.load(path)
+        return read(path)
     except FileNotFoundError:
         raise RowSynthError(f"{path}: no such file") from None
+
+
+def load_project(path: str | Path) -> Project:
+    """The project a file holds. A file that is not there is refused by its path, as one that is not JSON is."""
+    return load_file(Project.load, path)
