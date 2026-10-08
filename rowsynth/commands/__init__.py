@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections.abc import Callable
 from pathlib import Path
 from typing import TypeVar
@@ -12,9 +13,24 @@ from ..project import Project
 Read = TypeVar("Read")
 
 
+def _writable(data: object) -> object:
+    """`data` with None in place of each number JSON cannot write: an infinity, or what is not a number at all."""
+    if isinstance(data, float) and not math.isfinite(data):
+        return None
+    if isinstance(data, dict):
+        return {key: _writable(value) for key, value in data.items()}
+    if isinstance(data, (list, tuple)):
+        return [_writable(value) for value in data]
+    return data
+
+
 def emit(data: object) -> None:
-    """Print `data` to standard output as one JSON document: an indent of 2, keys in the order they come in."""
-    print(json.dumps(data, indent=2, ensure_ascii=False))
+    """Print `data` to standard output as one JSON document: an indent of 2, keys in the order they come in.
+
+    A level of minus infinity, which is what silence measures as, is printed as null. Python would write
+    -Infinity there, and a reader that keeps to JSON refuses the whole document for it.
+    """
+    print(json.dumps(_writable(data), indent=2, ensure_ascii=False, allow_nan=False))
 
 
 def load_file(read: Callable[[str | Path], Read], path: str | Path) -> Read:

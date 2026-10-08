@@ -4,6 +4,7 @@ from __future__ import annotations
 import contextlib
 import io
 import json
+import math
 import os
 import re
 import subprocess
@@ -132,6 +133,13 @@ class Shared(CommandLineCase):
             emit({"b": 1, "a": ["fl\xfbte"]})
         self.assertEqual(self.out.getvalue(), '{\n  "b": 1,\n  "a": [\n    "fl\xfbte"\n  ]\n}\n')
 
+    def test_emit_prints_null_for_a_number_json_cannot_write(self) -> None:
+        with contextlib.redirect_stdout(self.out):
+            emit({"peak_db": -math.inf, "levels": [math.nan, 1.5, (math.inf,)]})
+        self.assertNotIn("Infinity", self.out.getvalue())
+        self.assertNotIn("NaN", self.out.getvalue())
+        self.assertEqual(json.loads(self.out.getvalue()), {"peak_db": None, "levels": [None, 1.5, [None]]})
+
     def test_load_project_gives_the_project_in_the_file(self) -> None:
         self.assertEqual(load_project(self.saved(PROJECT)), Project.from_dict(PROJECT))
 
@@ -189,6 +197,12 @@ class Measure(CommandLineCase):
         self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
         for side in (left, right):
             self.assertNotEqual(measure(side, 16000), told["measure"])
+
+    def test_a_silent_file_has_null_for_its_levels(self) -> None:
+        self.assertEqual(self.run_main("measure", str(self.wav(np.zeros(800, dtype=np.float32), 8000))), 0)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual((told["measure"]["peak_db"], told["measure"]["rms_db"]), (None, None))
+        self.assertEqual(told["measure"]["seconds"], 0.1)
 
     def test_at_adds_the_pitch_sounding_at_that_time(self) -> None:
         # One note for half a second and then another.
