@@ -29,6 +29,8 @@ CRASH = {"voices": [{"inst": BUZZ, "notes": [[0, "c3", 3]]}, {"inst": HISS, "not
 CHIME = {"voices": [{"inst": BELL, "notes": [[0, "g4", 3], [1, 74.5, 2, 0.8]]}], "gain": 4}
 STEPS = [{"voices": [{"inst": PING, "notes": [[0, note, 2]]}]} for note in ("c5", "d5", "f5")]
 QUIET = {"voices": []}
+# Two sounds on one timeline. The second starts half way between samples 62 and 63, and is over before the first.
+BOTH = {"parts": [[0, {"def": CRASH, "db": -6}], [0.0078125, {"def": CHIRP, "db": -2.5}]]}
 
 
 def peak(samples: np.ndarray) -> float:
@@ -142,6 +144,44 @@ class EntryTest(unittest.TestCase):
         self.assertEqual(entry, before)
 
 
+class PartsTest(unittest.TestCase):
+    def test_parts_are_one_buffer_with_each_part_at_its_own_level_added_in_from_its_start(self):
+        crash, chirp = (render_entry(part, RATE)[0] for seconds, part in BOTH["parts"])
+        buffers = render_entry(BOTH, RATE)
+        self.assertEqual(len(buffers), 1)
+        self.assertIs(type(buffers[0]), np.ndarray)
+        self.assertEqual(buffers[0].dtype, np.float32)
+        added = crash.copy()
+        added[63:63 + len(chirp)] += chirp
+        self.assertTrue(np.array_equal(buffers[0], added))
+        self.assertFalse(np.array_equal(buffers[0][63:], crash[63:]))
+        self.assertTrue(same(render_entry({"parts": tuple(tuple(part) for part in BOTH["parts"])}, RATE), buffers))
+
+    def test_one_part_from_the_start_is_its_sound_and_two_over_each_other_are_not_brought_back_to_the_peak(self):
+        alone = render_entry({"def": CHIRP, "db": -6}, RATE)
+        self.assertTrue(same(render_entry({"parts": [[0, {"def": CHIRP, "db": -6}]]}, RATE), alone))
+        twice = render_entry({"parts": [[0, {"def": CHIRP}], [0, {"def": CHIRP}]]}, RATE)[0]
+        self.assertTrue(np.array_equal(twice, render_entry({"def": CHIRP}, RATE)[0] * np.float32(2)))
+        self.assertAlmostEqual(peak(twice), 2 * PEAK, places=6)
+
+    def test_buffer_ends_with_the_part_that_ends_last_and_is_silent_where_no_part_plays(self):
+        first, second = render_entry({"def": STEPS[0]}, RATE)[0], render_entry({"def": STEPS[1], "db": -4}, RATE)[0]
+        parts = [[0.1, {"def": STEPS[0]}], [0, {"def": STEPS[1], "db": -4}]]
+        out = render_entry({"parts": parts}, RATE)[0]
+        self.assertEqual(len(out), 800 + 667)
+        self.assertTrue(np.array_equal(out[:667], second))
+        self.assertFalse(out[667:800].any())
+        self.assertTrue(np.array_equal(out[800:], first))
+        self.assertTrue(np.array_equal(render_entry({"parts": parts[::-1]}, RATE)[0], out))
+
+    def test_part_starts_at_the_sample_nearest_to_its_seconds_and_half_way_goes_up(self):
+        known = ((0, 8000, 0), (0.0123, 8000, 98), (0.01234, 8000, 99), (0.0078125, 8000, 63), (0.125, 44100, 5513),
+                 (0.00390625, 48000, 188))
+        for seconds, rate, start in known:
+            out = render_entry({"parts": [[seconds, {"def": QUIET}]]}, rate)[0]
+            self.assertEqual(len(out), start + len(render_sound(QUIET, rate)), (seconds, rate))
+
+
 class KnownSamplesTest(unittest.TestCase):
     def check(self, out: np.ndarray, count: int, known: tuple) -> None:
         self.assertEqual(len(out), count)
@@ -172,6 +212,14 @@ class KnownSamplesTest(unittest.TestCase):
         self.assertEqual(len(buffers), 3)
         for samples, spots in zip(buffers, known):
             self.check(samples, 667, spots)
+
+    def test_two_parts_on_one_timeline_at_8000_and_48000_hz(self):
+        self.check(render_entry(BOTH, RATE)[0], 1504,
+                   ((0, 0.007742), (1, 0.002255), (62, -0.287504), (63, -0.130614), (64, -0.255230), (174, 0.740766),
+                    (501, -0.113821), (1503, 0.0)))
+        self.check(render_entry(BOTH, 48000)[0], 9024,
+                   ((0, 0.001225), (1, 0.002323), (374, -0.111910), (375, -0.345819), (376, -0.343443), (670, 0.711590),
+                    (3008, -0.111258), (9023, 0.0)))
 
 
 class ErrorTest(unittest.TestCase):
@@ -204,16 +252,54 @@ class ErrorTest(unittest.TestCase):
             for kind in kinds:
                 self.assertIn(f"and has {kind!r}" if kind == kinds[0] else f"and {kind!r}", said)
 
-    def test_refuses_an_entry_of_parts_and_a_held_one_as_kinds_that_cannot_be_rendered(self):
-        for kind, value in (("parts", [[0, {"def": CHIRP}]]), ("held", {"note": CHIRP}), ("parts", None)):
-            said = self.refused({kind: value, "db": -3})
-            self.at("entry", said, kind)
-            self.assertIn(repr(kind), said)
+    def test_refuses_a_held_entry_as_the_one_kind_that_cannot_be_rendered(self):
+        for entry in ({"held": {"note": CHIRP}}, {"held": None, "db": -3}):
+            said = self.refused(entry)
+            self.at("entry", said, entry)
+            self.assertIn("'held'", said)
             self.assertIn("cannot be rendered", said)
 
     def test_refuses_defs_that_are_not_a_list(self):
         for defs in (None, {}, "defs", 3, CHIRP):
             self.at("defs", self.refused({"defs": defs}), defs)
+
+    def test_refuses_parts_that_are_not_a_list_or_are_none_and_a_db_beside_them(self):
+        for parts in (None, {}, "parts", 3, CHIRP):
+            self.at("parts", self.refused({"parts": parts}), parts)
+        for parts in ([], ()):
+            said = self.refused({"parts": parts})
+            self.at("parts", said, parts)
+            self.assertIn("at least one", said)
+        for db in (-3, 0, [0, 0], "-3"):
+            said = self.refused({**BOTH, "db": db})
+            self.at("db", said, db)
+            self.assertIn("'parts'", said)
+
+    def test_refuses_a_part_that_is_not_a_pair_and_seconds_that_are_not_a_time_from_0_on(self):
+        for part in (None, 3, "at", {"def": CHIRP}, [], [0], [0, {"def": CHIRP}, -6]):
+            said = self.refused({"parts": [[0, {"def": CHIRP}], part]})
+            self.at("parts[1]", said, part)
+            self.assertIn("[seconds, entry]", said)
+        for seconds in ("0", None, True, [0], float("nan"), float("inf"), -0.001, -2):
+            self.at("parts[1]: seconds", self.refused({"parts": [[0, {"def": CHIRP}], [seconds, {"def": CHIRP}]]}),
+                    seconds)
+
+    def test_refuses_a_part_with_defs_parts_or_held_and_says_that_a_part_is_one_sound(self):
+        for kind, value in (("defs", STEPS), ("parts", [[0, {"def": CHIRP}]]), ("held", {"note": CHIRP})):
+            said = self.refused({"parts": [[0, {"def": CHIRP}], [0.01, {kind: value, "db": -3}]]})
+            self.at("parts[1]: entry", said, kind)
+            self.assertIn("a part is one sound", said)
+            self.assertIn(f"not {kind!r}", said)
+
+    def test_names_the_part_whose_entry_is_wrong(self):
+        bad = {"voices": [{"inst": PING, "notes": [[0, "h5", 2]]}]}
+        wrong = (({"def": bad}, "def: voices[0].notes[0][1]"), ({"def": None}, "def: sound"),
+                 ({"def": CHIRP, "db": "-6"}, "db"), ({"def": CHIRP, "db": [0, 0]}, "db"),
+                 ({"def": CHIRP, "gain": 1}, "entry"), ({"db": -3}, "entry"), ({"def": CHIRP, "defs": STEPS}, "entry"),
+                 (None, "entry"), ([{"def": CHIRP}], "entry"))
+        for entry, place in wrong:
+            said = self.refused({"parts": [[0, {"def": CHIRP}], [0.01, {"def": CRASH}], [0.02, entry]]})
+            self.at(f"parts[2]: {place}", said, entry)
 
     def test_refuses_a_db_that_is_not_a_number_or_a_list_with_one_number_a_variant(self):
         for db in ("-6", None, True, {}, float("nan"), float("inf")):
@@ -243,9 +329,9 @@ class BankTest(unittest.TestCase):
     def test_every_sound_has_its_buffers_its_meta_and_no_held(self):
         tags = {"priority": 1, "tags": ["ui"]}
         sounds = {"chirp": {"def": CHIRP, "meta": tags}, "steps": {"defs": STEPS, "db": [-1, -3.5, 0]},
-                  "crash": {"def": CRASH, "db": -6, "meta": {}}}
+                  "crash": {"def": CRASH, "db": -6, "meta": {}}, "both": {**BOTH, "meta": {"tags": ["hit"]}}}
         bank = render_bank(sounds, RATE)
-        self.assertEqual(list(bank), ["chirp", "steps", "crash"])
+        self.assertEqual(list(bank), ["chirp", "steps", "crash", "both"])
         for name, entry in sounds.items():
             self.assertEqual(sorted(bank[name]), ["buffers", "held", "meta"], name)
             self.assertTrue(same(bank[name]["buffers"], render_entry(entry, RATE)), name)
@@ -254,6 +340,7 @@ class BankTest(unittest.TestCase):
         self.assertEqual(tags, {"priority": 1, "tags": ["ui"]})
         self.assertEqual(bank["steps"]["meta"], {})
         self.assertEqual(bank["crash"]["meta"], {})
+        self.assertEqual(bank["both"]["meta"], {"tags": ["hit"]})
 
     def test_rate_left_out_is_44100_and_no_sounds_are_an_empty_bank(self):
         self.assertEqual(len(render_bank({"quiet": {"def": QUIET}})["quiet"]["buffers"][0]), 1470)
@@ -263,7 +350,8 @@ class BankTest(unittest.TestCase):
     def test_puts_the_name_of_the_sound_in_front_of_what_is_refused(self):
         bad = {"voices": [{"inst": PING, "notes": [[0, "h5", 2]]}]}
         wrong = (({"defs": [CHIRP, bad]}, "defs[1]: voices[0].notes[0][1]: "), ({"def": CHIRP, "db": [0, 0]}, "db: "),
-                 ({"def": CHIRP, "defs": STEPS}, "entry: "), ({"held": {}}, "entry: "), (None, "entry: "))
+                 ({"def": CHIRP, "defs": STEPS}, "entry: "), ({"held": {}}, "entry: "), (None, "entry: "),
+                 ({"parts": [[0, {"def": CHIRP}], [0.01, {"def": bad}]]}, "parts[1]: def: voices[0].notes[0][1]: "))
         for entry, place in wrong:
             with self.assertRaises(RowSynthError, msg=repr(entry)) as caught:
                 render_bank({"chirp": {"def": CHIRP}, "second one": entry}, RATE)

@@ -1,10 +1,12 @@
 """A sound bank: every sound of a set rendered and brought to one level, with its variants."""
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from .errors import RowSynthError
-from .note import DEFAULT_RATE, _buffer, _count, _number
+from .note import DEFAULT_RATE, _buffer, _count, _length, _number
 from .sound import _keys, _list, render_sound
 
 # The gain every sound of a bank is rendered at, whatever gain it has of its own: low enough for a sound to
@@ -53,38 +55,99 @@ def _levels(db: object, count: int) -> list:
     return list(db)
 
 
+def _kind(entry: object) -> str:
+    """The kind of an entry: the one key of _KINDS it has. Refuses what is not an entry, or is of no kind or of two."""
+    _keys(entry, "entry", (), _KINDS + _REST)
+    kinds = [kind for kind in _KINDS if kind in entry]
+    if len(kinds) != 1:
+        has = " and ".join(repr(kind) for kind in kinds) or "none of them"
+        raise RowSynthError(f"entry: must have one of 'def', 'defs', 'parts' and 'held', and has {has}")
+    return kinds[0]
+
+
+def _levelled(defn: object, place: str, db: float, rate: int) -> np.ndarray:
+    """One def as a buffer at its level: rendered at RENDER_GAIN, brought to PEAK_DB, and set db decibels from there.
+
+    place is where the def sits in its entry. What is wrong with the def is refused with that in front.
+    """
+    try:
+        samples = render_sound(defn, rate, RENDER_GAIN)
+    except RowSynthError as error:
+        raise RowSynthError(f"{place}: {error}") from None
+    # Two steps, each stored before the next: brought to the peak, and from there to its own level.
+    _scale(normalise(samples), 10 ** (db / 20))
+    return samples
+
+
+def _one(entry: dict, rate: int) -> np.ndarray:
+    """The buffer of {"def": def}, at the entry's level."""
+    return _levelled(entry["def"], "def", _levels(entry.get("db", 0), 1)[0], rate)
+
+
+def _variants(entry: dict, rate: int) -> list[np.ndarray]:
+    """The buffers of {"defs": [def, ...]}: one a variant, each at its level."""
+    defs = entry["defs"]
+    _list(defs, "defs")
+    levels = _levels(entry.get("db", 0), len(defs))
+    return [_levelled(defn, f"defs[{i}]", level, rate) for i, (defn, level) in enumerate(zip(defs, levels))]
+
+
+def _placed(part: object, rate: int) -> tuple[int, np.ndarray]:
+    """One part of a timeline, [seconds, entry]: the sample it starts at, and its buffer at its own level."""
+    if not isinstance(part, (list, tuple)) or len(part) != 2:
+        raise RowSynthError(f"must be [seconds, entry], not {part!r}")
+    seconds, entry = part
+    _length(seconds, "seconds")
+    kind = _kind(entry)
+    if kind != "def":
+        # A part gives the timeline one buffer. Of variants, all but the first would be lost without a word.
+        raise RowSynthError(f"entry: a part is one sound: it must have 'def', not {kind!r}")
+    return math.floor(seconds * rate + 0.5), _one(entry, rate)
+
+
+def _timeline(entry: dict, rate: int) -> np.ndarray:
+    """The buffer of {"parts": [[seconds, entry], ...]}: every part from its own start, all of them added up.
+
+    The buffer ends with the part that ends last, which need not be the last of the list. What is wrong with
+    a part is refused with the part in front: "parts[1]: ...".
+    """
+    if "db" in entry:
+        raise RowSynthError("db: an entry with 'parts' has no level of its own: each part has its 'db'")
+    _list(entry["parts"], "parts")
+    if not entry["parts"]:
+        raise RowSynthError("parts: must have at least one part")
+    placed = []
+    for i, part in enumerate(entry["parts"]):
+        try:
+            placed.append(_placed(part, rate))
+        except RowSynthError as error:
+            raise RowSynthError(f"parts[{i}]: {error}") from None
+    out = np.zeros(max(at + len(samples) for at, samples in placed), dtype=np.float32)
+    for at, samples in placed:
+        out[at:at + len(samples)] += samples
+    return out
+
+
 def render_entry(entry: dict, rate: int = DEFAULT_RATE) -> list[np.ndarray]:
-    """The buffers of a bank entry: one for {"def": def}, and one a variant for {"defs": [def, ...]}.
+    """The buffers of a bank entry: one for a def, one a variant for defs, and one for parts on a timeline.
 
     Every def is rendered at RENDER_GAIN, its own gain set aside, and its loudest sample is brought to PEAK_DB.
     Then it is set at the entry's "db", its level against that peak in decibels: at -6 its samples are about
     half the size. "db" is one number for the whole entry, or a list with a number for each variant, and 0
     when it is left out.
+    {"parts": [[seconds, entry], ...]} is several sounds heard as one. Each part is an entry of one def with
+    a "db" of its own, and starts at the sample nearest to its seconds. The parts are added up into one
+    buffer, so the entry has no "db" itself. A held entry is refused.
     """
-    _keys(entry, "entry", (), _KINDS + _REST)
+    kind = _kind(entry)
     _count(rate, "rate", 1)
-    kinds = [kind for kind in _KINDS if kind in entry]
-    if len(kinds) != 1:
-        has = " and ".join(repr(kind) for kind in kinds) or "none of them"
-        raise RowSynthError(f"entry: must have one of 'def', 'defs', 'parts' and 'held', and has {has}")
-    kind = kinds[0]
-    if kind in ("parts", "held"):
-        raise RowSynthError(f"entry: an entry with {kind!r} cannot be rendered")
     if kind == "def":
-        variants = [("def", entry["def"])]
-    else:
-        _list(entry["defs"], "defs")
-        variants = [(f"defs[{i}]", defn) for i, defn in enumerate(entry["defs"])]
-    buffers = []
-    for (place, defn), level in zip(variants, _levels(entry.get("db", 0), len(variants))):
-        try:
-            samples = render_sound(defn, rate, RENDER_GAIN)
-        except RowSynthError as error:
-            raise RowSynthError(f"{place}: {error}") from None
-        # Two steps, each stored before the next: brought to the peak, and from there to its own level.
-        _scale(normalise(samples), 10 ** (level / 20))
-        buffers.append(samples)
-    return buffers
+        return [_one(entry, rate)]
+    if kind == "defs":
+        return _variants(entry, rate)
+    if kind == "parts":
+        return [_timeline(entry, rate)]
+    raise RowSynthError("entry: an entry with 'held' cannot be rendered")
 
 
 def render_bank(sounds: dict, rate: int = DEFAULT_RATE) -> dict:
