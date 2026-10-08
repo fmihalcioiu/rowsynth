@@ -251,6 +251,16 @@ def _play(notes: list[tuple], size: int, rate: int) -> np.ndarray:
     return out
 
 
+def pan_gains(pan: float) -> tuple[float, float]:
+    """The gains a pan gives the left side and the right: -1 is all left, 1 all right, and 0 has each 3 dB down.
+
+    They are the cosine and the sine of one angle, so their squares add up to 1, and a channel is as loud
+    wherever its pan puts it.
+    """
+    angle = (pan + 1) * math.pi / 4
+    return math.cos(angle), math.sin(angle)
+
+
 def render_song(song: dict, only: list[str] | None = None, dry: bool = False, rate: int = DEFAULT_RATE) -> dict:
     """A song as samples: {"left", "right", "rows", "seconds"}, the two sides and how long its rows take.
 
@@ -274,11 +284,11 @@ def render_song(song: dict, only: list[str] | None = None, dry: bool = False, ra
         channel = song["channels"][name]
         mono = _play(_notes(song, events, None if dry else channel.get("echo"), rate), total, rate)
         level = channel.get("gain", 1)
-        angle = (channel.get("pan", 0) + 1) * math.pi / 4
+        to_left, to_right = pan_gains(channel.get("pan", 0))
         # The sums are worked out in doubles, and only what a side then holds is rounded to float32.
         wide = mono.astype(np.float64)
-        left += wide * (level * math.cos(angle))
-        right += wide * (level * math.sin(angle))
+        left += wide * (level * to_left)
+        right += wide * (level * to_right)
     gain = song.get("gain", _GAIN)
     return {"left": finish(left, gain, rate), "right": finish(right, gain, rate), "rows": rows,
             "seconds": rows * row_samples / rate}
