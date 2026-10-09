@@ -6,14 +6,12 @@ from pathlib import Path
 
 import numpy as np
 
-from ..bank import render_entry
 from ..errors import RowSynthError
 from ..measure import measure
 from ..note import DEFAULT_RATE
-from ..project import Project
-from ..song import render_song, render_stems
+from ..song import render_stems
 from ..wav import save_wav
-from . import emit, load_project, mono
+from . import emit, kind_of, load_project, mono, render_sides
 
 NAME = "render"
 HELP = "write a sound or a song of a project file as a WAV file, and give its numbers"
@@ -55,38 +53,20 @@ def _stems(song: dict, folder: str, rate: int) -> dict:
             "files": files}
 
 
-def _sound(project: Project, args: argparse.Namespace) -> dict:
-    """Write one variant of a sound, at the level the bank gives it, and say what was written."""
-    name = args.name
-    if args.stems:
-        raise RowSynthError(f"--stems is for a song, and {name!r} is a sound")
-    buffers = render_entry(project.sound(name), args.rate)
-    variant = args.variant or 0
-    if not 0 <= variant < len(buffers):
-        raise RowSynthError(f"{name!r} has no variant {variant}: it has {len(buffers)}, counted from 0")
-    return _file(args.out, [buffers[variant]], args.rate)
-
-
-def _song(project: Project, args: argparse.Namespace) -> dict:
-    """Write a song, as its two sides in one file or as its stems in a folder, and say what was written."""
-    name = args.name
-    if args.variant is not None:
-        raise RowSynthError(f"--variant is for a sound, and {name!r} is a song")
-    song = project.song(name)
-    if args.stems:
-        return _stems(song, args.out, args.rate)
-    mix = render_song(song, rate=args.rate)
-    return _file(args.out, [mix["left"], mix["right"]], args.rate)
-
-
 def run(args: argparse.Namespace) -> int:
-    """Write the sound or the song that is named, print what was written with its numbers, and return 0."""
+    """Write the sound or the song that is named, print what was written with its numbers, and return 0.
+
+    A sound is one variant in a mono file, at the level the bank gives it. A song is its two sides in one
+    file, or with --stems its channels in a folder.
+    """
     project = load_project(args.file)
     name = args.name
-    sound, song = name in project.sounds, name in project.songs
-    if sound and song:
-        raise RowSynthError(f"{name!r} is both a sound and a song of {args.file}")
-    if not sound and not song:
-        raise RowSynthError(f"{name!r} is no sound and no song of {args.file}")
-    emit(_sound(project, args) if sound else _song(project, args))
+    kind = kind_of(project, args.file, name, args.variant)
+    if args.stems:
+        if kind == "sound":
+            raise RowSynthError(f"--stems is for a song, and {name!r} is a sound")
+        told = _stems(project.song(name), args.out, args.rate)
+    else:
+        told = _file(args.out, render_sides(project, kind, name, args.rate, args.variant), args.rate)
+    emit(told)
     return 0

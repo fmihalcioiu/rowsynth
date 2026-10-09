@@ -193,6 +193,10 @@ class Measure(CommandLineCase):
         save_wav(path, samples, rate)
         return path
 
+    def named(self, name: str, *flags: str) -> int:
+        """What main returns for measuring `name`, out of a project file holding PROJECT."""
+        return self.run_main("measure", str(self.saved(PROJECT)), name, *flags)
+
     def test_measure_prints_the_numbers_of_a_mono_file(self) -> None:
         path = self.wav(tone(440, 0.5, 8000), 8000)
         self.assertEqual(self.run_main("measure", str(path)), 0)
@@ -248,6 +252,102 @@ class Measure(CommandLineCase):
         self.assertEqual(self.printed(),
                          ("", "error: --at must be 0 or more and under the file's 0.5 seconds, not 0.5\n"
                               "error: --at must be 0 or more and under the file's 0.5 seconds, not 2.0\n"))
+
+    def test_rate_and_variant_are_refused_with_a_wav_even_at_0_as_being_for_a_sound_or_a_song(self) -> None:
+        path = self.wav(tone(440, 0.5, 8000), 8000)
+        for flag in ("--rate", "--variant"):
+            self.assertEqual(self.run_main("measure", str(path), flag, "0"), 2)
+        refused = f"is for a project's sound or song, and {path} with no name after it is measured as a WAV file"
+        self.assertEqual(self.printed(), ("", f"error: --rate {refused}\nerror: --variant {refused}\n"))
+
+    def test_a_sound_of_a_project_is_measured_at_the_level_the_bank_gives_it_and_no_file_is_written(self) -> None:
+        self.assertEqual(self.named("tap"), 0)
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"))
+        told = {"name": "tap", "kind": "sound", "rate": 44100, "channels": 1, "seconds": len(buffer) / 44100,
+                "measure": measure(buffer, 44100), "brightness": brightness(buffer, rate=44100)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        # A bank brings the loudest sample of every sound to 3 dB under full scale. The sound is longer than a
+        # frame of the brightness, so that is read from it and not left at zero.
+        self.assertEqual(told["measure"]["peak_db"], -3.0)
+        self.assertGreater(told["brightness"]["centroid_hz"], 0)
+        self.assertEqual([found.name for found in self.folder.iterdir()], ["project.json"])
+
+    def test_variant_picks_one_of_a_sound_counted_from_0_and_the_first_is_measured_without_it(self) -> None:
+        self.assertEqual(self.named("drip"), 0)
+        self.assertEqual(self.named("drip", "--variant", "2"), 0)
+        buffers = render_entry(Project.from_dict(PROJECT).sound("drip"))
+        told = [{"name": "drip", "kind": "sound", "rate": 44100, "channels": 1, "seconds": len(buffer) / 44100,
+                 "measure": measure(buffer, 44100), "brightness": brightness(buffer, rate=44100)}
+                for buffer in (buffers[0], buffers[2])]
+        self.assertEqual(self.printed(), ("".join(json.dumps(one, indent=2) + "\n" for one in told), ""))
+        # Each variant has a level of its own under the bank's peak of -3 dB: the first is 2 dB down, the third 4.
+        self.assertEqual([one["measure"]["peak_db"] for one in told], [-5.0, -7.0])
+
+    def test_a_song_of_a_project_is_measured_as_the_mean_of_its_two_sides(self) -> None:
+        self.assertEqual(self.named("sting", "--rate", "8000"), 0)
+        mix = render_song(Project.from_dict(PROJECT).song("sting"), rate=8000)
+        mean = (mix["left"].astype(np.float64) + mix["right"]) / 2
+        # The half second of the song's rows and the half second it runs on for after them.
+        told = {"name": "sting", "kind": "song", "rate": 8000, "channels": 2, "seconds": 1.0,
+                "measure": measure(mean, 8000), "brightness": brightness(mean, rate=8000)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        for side in (mix["left"], mix["right"]):
+            self.assertNotEqual(measure(side, 8000), told["measure"])
+
+    def test_rate_is_the_samples_a_second_a_sound_is_rendered_at_to_be_measured(self) -> None:
+        self.assertEqual(self.named("tap", "--rate", "8000"), 0)
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"), 8000)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual((told["rate"], told["seconds"], told["measure"]),
+                         (8000, len(buffer) / 8000, measure(buffer, 8000)))
+
+    def test_at_adds_the_pitch_of_a_sound_at_that_time(self) -> None:
+        self.assertEqual(self.named("drip", "--at", "0.01"), 0)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual(list(told), ["name", "kind", "rate", "channels", "seconds", "measure", "brightness", "pitch"])
+        self.assertEqual(told["pitch"]["at"], 0.01)
+        # The first variant plays e5, which is 7 semitones above the 440 Hz of a4.
+        self.assertAlmostEqual(told["pitch"]["hz"], 440 * 2 ** (7 / 12), delta=1)
+
+    def test_at_the_end_of_a_sound_or_of_a_song_is_refused_by_that_word_with_code_2(self) -> None:
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"), 8000)
+        seconds = len(buffer) / 8000
+        self.assertEqual(self.named("tap", "--rate", "8000", "--at", str(seconds)), 2)
+        self.assertEqual(self.named("sting", "--rate", "8000", "--at", "1"), 2)
+        self.assertEqual(self.printed(),
+                         ("", f"error: --at must be 0 or more and under the sound's {seconds} seconds, not {seconds}\n"
+                              "error: --at must be 0 or more and under the song's 1.0 seconds, not 1.0\n"))
+
+    def test_a_name_that_is_no_sound_and_no_song_of_the_project_is_not_measured(self) -> None:
+        self.assertEqual(self.named("pipe"), 2)
+        self.assertEqual(self.printed(),
+                         ("", f"error: 'pipe' is no sound and no song of {self.folder / 'project.json'}\n"))
+
+    def test_a_name_after_the_file_makes_it_a_project_file_whatever_the_file_is_called(self) -> None:
+        path = self.saved(PROJECT).rename(self.folder / "sounds.wav")
+        self.assertEqual(self.run_main("measure", str(path), "tap", "--rate", "8000"), 0)
+        self.assertEqual(json.loads(self.out.getvalue())["kind"], "sound")
+        # Alone, the same file is read as a WAV, which it is not.
+        self.assertEqual(self.run_main("measure", str(path)), 2)
+        self.assertEqual(self.err.getvalue(), f"error: {path}: not a RIFF/WAVE file\n")
+
+    def test_three_positionals_are_refused_with_code_2(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.named("tap", "drip")
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertIn("unrecognized arguments: drip", err)
+
+    def test_no_positional_is_refused_with_code_2_showing_the_two_forms_of_the_command(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.run_main("measure")
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertTrue(err.startswith(
+            "usage: rowsynth measure [-h] WAV [--at SECONDS]\n"
+            "       rowsynth measure [-h] FILE NAME [--rate N] [--variant N] [--at SECONDS]\n"), err)
 
 
 class Render(CommandLineCase):

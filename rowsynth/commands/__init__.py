@@ -9,8 +9,10 @@ from typing import TypeVar
 
 import numpy as np
 
+from ..bank import render_entry
 from ..errors import RowSynthError
 from ..project import Project
+from ..song import render_song
 
 Read = TypeVar("Read")
 
@@ -46,6 +48,38 @@ def load_file(read: Callable[[str | Path], Read], path: str | Path) -> Read:
 def load_project(path: str | Path) -> Project:
     """The project a file holds. A file that is not there is refused by its path, as one that is not JSON is."""
     return load_file(Project.load, path)
+
+
+def kind_of(project: Project, file: str | Path, name: str, variant: int | None) -> str:
+    """What a name is in the project of a file: "sound" or "song".
+
+    A name that is both is refused, and so is one that is neither. A variant asked for of a song is refused
+    too, since only a sound has variants.
+    """
+    sound, song = name in project.sounds, name in project.songs
+    if sound and song:
+        raise RowSynthError(f"{name!r} is both a sound and a song of {file}")
+    if not sound and not song:
+        raise RowSynthError(f"{name!r} is no sound and no song of {file}")
+    if song and variant is not None:
+        raise RowSynthError(f"--variant is for a sound, and {name!r} is a song")
+    return "sound" if sound else "song"
+
+
+def render_sides(project: Project, kind: str, name: str, rate: int, variant: int | None) -> list[np.ndarray]:
+    """A sound or a song of a project as its sides: the one side of a sound, or the left and the right of a song.
+
+    `kind` is what `kind_of` says of the name. A sound is at the level the bank gives it, and is the variant
+    asked for, counted from 0: the first when `variant` is None. One the sound does not have is refused.
+    """
+    if kind == "song":
+        mix = render_song(project.song(name), rate=rate)
+        return [mix["left"], mix["right"]]
+    buffers = render_entry(project.sound(name), rate)
+    picked = variant or 0
+    if not 0 <= picked < len(buffers):
+        raise RowSynthError(f"{name!r} has no variant {picked}: it has {len(buffers)}, counted from 0")
+    return [buffers[picked]]
 
 
 def mono(sides: Sequence[np.ndarray]) -> np.ndarray:
