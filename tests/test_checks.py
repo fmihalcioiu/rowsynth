@@ -9,9 +9,11 @@ import unittest
 from pathlib import Path
 
 from rowsynth import checks
+from rowsynth.bank import render_entry
 from rowsynth.checks import Finding, run, sounds
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
+from rowsynth.sound import KNEE
 
 RATE = 44100
 # At 100 Hz the fade that ends the output stage is shorter than one sample, and the last sample is left as it is.
@@ -28,8 +30,12 @@ def sound(inst: dict | str, note: str | float, ticks: float) -> dict:
     return {"voices": [{"inst": inst, "notes": [[0, note, ticks]]}]}
 
 
-# Keeps every rule. It is 5880 samples long at 44100 Hz.
+# Keeps every rule. It is 5880 samples long at 44100 Hz, and a hundredth of a second in it reads as 440.1 Hz.
 BEEP = sound("beep", "a4", 4)
+# The same a semitone up, a semitone down, and after a tenth of a second of silence.
+SHARP = sound("beep", "a#4", 4)
+FLAT = sound("beep", "g#4", 4)
+LATE = {"voices": [{"inst": "beep", "notes": [[6, "a4", 4]]}]}
 # Eight times the level: over the knee at the bank's gain.
 LOUD = sound({"gain": 8}, "a4", 4)
 # As loud, and a narrow pulse. The knee bends its tall side and not its shallow one, which leaves an offset.
@@ -64,14 +70,19 @@ def found_in(entry: dict, rate: int = RATE) -> list[Finding]:
     return sounds.check(project_of(zap=entry), rate)
 
 
-def zap(rule: str, message: str) -> Finding:
-    """A finding on the sound named zap."""
-    return Finding(rule, "sounds.zap", message)
+def zap(rule: str, message: str, part: int | None = None) -> Finding:
+    """A finding on the sound named zap, or on one of its parts."""
+    return Finding(rule, "sounds.zap" if part is None else f"sounds.zap.parts[{part}]", message)
 
 
 def rules(found: list[Finding]) -> list[str]:
     """The rule of each finding."""
     return [finding.rule for finding in found]
+
+
+def places(found: list[Finding]) -> list[tuple[str, str]]:
+    """The target and the rule of each finding."""
+    return [(finding.target, finding.rule) for finding in found]
 
 
 class FindingTest(unittest.TestCase):
@@ -121,6 +132,15 @@ class RunTest(unittest.TestCase):
 
 
 class SoundsTest(unittest.TestCase):
+    def refusal_of(self, entry: dict) -> str:
+        """What the check refuses a sound named zap with. The sound is put in by hand, past what loading refuses."""
+        project = Project()
+        project.instruments = INSTRUMENTS
+        project.sounds = {"zap": entry}
+        with self.assertRaises(RowSynthError) as caught:
+            sounds.check(project, RATE)
+        return str(caught.exception)
+
     def test_peak_fires_on_a_sound_that_reaches_the_knee_at_the_gain_of_the_bank(self):
         self.assertEqual(found_in({"def": LOUD}), [
             zap("peak", "reaches 0.944 at the bank's gain of 0.12, and from 0.7 up the output stage bends it")])
@@ -166,6 +186,31 @@ class SoundsTest(unittest.TestCase):
         self.assertEqual([finding.message for finding in found_in({"def": BEEP, "max_bright": 0.01})],
                          ["0.02 of its energy is above 4 kHz, which is more than 0.01"])
 
+    def test_a_note_read_back_in_tune_gives_nothing(self):
+        # By name, by number, and written 30 cents above what is read.
+        marks = [{"at": 0.01, "note": "a4"}, {"at": 0.01, "note": 69}, {"at": 0.01, "note": 69.3}]
+        self.assertEqual(found_in({"def": BEEP, "check": marks}), [])
+
+    def test_pitch_fires_on_a_note_more_than_35_cents_off_and_gives_the_cents(self):
+        self.assertEqual(found_in({"def": BEEP, "check": [{"at": 0.01, "note": "a#4"}]}), [
+            zap("pitch", "is 100 cents below the note a#4 written at 0.01 seconds, and more than 35 is out of tune")])
+        self.assertEqual(found_in({"def": BEEP, "check": [{"at": 0.01, "note": 68.6}]}), [
+            zap("pitch", "is 40 cents above the note 68.6 written at 0.01 seconds, and more than 35 is out of tune")])
+
+    def test_pitch_fires_where_the_sound_is_silent_or_over(self):
+        # The note of LATE is in tune a tenth of a second in. Before it there is silence, and at 0.5 the end is past.
+        marks = [{"at": 0, "note": "a4"}, {"at": 0.11, "note": "a4"}, {"at": 0.5, "note": "a4"}]
+        self.assertEqual(found_in({"def": LATE, "check": marks}), [
+            zap("pitch", "has no note to be read at 0 seconds, where the note a4 is written"),
+            zap("pitch", "has no note to be read at 0.5 seconds, where the note a4 is written")])
+
+    def test_pitch_comes_after_the_other_rules_and_note_by_note(self):
+        marks = [{"at": 0.5, "note": "a4"}, {"at": 0.01, "note": "c5"}]
+        self.assertEqual(found_in({"def": BEEP, "max_seconds": 0.1, "check": marks}), [
+            zap("length", "lasts 0.13333 seconds, which is over its limit of 0.1"),
+            zap("pitch", "has no note to be read at 0.5 seconds, where the note a4 is written"),
+            zap("pitch", "is 300 cents below the note c5 written at 0.01 seconds, and more than 35 is out of tune")])
+
     def test_the_target_of_a_variant_carries_its_index(self):
         self.assertEqual([(finding.rule, finding.target) for finding in found_in({"defs": [BEEP, LOUD, HISS]})],
                          [("peak", "sounds.zap[1]"), ("bright", "sounds.zap[2]")])
@@ -176,28 +221,84 @@ class SoundsTest(unittest.TestCase):
         self.assertEqual([(finding.rule, finding.target) for finding in found],
                          [("length", "sounds.zap[0]")])
 
+    def test_the_check_of_an_entry_is_read_on_every_variant(self):
+        found = found_in({"defs": [FLAT, BEEP, SHARP], "check": [{"at": 0.01, "note": "a4"}]})
+        self.assertEqual(found, [
+            Finding("pitch", "sounds.zap[0]",
+                    "is 100 cents below the note a4 written at 0.01 seconds, and more than 35 is out of tune"),
+            Finding("pitch", "sounds.zap[2]",
+                    "is 100 cents above the note a4 written at 0.01 seconds, and more than 35 is out of tune")])
+
     def test_findings_come_by_sound_then_by_variant_then_by_rule(self):
         project = project_of(zap={"defs": [LOPSIDED, HISS], "max_seconds": 0.05},
                              alarm={"def": RUMBLE, "max_seconds": 0.05})
-        self.assertEqual([(finding.target, finding.rule) for finding in sounds.check(project, RATE)], [
+        self.assertEqual(places(sounds.check(project, RATE)), [
             ("sounds.zap[0]", "peak"), ("sounds.zap[0]", "dc"), ("sounds.zap[0]", "length"),
             ("sounds.zap[1]", "bright"), ("sounds.zap[1]", "length"),
             ("sounds.alarm", "ends"), ("sounds.alarm", "length")])
 
-    def test_an_entry_with_parts_or_held_gives_nothing_yet(self):
+    def test_parts_that_keep_the_rules_give_nothing(self):
+        self.assertEqual(found_in({"parts": [[0, {"def": BEEP}], [0.1, {"def": SHARP, "db": -6}]]}), [])
+
+    def test_a_part_that_breaks_a_rule_is_found_under_its_place_in_the_parts(self):
+        self.assertEqual(found_in({"parts": [[0, {"def": BEEP}], [0.05, {"def": LOUD}]]}), [
+            zap("peak", "reaches 0.944 at the bank's gain of 0.12, and from 0.7 up the output stage bends it",
+                part=1)])
+
+    def test_the_whole_of_parts_that_breaks_bright_or_length_is_found_under_the_sound(self):
+        # The hiss is let through as a part, and is nearly all there is to hear of the two together.
+        harsh = {"parts": [[0, {"def": BEEP, "db": -20}], [0.02, {"def": HISS, "max_bright": 0.9}]]}
+        self.assertEqual(found_in(harsh), [zap("bright", "0.78 of its energy is above 4 kHz, which is more than 0.3")])
+        # Each part is longer than the limit of the entry, and neither is held to it.
+        long = {"parts": [[0, {"def": BEEP}], [0.1, {"def": BEEP}]], "max_seconds": 0.1}
+        self.assertEqual(found_in(long), [zap("length", "lasts 0.23333 seconds, which is over its limit of 0.1")])
+
+    def test_the_whole_of_parts_is_not_held_to_peak(self):
+        # One sound twice from the start adds up to twice the bank's peak, far over the knee.
+        entry = {"parts": [[0, {"def": BEEP}], [0, {"def": BEEP}]]}
+        whole = render_entry(project_of(zap=entry).sound("zap"), RATE)[0]
+        self.assertGreater(float(abs(whole).max()), 2 * KNEE)
+        self.assertEqual(found_in(entry), [])
+
+    def test_each_part_is_held_to_its_own_limits_and_the_whole_to_those_of_the_entry(self):
+        self.assertEqual(places(found_in({"parts": [[0, {"def": THUD}], [0, {"def": HISS}]]})), [
+            ("sounds.zap.parts[0]", "dc"), ("sounds.zap.parts[1]", "bright"), ("sounds.zap", "bright")])
+        # The offset of the thud breaks the limit of the entry, which the thud as a part is not held to.
+        parts = [[0, {"def": THUD, "max_dc": 0.01}], [0, {"def": HISS, "max_bright": 0.9}]]
+        self.assertEqual(found_in({"parts": parts, "max_bright": 0.9, "max_dc": 0.001}), [
+            zap("dc", "its mean sample is 0.0012, which is 0.001 or more off zero")])
+
+    def test_the_check_of_a_part_is_read_on_the_part_and_that_of_the_entry_on_the_whole(self):
+        # Both parts are told to play a#4, and the first plays a4. The whole is told to play a4 where each sounds.
+        mark = {"at": 0.01, "note": "a#4"}
+        entry = {"parts": [[0, {"def": BEEP, "check": [mark]}], [0.1, {"def": SHARP, "check": [mark]}]],
+                 "check": [{"at": 0.01, "note": "a4"}, {"at": 0.11, "note": "a4"}]}
+        self.assertEqual(found_in(entry), [
+            zap("pitch", "is 100 cents below the note a#4 written at 0.01 seconds, and more than 35 is out of tune",
+                part=0),
+            zap("pitch", "is 100 cents above the note a4 written at 0.11 seconds, and more than 35 is out of tune")])
+
+    def test_findings_on_parts_come_part_by_part_and_then_on_the_whole(self):
+        project = project_of(zap={"parts": [[0, {"def": LOUD}], [0.1, {"def": HISS}]], "max_seconds": 0.01},
+                             pop={"def": LOUD})
+        self.assertEqual(places(sounds.check(project, RATE)), [
+            ("sounds.zap.parts[0]", "peak"), ("sounds.zap.parts[1]", "bright"), ("sounds.zap", "length"),
+            ("sounds.pop", "peak")])
+
+    def test_an_entry_with_held_gives_nothing_yet(self):
         held = {"note": LOUD, "start": 2, "loop": 4, "join": 1, "end": LOUD, "let_go": 2}
-        project = project_of(pile={"parts": [[0, {"def": LOUD}], [0.1, {"def": HISS}]], "max_seconds": 0.01},
-                             drone={"held": held, "max_seconds": 0.01})
-        self.assertEqual(sounds.check(project, RATE), [])
+        self.assertEqual(found_in({"held": held, "max_seconds": 0.01}), [])
 
     def test_a_def_that_cannot_be_rendered_is_refused_with_its_target_in_front(self):
-        # Loading a project refuses a wave it does not know, so this one is put together by hand.
-        project = Project()
-        project.instruments = INSTRUMENTS
-        project.sounds = {"zap": {"defs": [BEEP, sound({"wave": "sine"}, "a4", 4)]}}
-        with self.assertRaises(RowSynthError) as caught:
-            sounds.check(project, RATE)
-        self.assertEqual(str(caught.exception), "sounds.zap[1]: voices[0].inst.wave: unknown wave 'sine'")
+        odd = sound({"wave": "sine"}, "a4", 4)
+        self.assertEqual(self.refusal_of({"defs": [BEEP, odd]}),
+                         "sounds.zap[1]: voices[0].inst.wave: unknown wave 'sine'")
+        self.assertEqual(self.refusal_of({"parts": [[0, {"def": BEEP}], [0, {"def": odd}]]}),
+                         "sounds.zap.parts[1]: voices[0].inst.wave: unknown wave 'sine'")
+
+    def test_parts_the_bank_cannot_add_up_are_refused_with_the_sound_in_front(self):
+        self.assertEqual(self.refusal_of({"parts": [[-1, {"def": BEEP}]]}),
+                         "sounds.zap: parts[0]: seconds: must be 0 or more, not -1")
 
 
 if __name__ == "__main__":
