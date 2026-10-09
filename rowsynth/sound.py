@@ -27,7 +27,7 @@ _LOW_HZ = 30
 
 # Up to the knee a sample passes as it is. Past it the samples are bent over, and the furthest they get is
 # the knee and the room above it together: 0.99.
-_KNEE = 0.7
+KNEE = 0.7
 _ROOM = 0.29
 
 # The samples the fade at the end takes at 44100 Hz: 5 milliseconds.
@@ -49,10 +49,10 @@ def _k_output(out, gain, keep, memory):
         last_in = x
         last_out = y
         size = abs(y)
-        if size <= _KNEE:
+        if size <= KNEE:
             out[i] = y
         else:
-            out[i] = math.copysign(_KNEE + _ROOM * math.tanh((size - _KNEE) / _ROOM), y)
+            out[i] = math.copysign(KNEE + _ROOM * math.tanh((size - KNEE) / _ROOM), y)
     memory[0] = last_in
     memory[1] = last_out
 

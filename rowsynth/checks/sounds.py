@@ -7,12 +7,8 @@ from ..bank import PEAK_DB, RENDER_GAIN
 from ..errors import RowSynthError
 from ..measure import brightness, measure
 from ..project import Project
-from ..sound import render_sound
+from ..sound import KNEE, render_sound
 from . import Finding
-
-# From this size up the output stage bends a sample over. A sound that gets there at the bank's gain no
-# longer has the shape it was written with.
-_KNEE = 0.7
 
 # A first or a last sample of this size or more is a jump out of silence or back into it, and clicks.
 _STEP = 0.01
@@ -61,8 +57,9 @@ def _breaches(target: str, entry: dict, samples: np.ndarray, rate: int) -> list[
         found.append(Finding(rule, target, message))
 
     peak = float(np.abs(samples).max())
-    if peak >= _KNEE:
-        add("peak", f"reaches {peak:.3f} at the bank's gain of {RENDER_GAIN}, and from {_KNEE} up the output "
+    # A sound that gets to the knee at the bank's gain no longer has the shape it was written with.
+    if peak >= KNEE:
+        add("peak", f"reaches {peak:.3f} at the bank's gain of {RENDER_GAIN}, and from {KNEE} up the output "
                     f"stage bends it")
     figures = measure(_levelled(samples), rate)
     if figures["head_step"] >= _STEP:
