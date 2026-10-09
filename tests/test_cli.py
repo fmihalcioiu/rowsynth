@@ -16,6 +16,7 @@ from pathlib import Path
 import numpy as np
 
 import rowsynth
+from rowsynth import checks
 from rowsynth.bank import render_entry
 from rowsynth.cli import main
 from rowsynth.commands import emit, load_file, load_project, mono
@@ -26,9 +27,9 @@ from rowsynth.song import render_song, render_stems
 from rowsynth.wav import load_wav, save_wav
 
 
-def blip(inst: str, note: object) -> dict:
-    """A sound of one short note."""
-    return {"voices": [{"inst": inst, "notes": [[0, note, 3]]}]}
+def blip(inst: str, note: object, ticks: float = 3) -> dict:
+    """A sound of one note: a short one, unless it is told how many ticks to last."""
+    return {"voices": [{"inst": inst, "notes": [[0, note, ticks]]}]}
 
 
 # A project with a sound of each form and two songs, one of them layered. No table of it is in name order.
@@ -42,8 +43,9 @@ PROJECT = {
         "tap": {"def": blip("snap", 72)},
         "drip": {"defs": [blip("pipe", "e5"), blip("pipe", "g5"), blip("pipe", "a5")], "db": [-2, -3, -4]},
         "knock": {"parts": [[0, {"def": blip("snap", 50)}], [0.1, {"def": blip("snap", 45)}]]},
+        # The note lasts the 30 ticks its start and its loop are cut from: a tenth of a second, and four tenths.
         "drone": {
-            "held": {"note": blip("pipe", "d2"), "start": 6, "loop": 24, "join": 3, "end": blip("pipe", "d2"),
+            "held": {"note": blip("pipe", "d2", 30), "start": 6, "loop": 24, "join": 3, "end": blip("pipe", "d2"),
                      "let_go": 2},
         },
     },
@@ -168,6 +170,41 @@ class Shared(CommandLineCase):
         self.assertNotEqual(mean[0], (left[0] + right[0]) / np.float32(2))
 
 
+class Check(CommandLineCase):
+    def project(self, **limits: float) -> dict:
+        """A project of one sound of PROJECT, which keeps every rule at 44100 Hz, with these limits set on it."""
+        return {"instruments": PROJECT["instruments"], "sounds": {"tap": {**PROJECT["sounds"]["tap"], **limits}}}
+
+    def test_check_of_a_project_that_keeps_the_rules_prints_no_findings_with_code_0(self) -> None:
+        self.assertEqual(self.run_main("check", str(self.saved(self.project()))), 0)
+        self.assertEqual(self.printed(), ('{\n  "findings": []\n}\n', ""))
+
+    def test_check_prints_the_finding_on_a_sound_that_breaks_a_rule_with_code_1(self) -> None:
+        # The sound lasts longer than the hundredth of a second it is allowed here.
+        data = self.project(max_seconds=0.01)
+        self.assertEqual(self.run_main("check", str(self.saved(data))), 1)
+        found = checks.run(Project.from_dict(data))
+        told = {"findings": [{"rule": one.rule, "target": one.target, "message": one.message} for one in found]}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        self.assertEqual([(one.rule, one.target) for one in found], [("length", "sounds.tap")])
+
+    def test_rate_is_the_samples_a_second_the_checks_render_at(self) -> None:
+        data = self.project()
+        self.assertEqual(self.run_main("check", str(self.saved(data)), "--rate", "8000"), 1)
+        project = Project.from_dict(data)
+        found = checks.run(project, 8000)
+        told = {"findings": [one.to_dict() for one in found]}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+        # The sound that keeps every rule at 44100 samples a second breaks one of them at 8000.
+        self.assertEqual([(one.rule, one.target) for one in found], [("ends", "sounds.tap")])
+        self.assertEqual(checks.run(project), [])
+
+    def test_check_of_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
+        path = self.folder / "nowhere.json"
+        self.assertEqual(self.run_main("check", str(path)), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: no such file\n"))
+
+
 class Info(CommandLineCase):
     def test_info_prints_what_a_project_holds_by_name_in_the_order_of_the_file(self) -> None:
         self.assertEqual(self.run_main("info", str(self.saved(PROJECT))), 0)
@@ -253,12 +290,13 @@ class Measure(CommandLineCase):
                          ("", "error: --at must be 0 or more and under the file's 0.5 seconds, not 0.5\n"
                               "error: --at must be 0 or more and under the file's 0.5 seconds, not 2.0\n"))
 
-    def test_rate_and_variant_are_refused_with_a_wav_even_at_0_as_being_for_a_sound_or_a_song(self) -> None:
+    def test_rate_variant_and_part_are_refused_with_a_wav_even_at_0_as_being_for_a_sound_or_a_song(self) -> None:
         path = self.wav(tone(440, 0.5, 8000), 8000)
-        for flag in ("--rate", "--variant"):
-            self.assertEqual(self.run_main("measure", str(path), flag, "0"), 2)
+        for flag, value in (("--rate", "0"), ("--variant", "0"), ("--part", "start")):
+            self.assertEqual(self.run_main("measure", str(path), flag, value), 2)
         refused = f"is for a project's sound or song, and {path} with no name after it is measured as a WAV file"
-        self.assertEqual(self.printed(), ("", f"error: --rate {refused}\nerror: --variant {refused}\n"))
+        self.assertEqual(self.printed(),
+                         ("", f"error: --rate {refused}\nerror: --variant {refused}\nerror: --part {refused}\n"))
 
     def test_a_sound_of_a_project_is_measured_at_the_level_the_bank_gives_it_and_no_file_is_written(self) -> None:
         self.assertEqual(self.named("tap"), 0)
@@ -282,6 +320,37 @@ class Measure(CommandLineCase):
         self.assertEqual(self.printed(), ("".join(json.dumps(one, indent=2) + "\n" for one in told), ""))
         # Each variant has a level of its own under the bank's peak of -3 dB: the first is 2 dB down, the third 4.
         self.assertEqual([one["measure"]["peak_db"] for one in told], [-5.0, -7.0])
+
+    def test_a_held_sound_is_measured_as_its_start_when_no_part_is_asked_for(self) -> None:
+        self.assertEqual(self.named("drone"), 0)
+        start, _, _ = render_entry(Project.from_dict(PROJECT).sound("drone"))
+        # The start is 6 ticks, a tenth of a second.
+        told = {"name": "drone", "kind": "sound", "part": "start", "rate": 44100, "channels": 1, "seconds": 0.1,
+                "measure": measure(start, 44100), "brightness": brightness(start, rate=44100)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2) + "\n", ""))
+
+    def test_part_picks_the_start_the_loop_or_the_end_of_a_held_sound_to_measure_by_name(self) -> None:
+        parts = ("start", "loop", "end")
+        for part in parts:
+            self.assertEqual(self.named("drone", "--rate", "8000", "--part", part), 0)
+        buffers = render_entry(Project.from_dict(PROJECT).sound("drone"), 8000)
+        told = [{"name": "drone", "kind": "sound", "part": part, "rate": 8000, "channels": 1,
+                 "seconds": len(buffer) / 8000, "measure": measure(buffer, 8000),
+                 "brightness": brightness(buffer, rate=8000)}
+                for part, buffer in zip(parts, buffers)]
+        self.assertEqual(self.printed(), ("".join(json.dumps(one, indent=2) + "\n" for one in told), ""))
+        # The start is 6 ticks and the loop 24. The end is a note of its own, and as long as neither.
+        self.assertEqual([one["seconds"] for one in told[:2]], [0.1, 0.4])
+        self.assertNotIn(told[2]["seconds"], (0.1, 0.4))
+
+    def test_part_is_printed_for_a_held_sound_and_for_nothing_else_that_is_measured(self) -> None:
+        has = {}
+        for name in ("drone", "tap", "drip", "knock", "sting"):
+            # Each document is read on its own.
+            self.out = io.StringIO()
+            self.assertEqual(self.named(name, "--rate", "8000"), 0)
+            has[name] = "part" in json.loads(self.out.getvalue())
+        self.assertEqual(has, {"drone": True, "tap": False, "drip": False, "knock": False, "sting": False})
 
     def test_a_song_of_a_project_is_measured_as_the_mean_of_its_two_sides(self) -> None:
         self.assertEqual(self.named("sting", "--rate", "8000"), 0)
@@ -347,7 +416,8 @@ class Measure(CommandLineCase):
         self.assertEqual(out, "")
         self.assertTrue(err.startswith(
             "usage: rowsynth measure [-h] WAV [--at SECONDS]\n"
-            "       rowsynth measure [-h] FILE NAME [--rate N] [--variant N] [--at SECONDS]\n"), err)
+            "       rowsynth measure [-h] FILE NAME [--rate N] [--variant N] [--part {start,loop,end}] "
+            "[--at SECONDS]\n"), err)
 
 
 class Render(CommandLineCase):
@@ -387,6 +457,43 @@ class Render(CommandLineCase):
             self.assertEqual(len(row), len(buffer))
             self.assertLess(float(np.abs(row - buffer).max()), STEP)
             self.assertEqual(measure(row, 8000)["peak_db"], peak)
+
+    def test_a_held_sound_is_written_as_its_start_when_no_part_is_asked_for(self) -> None:
+        path = self.folder / "drone.wav"
+        self.assertEqual(self.render("drone", path), 0)
+        start, _, _ = render_entry(Project.from_dict(PROJECT).sound("drone"))
+        (row,), rate = load_wav(path)
+        self.assertEqual((rate, len(row)), (44100, len(start)))
+        self.assertLess(float(np.abs(row - start).max()), STEP)
+        # The start is 6 ticks, a tenth of a second.
+        told = {"file": str(path), "part": "start", "rate": 44100, "channels": 1, "seconds": 0.1,
+                "measure": measure(start, 44100)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+
+    def test_part_picks_the_start_the_loop_or_the_end_of_a_held_sound_to_write_by_name(self) -> None:
+        buffers = render_entry(Project.from_dict(PROJECT).sound("drone"), 8000)
+        # No two of the three are of one length, so a file that held another part than was asked for would not pass.
+        self.assertEqual(len({len(buffer) for buffer in buffers}), 3)
+        told = []
+        for part, buffer in zip(("start", "loop", "end"), buffers):
+            path = self.folder / f"{part}.wav"
+            self.assertEqual(self.render("drone", path, "--rate", "8000", "--part", part), 0)
+            (row,), _ = load_wav(path)
+            self.assertEqual(len(row), len(buffer))
+            self.assertLess(float(np.abs(row - buffer).max()), STEP)
+            told.append({"file": str(path), "part": part, "rate": 8000, "channels": 1,
+                         "seconds": len(buffer) / 8000, "measure": measure(buffer, 8000)})
+        self.assertEqual(self.printed(),
+                         ("".join(json.dumps(one, indent=2, ensure_ascii=False) + "\n" for one in told), ""))
+
+    def test_part_is_printed_for_a_held_sound_and_for_nothing_else_that_is_written(self) -> None:
+        has = {}
+        for name in ("drone", "tap", "drip", "knock", "sting"):
+            # Each document is read on its own.
+            self.out = io.StringIO()
+            self.assertEqual(self.render(name, self.folder / f"{name}.wav", "--rate", "8000"), 0)
+            has[name] = "part" in json.loads(self.out.getvalue())
+        self.assertEqual(has, {"drone": True, "tap": False, "drip": False, "knock": False, "sting": False})
 
     def test_rate_is_the_samples_a_second_a_file_is_rendered_at(self) -> None:
         path = self.folder / "tap.wav"
@@ -450,6 +557,31 @@ class Render(CommandLineCase):
         self.assertEqual(self.refusal("sting", "--variant", "0"),
                          "error: --variant is for a sound, and 'sting' is a song\n")
 
+    def test_part_with_a_sound_that_is_not_held_is_refused_with_code_2_whatever_form_it_has(self) -> None:
+        for name in ("tap", "drip"):
+            self.refusal(name, "--part", "start")
+        self.assertEqual(self.refusal("knock", "--part", "loop"),
+                         "error: --part is for a held sound, and 'tap' is not one\n"
+                         "error: --part is for a held sound, and 'drip' is not one\n"
+                         "error: --part is for a held sound, and 'knock' is not one\n")
+
+    def test_part_with_a_song_is_refused_with_code_2(self) -> None:
+        self.assertEqual(self.refusal("sting", "--part", "loop"),
+                         "error: --part is for a held sound, and 'sting' is a song\n")
+
+    def test_variant_with_a_held_sound_is_refused_with_code_2_saying_to_use_part_even_when_it_is_0(self) -> None:
+        self.assertEqual(self.refusal("drone", "--variant", "0"),
+                         "error: --variant is for a sound that is not held, and 'drone' is a held sound: "
+                         "use --part\n")
+
+    def test_a_part_that_is_none_of_the_three_is_refused_with_code_2(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.render("drone", self.folder / "middle.wav", "--part", "middle")
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertIn("invalid choice: 'middle'", err)
+
     def test_stems_with_a_sound_is_refused_with_code_2(self) -> None:
         self.assertEqual(self.refusal("tap", "--stems"), "error: --stems is for a song, and 'tap' is a sound\n")
 
@@ -507,7 +639,8 @@ class Refusals(CommandLineCase):
     def test_the_help_lists_the_commands_in_name_order(self) -> None:
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
-        self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()), ["info", "measure", "render"])
+        self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()),
+                         ["check", "info", "measure", "render"])
 
 
 class Process(CommandLineCase):

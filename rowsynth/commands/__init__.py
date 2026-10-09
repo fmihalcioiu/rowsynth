@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 from collections.abc import Callable, Sequence
+from dataclasses import dataclass
 from pathlib import Path
 from typing import TypeVar
 
@@ -15,6 +16,10 @@ from ..project import Project
 from ..song import render_song
 
 Read = TypeVar("Read")
+
+# The parts of a held sound, in the order `render_entry` gives their buffers. The first is the one a command
+# takes when it is not told which.
+PARTS = ("start", "loop", "end")
 
 
 def _writable(data: object) -> object:
@@ -50,36 +55,69 @@ def load_project(path: str | Path) -> Project:
     return load_file(Project.load, path)
 
 
-def kind_of(project: Project, file: str | Path, name: str, variant: int | None) -> str:
-    """What a name is in the project of a file: "sound" or "song".
+@dataclass(frozen=True)
+class Pick:
+    """What a command is to render out of a project: a song, or one buffer of a sound.
 
-    A name that is both is refused, and so is one that is neither. A variant asked for of a song is refused
-    too, since only a sound has variants.
+    kind is "sound" or "song". buffer is which of the buffers `render_entry` makes of the sound: the variant,
+    or in a held sound the part. part is the name of that part, and None in anything but a held sound.
+    """
+
+    name: str
+    kind: str
+    buffer: int = 0
+    part: str | None = None
+
+    def told(self) -> dict:
+        """What a printed document says of which buffer this is: the part of a held sound, and no more."""
+        return {} if self.part is None else {"part": self.part}
+
+
+def pick(project: Project, file: str | Path, name: str, *, variant: int | None, part: str | None) -> Pick:
+    """What a name picks out of the project of a file, with the two flags that can go with it.
+
+    `variant` is what --variant was given and `part` what --part was, each None where the flag was left out.
+    With neither, a sound is its first variant and a held sound its start. Whatever does not fit is refused
+    here and nowhere else: a name that is both a sound and a song, or neither; either flag with a song;
+    --part with a sound that is not held, and --variant with one that is; a variant the sound does not have.
     """
     sound, song = name in project.sounds, name in project.songs
     if sound and song:
         raise RowSynthError(f"{name!r} is both a sound and a song of {file}")
     if not sound and not song:
         raise RowSynthError(f"{name!r} is no sound and no song of {file}")
-    if song and variant is not None:
-        raise RowSynthError(f"--variant is for a sound, and {name!r} is a song")
-    return "sound" if sound else "song"
-
-
-def render_sides(project: Project, kind: str, name: str, rate: int, variant: int | None) -> list[np.ndarray]:
-    """A sound or a song of a project as its sides: the one side of a sound, or the left and the right of a song.
-
-    `kind` is what `kind_of` says of the name. A sound is at the level the bank gives it, and is the variant
-    asked for, counted from 0: the first when `variant` is None. One the sound does not have is refused.
-    """
-    if kind == "song":
-        mix = render_song(project.song(name), rate=rate)
-        return [mix["left"], mix["right"]]
-    buffers = render_entry(project.sound(name), rate)
+    if song:
+        if variant is not None:
+            raise RowSynthError(f"--variant is for a sound, and {name!r} is a song")
+        if part is not None:
+            raise RowSynthError(f"--part is for a held sound, and {name!r} is a song")
+        return Pick(name, "song")
+    entry = project.sounds[name]
+    if "held" in entry:
+        if variant is not None:
+            raise RowSynthError(f"--variant is for a sound that is not held, and {name!r} is a held sound: "
+                                "use --part")
+        part = part or PARTS[0]
+        return Pick(name, "sound", PARTS.index(part), part)
+    if part is not None:
+        raise RowSynthError(f"--part is for a held sound, and {name!r} is not one")
+    # Variants are a list of defs. A sound of any other form is one buffer, and so has the one variant.
+    count = len(entry["defs"]) if "defs" in entry else 1
     picked = variant or 0
-    if not 0 <= picked < len(buffers):
-        raise RowSynthError(f"{name!r} has no variant {picked}: it has {len(buffers)}, counted from 0")
-    return [buffers[picked]]
+    if not 0 <= picked < count:
+        raise RowSynthError(f"{name!r} has no variant {picked}: it has {count}, counted from 0")
+    return Pick(name, "sound", picked)
+
+
+def render_sides(project: Project, picked: Pick, rate: int) -> list[np.ndarray]:
+    """What was picked out of a project, as its sides: the one side of a sound, or the left and the right of a song.
+
+    A sound is at the level the bank gives it, and is the one of its buffers that was picked.
+    """
+    if picked.kind == "song":
+        mix = render_song(project.song(picked.name), rate=rate)
+        return [mix["left"], mix["right"]]
+    return [render_entry(project.sound(picked.name), rate)[picked.buffer]]
 
 
 def mono(sides: Sequence[np.ndarray]) -> np.ndarray:

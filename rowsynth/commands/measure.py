@@ -10,7 +10,7 @@ from ..errors import RowSynthError
 from ..measure import brightness, measure, pitch_at
 from ..note import DEFAULT_RATE
 from ..wav import load_wav
-from . import emit, kind_of, load_file, load_project, mono, render_sides
+from . import PARTS, emit, load_file, load_project, mono, pick, render_sides
 
 NAME = "measure"
 HELP = ("give the numbers of a WAV file, or of a sound or a song of a project file: its length, its level, "
@@ -20,7 +20,7 @@ HELP = ("give the numbers of a WAV file, or of a sound or a song of a project fi
 def configure(parser: argparse.ArgumentParser) -> None:
     """Give the parser the two forms of the command: a WAV file alone, or a project file and a name in it."""
     parser.usage = ("%(prog)s [-h] WAV [--at SECONDS]\n"
-                    "       %(prog)s [-h] FILE NAME [--rate N] [--variant N] [--at SECONDS]")
+                    "       %(prog)s [-h] FILE NAME [--rate N] [--variant N] [--part {start,loop,end}] [--at SECONDS]")
     parser.add_argument("file", metavar="FILE",
                         help="alone, a WAV file, mono or stereo. With NAME after it, a project file. "
                              "What has two sides is measured as their mean")
@@ -30,6 +30,7 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help=f"the samples a second to render the sound or the song at (default {DEFAULT_RATE})")
     parser.add_argument("--variant", metavar="N", type=int,
                         help="which variant of a sound to measure, counted from 0 (default 0)")
+    parser.add_argument("--part", choices=PARTS, help=f"which part of a held sound to measure (default {PARTS[0]})")
     parser.add_argument("--at", metavar="SECONDS", type=float, help="also give the pitch sounding at this time")
 
 
@@ -55,8 +56,8 @@ def _numbers(sides: Sequence[np.ndarray], rate: int, at: float | None, what: str
 
 
 def _wav(args: argparse.Namespace) -> dict:
-    """The numbers of a WAV file. A rate or a variant is refused: a file is measured as it is."""
-    for flag in ("rate", "variant"):
+    """The numbers of a WAV file. A rate, a variant or a part is refused: a file is measured as it is."""
+    for flag in ("rate", "variant", "part"):
         if getattr(args, flag) is not None:
             raise RowSynthError(f"--{flag} is for a project's sound or song, and {args.file} with no name "
                                 "after it is measured as a WAV file")
@@ -68,10 +69,10 @@ def _named(args: argparse.Namespace) -> dict:
     """The numbers of a sound or a song of a project file, rendered to be measured and written nowhere."""
     project = load_project(args.file)
     name = args.name
-    kind = kind_of(project, args.file, name, args.variant)
+    picked = pick(project, args.file, name, variant=args.variant, part=args.part)
     rate = DEFAULT_RATE if args.rate is None else args.rate
-    sides = render_sides(project, kind, name, rate, args.variant)
-    return {"name": name, "kind": kind, **_numbers(sides, rate, args.at, kind)}
+    sides = render_sides(project, picked, rate)
+    return {"name": name, "kind": picked.kind, **picked.told(), **_numbers(sides, rate, args.at, picked.kind)}
 
 
 def run(args: argparse.Namespace) -> int:

@@ -11,7 +11,7 @@ from ..measure import measure
 from ..note import DEFAULT_RATE
 from ..song import render_stems
 from ..wav import save_wav
-from . import emit, kind_of, load_project, mono, render_sides
+from . import PARTS, Pick, emit, load_project, mono, pick, render_sides
 
 NAME = "render"
 HELP = "write a sound or a song of a project file as a WAV file, and give its numbers"
@@ -27,15 +27,16 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help="the samples a second to render at (default %(default)s)")
     parser.add_argument("--variant", metavar="N", type=int,
                         help="which variant of a sound to write, counted from 0 (default 0)")
+    parser.add_argument("--part", choices=PARTS, help=f"which part of a held sound to write (default {PARTS[0]})")
     parser.add_argument("--stems", action="store_true",
                         help="write a song as one mono loop a channel, each CHANNEL.wav in the folder PATH")
 
 
-def _file(path: str, sides: list[np.ndarray], rate: int) -> dict:
-    """Write a sound as one WAV file, one side as mono and two as stereo, and say what the file holds."""
+def _file(path: str, picked: Pick, sides: list[np.ndarray], rate: int) -> dict:
+    """Write what was picked as one WAV file, one side as mono and two as stereo, and say what the file holds."""
     save_wav(path, sides if len(sides) == 2 else sides[0], rate)
     row = mono(sides)
-    return {"file": path, "rate": rate, "channels": len(sides), "seconds": len(row) / rate,
+    return {"file": path, **picked.told(), "rate": rate, "channels": len(sides), "seconds": len(row) / rate,
             "measure": measure(row, rate)}
 
 
@@ -56,17 +57,17 @@ def _stems(song: dict, folder: str, rate: int) -> dict:
 def run(args: argparse.Namespace) -> int:
     """Write the sound or the song that is named, print what was written with its numbers, and return 0.
 
-    A sound is one variant in a mono file, at the level the bank gives it. A song is its two sides in one
-    file, or with --stems its channels in a folder.
+    A sound is one variant in a mono file, or one part of a held sound, at the level the bank gives it. A
+    song is its two sides in one file, or with --stems its channels in a folder.
     """
     project = load_project(args.file)
     name = args.name
-    kind = kind_of(project, args.file, name, args.variant)
+    picked = pick(project, args.file, name, variant=args.variant, part=args.part)
     if args.stems:
-        if kind == "sound":
+        if picked.kind == "sound":
             raise RowSynthError(f"--stems is for a song, and {name!r} is a sound")
         told = _stems(project.song(name), args.out, args.rate)
     else:
-        told = _file(args.out, render_sides(project, kind, name, args.rate, args.variant), args.rate)
+        told = _file(args.out, picked, render_sides(project, picked, args.rate), args.rate)
     emit(told)
     return 0
