@@ -9,6 +9,7 @@ import numpy as np
 from rowsynth.bank import PEAK_DB, render_bank
 from rowsynth.checks import run
 from rowsynth.project import Project
+from rowsynth.song import render_song
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -40,3 +41,15 @@ class Arcade(unittest.TestCase):
                 with self.subTest(sound=name, buffer=i):
                     self.assertGreater(len(buffer), 0)
                     self.assertLessEqual(float(np.abs(buffer).max()), top + 1e-6)
+
+    def test_its_tune_is_eight_bars_with_a_chord_for_each(self) -> None:
+        tune = self.project.songs["tune"]
+        self.assertEqual(tune["order"], ["a", "b"])
+        self.assertEqual({name: len(bars) for name, bars in tune["chords"].items()}, {"a": 4, "b": 4})
+
+    def test_its_tune_plays_for_its_eight_bars_and_stays_under_full_scale(self) -> None:
+        played = render_song(self.project.song("tune"), rate=8000)
+        self.assertEqual((played["rows"], played["seconds"]), (128, 12.8))
+        loudest = max(float(np.abs(played[side]).max()) for side in ("left", "right"))
+        self.assertGreater(loudest, 0.25)
+        self.assertLess(loudest, 1.0)

@@ -34,7 +34,30 @@
       "pitch": {"v": [0, -2], "loop": 1},
       "release": 2
     },
-    "tick": {"wave": "pulse", "duty": 2, "vol": [10, 7, 3], "release": 1}
+    "tick": {"wave": "pulse", "duty": 2, "vol": [10, 7, 3], "release": 1},
+    "lead": {
+      "wave": "pulse",
+      "duty": 2,
+      "vol": [12, 15, 14, 13, 12, 11, 11, 10],
+      "vib": {"delay": 12, "depth": 0.3, "rate": 6},
+      "release": 4
+    },
+    "pluck": {"wave": "pulse", "duty": 1, "vol": [12, 10, 8, 6, 5, 4, 3], "release": 2},
+    "bass": {"wave": "tri", "vol": [15, 15, 14, 13, 12], "release": 2, "gate": 0.8},
+    "kick": {
+      "wave": "tri",
+      "vol": [15, 14, 12, 9, 6, 3],
+      "pitch": [0, -6, -5, -4, -3, -2],
+      "release": 1
+    },
+    "snare": {"wave": "noise", "vol": [14, 11, 8, 6, 4, 2, 1], "release": 2, "lp": 7000},
+    "hat": {"wave": "noise", "vol": [8, 4, 1], "release": 1}
+  },
+  "chords": {
+    "Am": {"root": 9, "tones": [9, 0, 4]},
+    "F": {"root": 5, "tones": [5, 9, 0]},
+    "C": {"root": 0, "tones": [0, 4, 7]},
+    "G": {"root": 7, "tones": [7, 11, 2]}
   },
   "sounds": {
     "coin": {"def": {"voices": [{"inst": "chime", "notes": [[0, "b5", 4], [4, "e6", 14]]}]}},
@@ -62,6 +85,42 @@
           }
         ],
         "echo": {"time": 0.09, "feedback": 0.35, "mix": 0.3, "lp": 4000}
+      }
+    }
+  },
+  "songs": {
+    "tune": {
+      "row_ticks": 6,
+      "gain": 0.35,
+      "drums": {
+        "k": {"inst": "kick", "note": "c3", "rows": 2},
+        "s": {"inst": "snare", "note": "c5", "rows": 2},
+        "h": {"inst": "hat", "note": "c7", "rows": 1}
+      },
+      "channels": {
+        "lead": {"inst": "lead", "gain": 0.8, "echo": {"rows": 3, "gain": 0.3}},
+        "arp": {"inst": "pluck", "gain": 0.45, "pan": 0.4},
+        "bass": {"inst": "bass", "gain": 0.9},
+        "kit": {"inst": "kick", "gain": 0.8, "pan": -0.1, "drums": true}
+      },
+      "patterns": {
+        "a": {
+          "lead": "o5 l4 e a >c< a8 b8 | >c< a f a8 g8 | g >c e c8< b8 | b >d< b g",
+          "arp": "o4 l16 a>c e c< a>c e c< a>c e c< a>c e c< | f a>c<a f a>c<a f a>c<a f a>c<a | c e g e c e g e c e g e c e g e | g b>d<b g b>d<b g b>d<b g b>d<b",
+          "bass": "o2 l8 a a >a< a a a >a< a | f f >f< f f f >f< f | c c >c< c c c >c< c | g g >g< g g g >g< g",
+          "kit": "l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h"
+        },
+        "b": {
+          "lead": "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a1",
+          "arp": "o4 l16 f a>c<a f a>c<a f a>c<a f a>c<a | g b>d<b g b>d<b g b>d<b g b>d<b | a>c e c< a>c e c< a>c e c< a>c e c< | a>c e c< a>c e c< a>c e c< a>c e c<",
+          "bass": "o2 l8 f f >f< f f f >f< f | g g >g< g g g >g< g | a a >a< a a a >a< a | a a >a< a a a >a< a",
+          "kit": "l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k s l16 s s s s"
+        }
+      },
+      "order": ["a", "b"],
+      "chords": {
+        "a": ["Am", "F", "C", "G"],
+        "b": ["F", "G", "Am", "Am"]
       }
     }
   }
