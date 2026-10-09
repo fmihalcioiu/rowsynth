@@ -1,0 +1,68 @@
+{
+  "instruments": {
+    "chime": {
+      "wave": "pulse",
+      "duty": 2,
+      "vol": [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1],
+      "release": 3
+    },
+    "hop": {
+      "wave": "pulse",
+      "duty": 1,
+      "vol": [11, 13, 12, 11, 10, 8, 6, 4, 2],
+      "pitch": [0, 3, 3, 2, 2, 2, 1, 1, 1],
+      "release": 2
+    },
+    "zap": {
+      "wave": "pulse",
+      "duty": [0, 1, 2, 1],
+      "vol": [15, 14, 12, 10, 8, 6, 4, 2],
+      "pitch": [0, -4, -4, -4, -3, -3, -3, -3],
+      "release": 1,
+      "lp": 5000
+    },
+    "rumble": {
+      "wave": "noise",
+      "vol": [15, 15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 6, 5, 5, 4, 4, 3, 3, 2, 2, 1, 1],
+      "pitch": {"v": [0, -1], "loop": 1},
+      "lp": [5000, 4000, 3200, 2600, 2100, 1700, 1400, 1200, 1000, 850, 700, 600],
+      "release": 6
+    },
+    "thump": {
+      "wave": "tri",
+      "vol": [15, 14, 12, 10, 8, 6, 4, 2],
+      "pitch": {"v": [0, -2], "loop": 1},
+      "release": 2
+    },
+    "tick": {"wave": "pulse", "duty": 2, "vol": [10, 7, 3], "release": 1}
+  },
+  "sounds": {
+    "coin": {"def": {"voices": [{"inst": "chime", "notes": [[0, "b5", 4], [4, "e6", 14]]}]}},
+    "jump": {"def": {"voices": [{"inst": "hop", "notes": [[0, "c4", 9]]}]}},
+    "laser": {"def": {"voices": [{"inst": "zap", "notes": [[0, "c6", 8]]}]}},
+    "explosion": {
+      "parts": [
+        [0, {"def": {"voices": [{"inst": "thump", "notes": [[0, "c3", 10]]}]}, "db": -5}],
+        [0.02, {"def": {"voices": [{"inst": "rumble", "notes": [[0, "c5", 30]]}]}, "db": -6}]
+      ]
+    },
+    "blip": {
+      "defs": [
+        {"voices": [{"inst": "tick", "notes": [[0, "a5", 3]]}]},
+        {"voices": [{"inst": "tick", "notes": [[0, "c6", 3]]}]},
+        {"voices": [{"inst": "tick", "notes": [[0, "e6", 3]]}]}
+      ]
+    },
+    "powerup": {
+      "def": {
+        "voices": [
+          {
+            "inst": "chime",
+            "notes": [[0, "c5", 4], [4, "e5", 4], [8, "g5", 4], [12, "c6", 4], [16, "e6", 4], [20, "g6", 12]]
+          }
+        ],
+        "echo": {"time": 0.09, "feedback": 0.35, "mix": 0.3, "lp": 4000}
+      }
+    }
+  }
+}
