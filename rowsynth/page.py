@@ -12,6 +12,9 @@ from .measure import measure
 from .project import Project
 from .wav import save_wav
 
+# The samples a second the audio of a page is rendered at, when no rate is asked for.
+PAGE_RATE = 48000
+
 # The buffers of a held sound, in the order the bank gives them.
 _HELD = ("start", "loop", "end")
 
@@ -104,8 +107,8 @@ def _sounds(rows: list[str]) -> str:
             "</table>\n</section>\n")
 
 
-def write_page(project: Project, out_dir: str | Path, rate: int = 48000) -> str:
-    """Writes a page to listen to a project by, `out_dir/index.html`, and gives the path of that page.
+def write_page(project: Project, out_dir: str | Path, rate: int = PAGE_RATE) -> dict:
+    """Writes a page to listen to a project by, `out_dir/index.html`, and says what it wrote.
 
     Every sound is rendered by the bank at `rate`, so that it is heard at the level it would be played at.
     Each of its buffers is a mono WAV file in `out_dir/audio/`: NAME.wav for one sound or a sound of parts,
@@ -117,23 +120,29 @@ def write_page(project: Project, out_dir: str | Path, rate: int = 48000) -> str:
     of a held sound's loop goes round. The page is one file of HTML, and loads nothing but the audio beside it.
     Files that are there already are written over. A sound that cannot be rendered is refused with its name in
     front, before anything is written.
+    What comes back is {"page": path, "files": [path, ...]}: the page, and the audio files in the order of
+    their rows. It holds what this call wrote and no more, so a file that an earlier page left in the folder
+    is not in it.
     """
     entries = {name: project.sound(name) for name in project.sounds}
     bank = render_bank(entries, rate)
     out_dir = Path(out_dir)
     rows = []
+    files = []
     for name, sound in bank.items():
         buffers = sound["buffers"]
         for part, samples in zip(_parts(entries[name], len(buffers)), buffers):
             if not len(samples):
                 continue
             file = _file(name, part)
-            save_wav(out_dir / "audio" / file, samples, rate)
+            path = out_dir / "audio" / file
+            save_wav(path, samples, rate)
             rows.append(_row(name, part, file, samples, rate))
+            files.append(str(path))
     # With no sounds, nothing has made the folder yet.
     out_dir.mkdir(parents=True, exist_ok=True)
     page = out_dir / "index.html"
     # Written as ASCII, a character outside it as its number, so the page reads the same whatever a browser
     # takes it to be written in.
     page.write_text(_HEAD + _sounds(rows) + _FOOT, encoding="ascii", errors="xmlcharrefreplace", newline="\n")
-    return str(page)
+    return {"page": str(page), "files": files}

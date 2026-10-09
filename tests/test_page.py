@@ -135,7 +135,7 @@ class WritePageTest(unittest.TestCase):
         cls.addClassCleanup(folder.cleanup)
         cls.project = project_of(**SOUNDS)
         cls.out = Path(folder.name, "site")
-        cls.path = write_page(cls.project, cls.out, RATE)
+        cls.written = write_page(cls.project, cls.out, RATE)
         cls.raw = (cls.out / "index.html").read_bytes()
         cls.page = Page(cls.raw.decode("utf-8"))
         cls.buffers = [samples for name in SOUNDS for samples in render_entry(cls.project.sound(name), RATE)]
@@ -146,10 +146,11 @@ class WritePageTest(unittest.TestCase):
         self.addCleanup(folder.cleanup)
         return Path(folder.name)
 
-    def test_the_path_returned_is_the_page_in_the_folder_asked_for(self):
-        self.assertIsInstance(self.path, str)
-        self.assertEqual(Path(self.path), self.out / "index.html")
-        self.assertTrue(Path(self.path).is_file())
+    def test_what_is_returned_is_the_path_of_the_page_and_of_each_audio_file_in_the_order_of_the_rows(self):
+        self.assertEqual(self.written, {"page": str(self.out / "index.html"),
+                                        "files": [str(self.out / "audio" / file) for file, _, _ in FILES]})
+        for path in (self.written["page"], *self.written["files"]):
+            self.assertTrue(Path(path).is_file(), path)
 
     def test_each_buffer_of_each_kind_of_entry_is_a_mono_file_under_its_name_and_reads_back_within_a_step(self):
         self.assertEqual(sorted(path.name for path in (self.out / "audio").iterdir()),
@@ -185,7 +186,7 @@ class WritePageTest(unittest.TestCase):
 
     def test_a_name_outside_ascii_is_written_by_its_number_and_still_leads_to_its_file(self):
         out = self.folder()
-        raw = Path(write_page(project_of(**{"caf\u00e9": {"def": note("tick", 60)}}), out, RATE)).read_bytes()
+        raw = Path(write_page(project_of(**{"caf\u00e9": {"def": note("tick", 60)}}), out, RATE)["page"]).read_bytes()
         self.assertTrue(raw.isascii())
         self.assertIn(b">caf&#233;<", raw)
         page = Page(raw.decode("ascii"))
@@ -221,7 +222,9 @@ class WritePageTest(unittest.TestCase):
     def test_a_project_with_no_sounds_gets_a_page_that_says_so(self):
         for project in (Project(), project_of()):
             out = self.folder() / "none"
-            page = read(write_page(project, out, RATE))
+            written = write_page(project, out, RATE)
+            self.assertEqual(written["files"], [])
+            page = read(written["page"])
             text = " ".join(page.text)
             self.assertIn("Sounds", text)
             self.assertIn("This project has no sounds.", text)
@@ -243,7 +246,12 @@ class WritePageTest(unittest.TestCase):
         out = self.folder()
         write_page(project_of(chime=SOUNDS["chime"], steps=SOUNDS["steps"]), out, RATE)
         longer = project_of(chime={"def": note("reed", "c3", 9)})
-        page = read(write_page(longer, out, RATE))
+        written = write_page(longer, out, RATE)
+        # The files of the steps are still in the folder. They are no part of what the second page wrote.
+        self.assertEqual(sorted(path.name for path in (out / "audio").iterdir()),
+                         ["chime.wav", "steps-0.wav", "steps-1.wav"])
+        self.assertEqual(written["files"], [str(out / "audio" / "chime.wav")])
+        page = read(written["page"])
         self.assertEqual(sources(page), ["audio/chime.wav"])
         self.assertEqual(page.rows[0]["figures"]["Length"], "0.200 s")
         # The first chime was 800 samples long.
@@ -255,14 +263,16 @@ class WritePageTest(unittest.TestCase):
     def test_a_held_sound_that_starts_at_0_has_no_file_and_no_row_for_its_start(self):
         held = {**SOUNDS["hum"]["held"], "start": 0, "join": 0}
         out = self.folder()
-        page = read(write_page(project_of(hum={"held": held}), out, RATE))
+        written = write_page(project_of(hum={"held": held}), out, RATE)
         self.assertEqual(sorted(path.name for path in (out / "audio").iterdir()), ["hum-end.wav", "hum-loop.wav"])
+        self.assertEqual(written["files"], [str(out / "audio" / file) for file in ("hum-loop.wav", "hum-end.wav")])
+        page = read(written["page"])
         self.assertEqual([(row["which"], "loop" in row["player"]) for row in page.rows],
                          [("loop", True), ("end", False)])
 
     def test_a_rate_left_out_is_48000(self):
         out = self.folder()
-        page = read(write_page(project_of(chime=SOUNDS["chime"]), out))
+        page = read(write_page(project_of(chime=SOUNDS["chime"]), out)["page"])
         channels, rate = load_wav(out / "audio" / "chime.wav")
         self.assertEqual((rate, len(channels[0])), (48000, 4800))
         self.assertEqual(page.rows[0]["figures"]["Length"], "0.100 s")

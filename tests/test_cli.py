@@ -420,6 +420,78 @@ class Measure(CommandLineCase):
             "[--at SECONDS]\n"), err)
 
 
+class Page(CommandLineCase):
+    # The audio files of PROJECT's page: one for a sound of one def and one for a sound of parts, one a variant,
+    # and the start, the loop and the end of a held sound.
+    FILES = ["tap.wav", "drip-0.wav", "drip-1.wav", "drip-2.wav", "knock.wav",
+             "drone-start.wav", "drone-loop.wav", "drone-end.wav"]
+
+    def page(self, out: str | Path, *flags: str, data: dict = PROJECT) -> int:
+        """What main returns for writing the listen page of a project file holding `data` into the folder `out`."""
+        return self.run_main("page", str(self.saved(data)), "--out", str(out), *flags)
+
+    def test_page_prints_the_page_the_folder_as_it_was_typed_the_rate_and_how_much_is_on_the_page(self) -> None:
+        # The folder is typed with a separator after it, which the path of the page inside it has no use for.
+        typed = f"{self.folder / 'site'}{os.sep}"
+        self.assertEqual(self.page(typed), 0)
+        told = {"page": str(self.folder / "site" / "index.html"), "folder": typed, "rate": 48000, "sounds": 4,
+                "files": len(self.FILES)}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+
+    def test_the_page_and_its_audio_files_are_in_a_folder_the_command_makes(self) -> None:
+        out = self.folder / "made" / "site"
+        self.assertEqual(self.page(out, "--rate", "8000"), 0)
+        self.assertEqual(sorted(found.name for found in out.iterdir()), ["audio", "index.html"])
+        self.assertEqual(sorted(found.name for found in (out / "audio").iterdir()), sorted(self.FILES))
+        told = json.loads(self.out.getvalue())
+        self.assertEqual(Path(told["page"]), out / "index.html")
+        self.assertEqual(told["files"], len(self.FILES))
+
+    def test_rate_is_the_samples_a_second_the_audio_files_are_rendered_at(self) -> None:
+        out = self.folder / "site"
+        self.assertEqual(self.page(out, "--rate", "8000"), 0)
+        (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"), 8000)
+        (row,), rate = load_wav(out / "audio" / "tap.wav")
+        self.assertEqual((rate, len(row)), (8000, len(buffer)))
+        self.assertLess(float(np.abs(row - buffer).max()), STEP)
+        self.assertEqual(json.loads(self.out.getvalue())["rate"], 8000)
+
+    def test_a_project_with_no_sounds_gets_a_page_and_no_audio_files(self) -> None:
+        out = self.folder / "site"
+        self.assertEqual(self.page(out, data={}), 0)
+        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 48000, "sounds": 0, "files": 0}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        self.assertEqual([found.name for found in out.iterdir()], ["index.html"])
+
+    def test_page_of_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
+        path, out = self.folder / "nowhere.json", self.folder / "site"
+        self.assertEqual(self.run_main("page", str(path), "--out", str(out)), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: no such file\n"))
+        self.assertFalse(out.exists())
+
+    def test_a_sound_that_cannot_be_rendered_is_refused_by_its_name_and_no_page_is_written(self) -> None:
+        # A held sound whose note is too short for its start and its loop. The file loads all the same: loading
+        # holds a sound to its shape, and does not render it.
+        held = {**PROJECT["sounds"]["drone"]["held"], "note": blip("pipe", "d2")}
+        data = {"instruments": PROJECT["instruments"],
+                "sounds": {"tap": PROJECT["sounds"]["tap"], "drone": {"held": held}}}
+        out = self.folder / "site"
+        self.assertEqual(self.page(out, "--rate", "8000", data=data), 2)
+        printed, err = self.printed()
+        self.assertEqual(printed, "")
+        self.assertTrue(err.startswith("error: drone: held: note: must be long enough for the start and the loop: "),
+                        err)
+        self.assertFalse(out.exists())
+
+    def test_page_without_out_is_refused_with_code_2(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.run_main("page", str(self.saved(PROJECT)))
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertIn("the following arguments are required: --out", err)
+
+
 class Render(CommandLineCase):
     def render(self, name: str, out: Path, *flags: str, data: dict = PROJECT) -> int:
         """What main returns for rendering `name`, out of a project file holding `data`, to `out`."""
@@ -640,7 +712,7 @@ class Refusals(CommandLineCase):
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
         self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()),
-                         ["check", "info", "measure", "render"])
+                         ["check", "info", "measure", "page", "render"])
 
 
 class Process(CommandLineCase):
