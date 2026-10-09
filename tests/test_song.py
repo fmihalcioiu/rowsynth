@@ -10,7 +10,7 @@ import numpy as np
 
 from rowsynth.errors import RowSynthError
 from rowsynth.note import render_note
-from rowsynth.song import lay, render_song, render_stems
+from rowsynth.song import lay, pan_gains, render_loop, render_song, render_stems
 from rowsynth.sound import finish
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz, and the two sides run on for 4000 after the last.
@@ -364,6 +364,25 @@ class EchoTest(unittest.TestCase):
         self.assertFalse(np.array_equal(left(song, only=["deep"]), left(DUO, only=["deep"])))
 
 
+class PanGainsTest(unittest.TestCase):
+    def test_ends_are_all_on_one_side_and_the_middle_has_each_side_3_decibels_down(self):
+        self.assertEqual(pan_gains(-1), (1.0, 0.0))
+        left, right = pan_gains(1)
+        self.assertLess(abs(left), 1e-15)
+        self.assertEqual(right, 1.0)
+        for gain in pan_gains(0):
+            self.assertAlmostEqual(gain, math.sqrt(0.5), 15)
+            self.assertAlmostEqual(20 * math.log10(gain), -3.0103, 4)
+
+    def test_gains_are_the_cosine_and_the_sine_of_one_angle_and_keep_the_power(self):
+        for pan, left, right in ((-0.6, 0.951057, 0.309017), (-0.2, 0.809017, 0.587785), (0.5, 0.382683, 0.923880),
+                                 (0.7, 0.233445, 0.972370)):
+            got = pan_gains(pan)
+            self.assertAlmostEqual(got[0], left, 6, pan)
+            self.assertAlmostEqual(got[1], right, 6, pan)
+            self.assertAlmostEqual(got[0] ** 2 + got[1] ** 2, 1.0, 15, pan)
+
+
 class MixTest(unittest.TestCase):
     NOTE = [(0, HUM, 60, 11, 1.0)]
 
@@ -714,6 +733,45 @@ class LoopTest(unittest.TestCase):
         self.assertEqual(song, SONG)
 
 
+class StereoLoopTest(unittest.TestCase):
+    def test_sides_are_the_stems_added_in_their_order_each_shared_between_the_sides_by_its_pan(self):
+        song = copy.deepcopy(SONG)
+        out = render_loop(song, RATE)
+        self.assertEqual(sorted(out), ["left", "loop_samples", "right", "rows", "seconds"])
+        self.assertEqual((out["rows"], out["loop_samples"], out["seconds"]), (24, 9600, 1.2))
+        self.assertEqual(song, SONG)
+        wanted = {"left": np.zeros(9600, dtype=np.float32), "right": np.zeros(9600, dtype=np.float32)}
+        for found in render_stems(SONG, RATE)["stems"]:
+            angle = (found["pan"] + 1) * math.pi / 4
+            wide = found["samples"].astype(np.float64)
+            # A sum is made in doubles and rounded to float32 before the next stem is added to it.
+            wanted["left"] = (wanted["left"] + wide * math.cos(angle)).astype(np.float32)
+            wanted["right"] = (wanted["right"] + wide * math.sin(angle)).astype(np.float32)
+        for side, hand in wanted.items():
+            self.assertEqual(out[side].dtype, np.float32, side)
+            self.assertTrue(np.array_equal(out[side], hand), side)
+            self.assertGreater(float(np.abs(hand).max()), 0.3, side)
+
+    def test_loop_opens_on_what_sounds_past_its_end_and_its_end_is_not_faded(self):
+        # The one channel is all to the left, so the left side is its stem as it is: a note that starts half
+        # way along and sounds on for 1067 samples past the end.
+        song = solo("r4 c4", RING)
+        out = render_loop(song, RATE)
+        self.assertTrue(np.array_equal(out["left"], stem(song)))
+        self.assertFalse(out["right"].any())
+        self.assertGreater(float(np.abs(out["left"][:1067]).max()), 0.15)
+        self.assertGreater(abs(float(out["left"][-1])), 0.05)
+
+    def test_sum_of_loud_stems_goes_past_full_scale_where_the_mix_of_the_song_is_bent_over_under_it(self):
+        song = {"row_ticks": 3, "gain": 1.5, "instruments": {"hiss": {**HISS, "gate": 1}},
+                "channels": {name: {"inst": "hiss", "pan": -1} for name in ("one", "two")},
+                "patterns": {"p": {"one": "c4", "two": "e4"}}, "order": ["p"]}
+        for found in render_stems(song, RATE)["stems"]:
+            self.assertLess(float(np.abs(found["samples"]).max()), 1.0)
+        self.assertGreater(float(np.abs(render_loop(song, RATE)["left"]).max()), 1.5)
+        self.assertLess(float(np.abs(left(song)).max()), 1.0)
+
+
 class KnownSamplesTest(unittest.TestCase):
     def check(self, out: np.ndarray, known: tuple) -> None:
         spots = [spot for spot, sample in known]
@@ -816,6 +874,32 @@ class KnownSamplesTest(unittest.TestCase):
         self.check(out["beat"], ((0, 0.004887), (1, 0.011388), (2, 0.017791), (100, 0.319827), (1000, -0.110362),
                                  (4800, -0.004648), (4801, -0.002457), (6000, -0.004145), (9600, 0.004887),
                                  (10000, 0.180354), (14400, -0.004648), (16000, 0.014559), (19199, -0.001711)))
+
+    def test_loop_of_three_channels_with_an_echo_and_drums(self):
+        out = render_loop(SONG, RATE)
+        self.assertEqual((len(out["left"]), len(out["right"])), (9600, 9600))
+        self.check(out["left"], ((0, 0.177625), (1, 0.240900), (2, 0.261421), (332, -0.124079), (333, -0.091139),
+                                 (400, 0.286809), (1000, 0.330939), (3200, 0.173273), (3400, 0.486157),
+                                 (6400, 0.029408), (9000, 0.337913), (9400, -0.032731), (9599, 0.102389)))
+        self.check(out["right"], ((0, 0.071940), (1, 0.117559), (2, 0.143765), (332, -0.040395), (333, -0.003045),
+                                  (400, 0.049766), (1000, 0.133003), (3200, 0.058547), (3400, 0.186352),
+                                  (6400, 0.032496), (9000, 0.079863), (9400, -0.113268), (9599, 0.048215)))
+
+    def test_loop_of_the_second_pattern_at_44100_and_48000_hz(self):
+        song = {**SONG, "order": ["b"], "gain": 0.6}
+        # The rate left out is 44100.
+        out = render_loop(song)
+        self.assertEqual((out["loop_samples"], len(out["left"]), len(out["right"])), (17640, 17640, 17640))
+        self.check(out["left"], ((0, 0.007217), (1, 0.028634), (100, 0.801664), (1000, -0.268051), (3308, 0.175083),
+                                 (4410, 0.064074), (8820, 0.004562), (13230, -0.003147), (17639, -0.001169)))
+        self.check(out["right"], ((0, 0.005277), (1, 0.017072), (100, 0.467445), (1000, -0.148768), (3308, 0.072471),
+                                  (4410, 0.024697), (8820, 0.004177), (13230, -0.003147), (17639, -0.001169)))
+        out = render_loop(song, 48000)
+        self.assertEqual((out["loop_samples"], len(out["left"]), len(out["right"])), (19200, 19200, 19200))
+        self.check(out["left"], ((0, 0.006501), (1, 0.026211), (100, 0.791059), (1000, -0.282311), (3600, 0.460412),
+                                 (4800, 0.063277), (9600, 0.004108), (14400, -0.003287), (19199, -0.001210)))
+        self.check(out["right"], ((0, 0.004717), (1, 0.015574), (100, 0.460144), (1000, -0.162650), (3600, 0.190658),
+                                  (4800, 0.024285), (9600, 0.003726), (14400, -0.003287), (19199, -0.001210)))
 
     def test_stem_of_a_late_note_whose_release_comes_back_on_at_the_start(self):
         out = stem(solo("r4 c4", RING))
@@ -969,6 +1053,15 @@ class ErrorTest(unittest.TestCase):
                 with self.assertRaises(RowSynthError):
                     render_stems(song, rate)
             played.assert_not_called()
+
+    def test_loop_is_refused_for_what_the_stems_are_refused_for(self):
+        cases = ((self.changed("b", "tune", "c e ? g"), RATE), ({**SONG, "order": []}, RATE), (SONG, 0))
+        for song, rate in cases:
+            with self.assertRaises(RowSynthError, msg=repr((song, rate))) as stems_refused:
+                render_stems(song, rate)
+            with self.assertRaises(RowSynthError, msg=repr((song, rate))) as loop_refused:
+                render_loop(song, rate)
+            self.assertEqual(str(loop_refused.exception), str(stems_refused.exception))
 
 
 if __name__ == "__main__":

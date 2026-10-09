@@ -1,4 +1,4 @@
-"""A song's stems mixed to stereo: the groups of a layered song in every key, its versions, and a song's intro."""
+"""The groups of a layered song mixed to stereo in every key, its versions, and a song's intro."""
 from __future__ import annotations
 
 import math
@@ -7,7 +7,7 @@ import numpy as np
 
 from .errors import RowSynthError
 from .note import _length
-from .song import lay, pan_gains, render_stems, up
+from .song import _mix_stems, lay, render_stems, up
 
 
 def bar_rows(song: dict) -> int:
@@ -44,23 +44,6 @@ def _groups(song: dict) -> dict[str, list[str]]:
     return groups
 
 
-def _mix(stems: list[dict], size: int) -> tuple[np.ndarray, np.ndarray]:
-    """Stems mixed to a left side and a right one of `size` samples, each stem going where its pan puts it.
-
-    A stem that is longer goes in as far as `size` and is cut there. The stems are added one at a time in the
-    order given. Each sum is worked out in doubles, and what a side then holds is rounded to float32 before the
-    next stem goes in.
-    """
-    left = np.zeros(size, dtype=np.float32)
-    right = np.zeros(size, dtype=np.float32)
-    for stem in stems:
-        to_left, to_right = pan_gains(stem["pan"])
-        wide = stem["samples"][:size].astype(np.float64)
-        left += wide * to_left
-        right += wide * to_right
-    return left, right
-
-
 def render_groups(song: dict, rate: int = 48000) -> dict:
     """The groups of a layered song as samples: {"loop_samples", "rows", "keys", "groups"}.
 
@@ -85,7 +68,7 @@ def render_groups(song: dict, rate: int = 48000) -> dict:
         still = keyless(song, channels)
         mixes = {}
         for key in keys[:1] if still else keys:
-            mixes[key] = _mix([stems[key][name] for name in channels], first["loop_samples"])
+            mixes[key] = _mix_stems([stems[key][name] for name in channels], first["loop_samples"])
         mixed[group] = {"keyless": still, "mixes": mixes}
     return {"loop_samples": first["loop_samples"], "rows": first["rows"], "keys": keys, "groups": mixed}
 
@@ -202,7 +185,7 @@ def render_intro(song: dict, rate: int = 48000) -> dict:
                             f"silent bar after the intro has {loop_samples - walk_samples}")
     in_samples = walk_samples + tail_samples
     fade_samples = math.floor(fade * rate + 0.5)
-    left, right = _mix(played["stems"], in_samples)
+    left, right = _mix_stems(played["stems"], in_samples)
     # The last sample is brought to nothing, and each one before it keeps one more share in `fade_samples` of
     # what it had. The products are worked out in doubles and rounded to float32 as they go back into a side.
     # A fade of no samples has no slope, and nothing is changed.

@@ -1,4 +1,4 @@
-"""A song: the small language of its channels, its patterns laid end to end, and it played as a mix or as stems."""
+"""A song: the small language of its channels, its patterns laid end to end, and it played as a mix, stems or a loop."""
 from __future__ import annotations
 
 import math
@@ -333,3 +333,37 @@ def render_stems(song: dict, rate: int = DEFAULT_RATE) -> dict:
             samples[:len(lap)] += lap * level
         stems.append({"name": name, "pan": channel.get("pan", 0), "samples": finish(samples, 1, rate, fade=False)})
     return {"stems": stems, "rows": rows, "loop_samples": loop_samples, "seconds": loop_samples / rate}
+
+
+def _mix_stems(stems: list[dict], size: int) -> tuple[np.ndarray, np.ndarray]:
+    """Stems mixed to a left side and a right one of `size` samples, each stem going where its pan puts it.
+
+    A stem that is longer goes in as far as `size` and is cut there. The stems are added one at a time in the
+    order given. Each sum is worked out in doubles, and what a side then holds is rounded to float32 before the
+    next stem goes in.
+    """
+    left = np.zeros(size, dtype=np.float32)
+    right = np.zeros(size, dtype=np.float32)
+    for stem in stems:
+        to_left, to_right = pan_gains(stem["pan"])
+        wide = stem["samples"][:size].astype(np.float64)
+        left += wide * to_left
+        right += wide * to_right
+    return left, right
+
+
+def render_loop(song: dict, rate: int = DEFAULT_RATE) -> dict:
+    """A song as one loop in stereo: {"left", "right", "rows", "loop_samples", "seconds"}.
+
+    The two sides are the song's stems mixed: each stem is shared between them by its channel's pan, and the
+    stems are added in the order `render_stems` gives them in. A side is `loop_samples` long and made to be
+    played round and round, as a stem is: it opens on what the song is still sounding when its rows end, and its
+    end is not faded. "rows" and "seconds" are those of the stems. Each stem has been through the output stage
+    on its own and their sum has been through nothing, so the sides of a loud song go past full scale, where
+    those of `render_song` are bent over to stay under it. A song with no rows has nothing to loop, and is
+    refused.
+    """
+    played = render_stems(song, rate)
+    left, right = _mix_stems(played["stems"], played["loop_samples"])
+    return {"left": left, "right": right, "rows": played["rows"], "loop_samples": played["loop_samples"],
+            "seconds": played["seconds"]}

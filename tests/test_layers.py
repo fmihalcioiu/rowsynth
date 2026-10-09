@@ -1,4 +1,4 @@
-"""Tests for a song's stems mixed to stereo: the groups of a layered song in every key, its versions, and an intro."""
+"""Tests for the groups of a layered song mixed to stereo in every key, its versions, and a song's intro."""
 from __future__ import annotations
 
 import copy
@@ -9,8 +9,7 @@ from unittest import mock
 import numpy as np
 
 from rowsynth.errors import RowSynthError
-from rowsynth.layers import (bar_rows, group_mix, keyless, mix_version, pan_gains, render_groups, render_intro,
-                             shared_scale)
+from rowsynth.layers import bar_rows, group_mix, keyless, mix_version, render_groups, render_intro, shared_scale
 from rowsynth.song import render_stems, up
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz.
@@ -103,25 +102,6 @@ def same(test: unittest.TestCase, got: tuple, wanted: tuple, about: object = Non
     for side, hand in zip(got, wanted):
         test.assertTrue(np.array_equal(side, hand), about)
         test.assertGreater(float(np.abs(hand).max()), 0.01, about)
-
-
-class PanGainsTest(unittest.TestCase):
-    def test_ends_are_all_on_one_side_and_the_middle_has_each_side_3_decibels_down(self):
-        self.assertEqual(pan_gains(-1), (1.0, 0.0))
-        left, right = pan_gains(1)
-        self.assertLess(abs(left), 1e-15)
-        self.assertEqual(right, 1.0)
-        for gain in pan_gains(0):
-            self.assertAlmostEqual(gain, math.sqrt(0.5), 15)
-            self.assertAlmostEqual(20 * math.log10(gain), -3.0103, 4)
-
-    def test_gains_are_the_cosine_and_the_sine_of_one_angle_and_keep_the_power(self):
-        for pan, left, right in ((-0.6, 0.951057, 0.309017), (-0.2, 0.809017, 0.587785), (0.5, 0.382683, 0.923880),
-                                 (0.7, 0.233445, 0.972370)):
-            got = pan_gains(pan)
-            self.assertAlmostEqual(got[0], left, 6, pan)
-            self.assertAlmostEqual(got[1], right, 6, pan)
-            self.assertAlmostEqual(got[0] ** 2 + got[1] ** 2, 1.0, 15, pan)
 
 
 class BarRowsTest(unittest.TestCase):
