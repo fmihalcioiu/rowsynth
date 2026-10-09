@@ -6,7 +6,7 @@ import math
 import numpy as np
 
 from .errors import RowSynthError
-from .note import DEFAULT_RATE, _buffer, _count, _length, _number
+from .note import DEFAULT_RATE, TICK_HZ, _buffer, _count, _length, _number
 from .sound import _keys, _list, render_sound
 
 # The gain every sound of a bank is rendered at, whatever gain it has of its own: low enough for a sound to
@@ -23,10 +23,26 @@ _KINDS = ("def", "defs", "parts", "held")
 # The other keys an entry can have. Those after "meta" are for whoever checks a sound, and are not read here.
 _REST = ("db", "meta", "check", "max_seconds", "max_dc", "max_bright")
 
+# The keys of a held sound that are lengths of time in ticks, sixty to a second. A length need not be whole.
+_HELD_TICKS = ("start", "loop", "join", "let_go")
+
 
 def _scale(samples: np.ndarray, factor: float) -> None:
     """Multiplies samples by factor, in place. Each product is worked out as a double and stored as a float32."""
     samples[:] = samples.astype(np.float64) * factor
+
+
+def _to_peak(buffers: list[np.ndarray], peak_db: float) -> bool:
+    """Scales buffers in place, all by one factor, so that the loudest sample among them sits at peak_db.
+
+    False when all of them are silent: there is then no loudest sample to go by, and they are left as they are.
+    """
+    peak = max(float(np.abs(samples).max(initial=0.0)) for samples in buffers)
+    if peak > 0:
+        factor = 10 ** (peak_db / 20) / peak
+        for samples in buffers:
+            _scale(samples, factor)
+    return peak > 0
 
 
 def normalise(samples: np.ndarray, peak_db: float = PEAK_DB) -> np.ndarray:
@@ -37,9 +53,7 @@ def normalise(samples: np.ndarray, peak_db: float = PEAK_DB) -> np.ndarray:
     """
     _buffer(samples, "samples")
     _number(peak_db, "peak_db")
-    peak = float(np.abs(samples).max(initial=0.0))
-    if peak > 0:
-        _scale(samples, 10 ** (peak_db / 20) / peak)
+    _to_peak([samples], peak_db)
     return samples
 
 
@@ -65,16 +79,23 @@ def _kind(entry: object) -> str:
     return kinds[0]
 
 
-def _levelled(defn: object, place: str, db: float, rate: int) -> np.ndarray:
-    """One def as a buffer at its level: rendered at RENDER_GAIN, brought to PEAK_DB, and set db decibels from there.
+def _raw(defn: object, place: str, rate: int) -> np.ndarray:
+    """One def as a buffer before it is levelled: rendered at RENDER_GAIN, whatever gain it has of its own.
 
     place is where the def sits in its entry. What is wrong with the def is refused with that in front.
     """
     try:
-        samples = render_sound(defn, rate, RENDER_GAIN)
+        return render_sound(defn, rate, RENDER_GAIN)
     except RowSynthError as error:
         raise RowSynthError(f"{place}: {error}") from None
-    # Two steps, each stored before the next: brought to the peak, and from there to its own level.
+
+
+def _levelled(defn: object, place: str, db: float, rate: int) -> np.ndarray:
+    """One def as a buffer at its level: rendered at RENDER_GAIN, brought to PEAK_DB, and set db decibels from there."""
+    samples = _raw(defn, place, rate)
+    # Two steps, each stored before the next: brought to the peak, and from there to its own level. A held
+    # sound gets to its level in one step (see `_held`), and the two ways do not give the same samples: here
+    # every sample is rounded to a float32 twice, and the two factors multiplied are not that one factor.
     _scale(normalise(samples), 10 ** (db / 20))
     return samples
 
@@ -128,8 +149,86 @@ def _timeline(entry: dict, rate: int) -> np.ndarray:
     return out
 
 
+def _joined(note: np.ndarray, start: int, loop: int, join: int) -> np.ndarray:
+    """The loop of a held note: `loop` samples from `start` on, the last `join` of them faded into what led up to it.
+
+    Over those last samples the loop's own are weighted by a cosine that falls from 1 to 0, and the `join`
+    samples just before `start` by a sine that rises from 0 to 1. The loop then ends on the sample that came
+    before its first, so its end runs into its beginning. A join of 0 fades nothing.
+    """
+    out = note[start:start + loop].copy()
+    angle = (math.pi / 2) * (np.arange(join) / (join - 1))
+    own = note[start + loop - join:start + loop].astype(np.float64)
+    before = note[start - join:start].astype(np.float64)
+    out[loop - join:] = own * np.cos(angle) + before * np.sin(angle)
+    return out
+
+
+def _cut(entry: dict, rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The start, the loop and the end of {"held": {...}}, as they come before they are levelled.
+
+    What is wrong with the held sound is refused with "held" and its key in front: "held: join: ...".
+    """
+    held = entry["held"]
+    _keys(held, "held", ("note", "end") + _HELD_TICKS)
+    for key in _HELD_TICKS:
+        _length(held[key], f"held: {key}")
+    tick_samples = rate / TICK_HZ
+    start, loop, join = (math.floor(held[key] * tick_samples + 0.5) for key in ("start", "loop", "join"))
+    if loop == 0:
+        raise RowSynthError(f"held: loop: must be at least one sample long, and {held['loop']!r} ticks "
+                            f"are none at {rate} Hz")
+    if join == 1:
+        # The weights of the fade are spread over join - 1 steps. One sample has no step to spread them over.
+        raise RowSynthError(f"held: join: must be 0 or at least two samples long, and {held['join']!r} ticks "
+                            f"are one at {rate} Hz")
+    for key, count in (("loop", loop), ("start", start)):
+        if join > count:
+            # The fade is laid on the end of the loop, and reads as many samples from the end of the start.
+            raise RowSynthError(f"held: join: must not be longer than the {key}: {join} samples "
+                                f"against {count} at {rate} Hz")
+    note = _raw(held["note"], "held: note", rate)
+    if len(note) < start + loop:
+        raise RowSynthError(f"held: note: must be long enough for the start and the loop: it is {len(note)} "
+                            f"samples at {rate} Hz, and they take {start + loop}")
+    return note[:start].copy(), _joined(note, start, loop, join), _raw(held["end"], "held: end", rate)
+
+
+def held_parts(entry: dict, rate: int = DEFAULT_RATE) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The start, the loop and the end of a held entry, as they come before `render_entry` levels them.
+
+    entry is {"held": {"note": def, "start": ticks, "loop": ticks, "join": ticks, "end": def, "let_go": ticks}}.
+    A held sound goes on for as long as something holds it: its start is played once, its loop goes round
+    after that, and its end is played when it is let go. The start and the loop are cut from one render of the
+    note, at RENDER_GAIN: the start is its first `start` ticks, and the loop the `loop` ticks that follow. A
+    length in ticks is taken to the nearest sample. The last `join` ticks of the loop are faded, at equal
+    power, into the `join` ticks before the loop began, so that the loop comes round to its first sample
+    without a click. A join of 0 leaves the loop as it was cut. The end is its def rendered on its own, at
+    RENDER_GAIN. "let_go" is checked here and not used.
+    """
+    kind = _kind(entry)
+    if kind != "held":
+        raise RowSynthError(f"entry: only an entry with 'held' has a start, a loop and an end, not one with {kind!r}")
+    _count(rate, "rate", 1)
+    return _cut(entry, rate)
+
+
+def _held(entry: dict, rate: int) -> list[np.ndarray]:
+    """The buffers of {"held": {...}}: its start, its loop and its end, levelled as one sound."""
+    db = entry.get("db", 0)
+    # The three are one sound heard in turn, not variants: they have one level, and a list is none.
+    _number(db, "db")
+    parts = list(_cut(entry, rate))
+    # One factor for all three, from the loudest sample of them all. Each brought to the peak by its own
+    # loudest sample, the loop would not go on at the level the start left off at.
+    if not _to_peak(parts, PEAK_DB + db):
+        raise RowSynthError("held: the start, the loop and the end are all silent, and there is no loudest sample "
+                            "to level them by")
+    return parts
+
+
 def render_entry(entry: dict, rate: int = DEFAULT_RATE) -> list[np.ndarray]:
-    """The buffers of a bank entry: one for a def, one a variant for defs, and one for parts on a timeline.
+    """The buffers of a bank entry: one for a def, one a variant for defs, one for parts, and three for a held sound.
 
     Every def is rendered at RENDER_GAIN, its own gain set aside, and its loudest sample is brought to PEAK_DB.
     Then it is set at the entry's "db", its level against that peak in decibels: at -6 its samples are about
@@ -137,7 +236,10 @@ def render_entry(entry: dict, rate: int = DEFAULT_RATE) -> list[np.ndarray]:
     when it is left out.
     {"parts": [[seconds, entry], ...]} is several sounds heard as one. Each part is an entry of one def with
     a "db" of its own, and starts at the sample nearest to its seconds. The parts are added up into one
-    buffer, so the entry has no "db" itself. A held entry is refused.
+    buffer, so the entry has no "db" itself.
+    {"held": {...}} is the start, the loop and the end that `held_parts` makes, in that order. The three are
+    levelled as one: a single factor brings the loudest sample of them all to PEAK_DB and sets it at the
+    entry's "db", which is one number.
     """
     kind = _kind(entry)
     _count(rate, "rate", 1)
@@ -147,15 +249,16 @@ def render_entry(entry: dict, rate: int = DEFAULT_RATE) -> list[np.ndarray]:
         return _variants(entry, rate)
     if kind == "parts":
         return [_timeline(entry, rate)]
-    raise RowSynthError("entry: an entry with 'held' cannot be rendered")
+    return _held(entry, rate)
 
 
 def render_bank(sounds: dict, rate: int = DEFAULT_RATE) -> dict:
-    """Every sound of a set, rendered: {name: {"buffers": [...], "meta": {...}, "held": None}}.
+    """Every sound of a set, rendered: {name: {"buffers": [...], "meta": {...}, "held": {"let_go": seconds} or None}}.
 
     sounds is {name: entry}. "buffers" are what `render_entry` makes of the entry. "meta" is the entry's own,
-    carried through as it is, and an empty dict for an entry that has none. "held" is None for an entry of
-    these kinds. An entry that is refused is refused with the name of its sound in front.
+    carried through as it is, and an empty dict for an entry that has none. "held" is None but for a held
+    entry. There it says how long the sound takes to be let go: the entry's "let_go" ticks, in seconds.
+    An entry that is refused is refused with the name of its sound in front.
     """
     if not isinstance(sounds, dict):
         raise RowSynthError(f"sounds: must be a dict, not {sounds!r}")
@@ -166,5 +269,6 @@ def render_bank(sounds: dict, rate: int = DEFAULT_RATE) -> dict:
             buffers = render_entry(entry, rate)
         except RowSynthError as error:
             raise RowSynthError(f"{name}: {error}") from None
-        bank[name] = {"buffers": buffers, "meta": entry.get("meta", {}), "held": None}
+        held = {"let_go": entry["held"]["let_go"] / TICK_HZ} if "held" in entry else None
+        bank[name] = {"buffers": buffers, "meta": entry.get("meta", {}), "held": held}
     return bank

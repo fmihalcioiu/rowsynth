@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import copy
+import math
 import unittest
 
 import numpy as np
 
-from rowsynth.bank import PEAK_DB, RENDER_GAIN, normalise, render_bank, render_entry
+from rowsynth.bank import PEAK_DB, RENDER_GAIN, held_parts, normalise, render_bank, render_entry
 from rowsynth.errors import RowSynthError
 from rowsynth.sound import render_sound
 
@@ -31,6 +32,17 @@ STEPS = [{"voices": [{"inst": PING, "notes": [[0, note, 2]]}]} for note in ("c5"
 QUIET = {"voices": []}
 # Two sounds on one timeline. The second starts half way between samples 62 and 63, and is over before the first.
 BOTH = {"parts": [[0, {"def": CRASH, "db": -6}], [0.0078125, {"def": CHIRP, "db": -2.5}]]}
+# A note that sounds through all of its six ticks, and is 1200 samples with its release and its tail.
+DRONE = {"voices": [{"inst": BUZZ, "notes": [[0, "a2", 6]]}]}
+# A sound far quieter than the others when all are rendered at one gain.
+TAP = {"voices": [{"inst": {**PING, "gain": 0.25}, "notes": [[0, "e4", 1]]}]}
+# A held sound: 267 samples of start, 400 of loop with the last 133 a join, and an end louder than both.
+HELD = {"held": {"note": DRONE, "start": 2, "loop": 3, "join": 1, "end": CHIRP, "let_go": 4}, "db": -4}
+
+
+def held(**change: object) -> dict:
+    """HELD with some of what it is made of changed."""
+    return {**HELD, "held": {**HELD["held"], **change}}
 
 
 def peak(samples: np.ndarray) -> float:
@@ -182,6 +194,82 @@ class PartsTest(unittest.TestCase):
             self.assertEqual(len(out), start + len(render_sound(QUIET, rate)), (seconds, rate))
 
 
+class HeldTest(unittest.TestCase):
+    def test_start_and_loop_are_cut_from_one_render_of_the_note_and_the_end_is_rendered_on_its_own(self):
+        note = render_sound(DRONE, RATE, RENDER_GAIN)
+        parts = held_parts(HELD, RATE)
+        self.assertIs(type(parts), tuple)
+        for part in parts:
+            self.assertIs(type(part), np.ndarray)
+            self.assertEqual(part.dtype, np.float32)
+        start, loop, end = parts
+        self.assertTrue(np.array_equal(start, note[:267]))
+        self.assertEqual(len(loop), 400)
+        self.assertTrue(np.array_equal(loop[:267], note[267:534]))
+        self.assertTrue(np.array_equal(end, render_sound(CHIRP, RATE, RENDER_GAIN)))
+        self.assertTrue(same(held_parts({"held": HELD["held"]}, RATE), parts))
+        self.assertTrue(same(held_parts(held(note={**DRONE, "gain": 3}, end={**CHIRP, "gain": 0.01}), RATE), parts))
+
+    def test_last_of_the_loop_is_faded_into_what_came_before_the_loop_and_ends_on_the_sample_before_its_first(self):
+        note = render_sound(DRONE, RATE, RENDER_GAIN)
+        loop = held_parts(HELD, RATE)[1]
+        angle = np.arange(133) * (math.pi / 2 / 132)
+        faded = note[534:667].astype(np.float64) * np.cos(angle) + note[134:267].astype(np.float64) * np.sin(angle)
+        np.testing.assert_allclose(loop[267:], faded, rtol=0, atol=1e-7)
+        self.assertGreater(float(np.abs(loop[267:] - note[534:667]).max()), 0.01)
+        self.assertEqual(loop[267], note[534])
+        self.assertEqual(loop[399], note[266])
+        self.assertNotEqual(note[666], note[266])
+
+    def test_join_runs_from_two_samples_to_the_whole_of_the_loop_and_of_the_start(self):
+        note = render_sound(DRONE, RATE, RENDER_GAIN)
+        loop = held_parts(held(join=0.015), RATE)[1]
+        self.assertTrue(np.array_equal(loop[:399], note[267:666]))
+        self.assertEqual(loop[399], note[266])
+        start, loop, end = held_parts(held(start=2, loop=2, join=2), RATE)
+        self.assertEqual((len(start), len(loop)), (267, 267))
+        self.assertEqual(loop[0], note[267])
+        self.assertFalse(np.array_equal(loop[1:], note[268:534]))
+        self.assertEqual(loop[266], note[266])
+
+    def test_join_of_0_leaves_the_loop_as_it_was_cut_and_a_start_of_0_is_an_empty_buffer(self):
+        note = render_sound(DRONE, RATE, RENDER_GAIN)
+        self.assertTrue(np.array_equal(held_parts(held(join=0), RATE)[1], note[267:667]))
+        start, loop, end = held_parts(held(start=0, join=0), RATE)
+        self.assertEqual((len(start), start.dtype), (0, np.float32))
+        self.assertTrue(np.array_equal(loop, note[:400]))
+        buffers = render_entry(held(start=0, join=0), RATE)
+        self.assertEqual([len(samples) for samples in buffers], [0, 400, 934])
+
+    def test_ticks_are_taken_to_the_nearest_sample_and_half_way_goes_up(self):
+        known = ((8000, 2, 3, 267, 400), (8000, 0.5, 2.5, 67, 333), (11025, 1.25, 0.01, 230, 2),
+                 (44100, 0.5, 1.5, 368, 1103), (48000, 0.015625, 3.015625, 13, 2413))
+        for rate, start, loop, first, second in known:
+            parts = held_parts(held(start=start, loop=loop, join=0), rate)
+            self.assertEqual((len(parts[0]), len(parts[1])), (first, second), (rate, start, loop))
+        # Half a tick of join at 44100 Hz is 367 samples and a half. It fades 368: all of the loop's 735 but 367.
+        note = render_sound(DRONE, 44100, RENDER_GAIN)
+        loop = held_parts(held(start=1, loop=1, join=0.5), 44100)[1]
+        self.assertTrue(np.array_equal(loop[:368], note[735:1103]))
+        self.assertNotEqual(loop[368], note[1103])
+
+    def test_three_buffers_are_levelled_by_one_factor_from_the_loudest_sample_of_them_all(self):
+        # The loudest sample is in the end, and with a quiet end in the start. The last two have no db, and one over 0.
+        known = ((HELD, 2), (held(end=TAP), 0), ({"held": HELD["held"]}, 2), ({**HELD, "db": 2.5}, 2))
+        for entry, loudest in known:
+            parts = held_parts(entry, RATE)
+            buffers = render_entry(entry, RATE)
+            self.assertEqual(len(buffers), 3)
+            level = 10 ** ((-3 + entry.get("db", 0)) / 20)
+            factor = level / max(peak(part) for part in parts)
+            for part, samples in zip(parts, buffers):
+                self.assertEqual(samples.dtype, np.float32)
+                self.assertTrue(np.array_equal(samples, (part.astype(np.float64) * factor).astype(np.float32)))
+            peaks = [peak(samples) for samples in buffers]
+            self.assertAlmostEqual(peaks[loudest], level, places=6)
+            self.assertEqual([size > 0.95 * level for size in peaks], [i == loudest for i in range(3)], peaks)
+
+
 class KnownSamplesTest(unittest.TestCase):
     def check(self, out: np.ndarray, count: int, known: tuple) -> None:
         self.assertEqual(len(out), count)
@@ -221,6 +309,30 @@ class KnownSamplesTest(unittest.TestCase):
                    ((0, 0.001225), (1, 0.002323), (374, -0.111910), (375, -0.345819), (376, -0.343443), (670, 0.711590),
                     (3008, -0.111258), (9023, 0.0)))
 
+    def test_held_sound_as_it_is_cut_and_as_it_is_levelled_at_8000_hz(self):
+        start, loop, end = held_parts(HELD, RATE)
+        self.check(start, 267, ((0, 0.0), (1, -0.007376), (133, 0.058374), (221, -0.144566), (266, 0.037340)))
+        self.check(loop, 400, ((0, 0.038528), (29, -0.132364), (200, -0.006436), (267, -0.024714), (334, 0.004515),
+                               (398, 0.034412), (399, 0.037340)))
+        self.check(end, 934, ((0, 0.003772), (98, 0.179152), (311, -0.052842), (933, 0.0)))
+        start, loop, end = render_entry(HELD, RATE)
+        self.check(start, 267, ((0, 0.0), (1, -0.018390), (133, 0.145544), (221, -0.360450), (266, 0.093101)))
+        self.check(loop, 400, ((0, 0.096063), (29, -0.330027), (200, -0.016047), (267, -0.061620), (334, 0.011257),
+                               (398, 0.085801), (399, 0.093101)))
+        self.check(end, 934, ((0, 0.009405), (98, 0.446684), (311, -0.131751), (933, 0.0)))
+
+    def test_held_sound_at_48000_hz_and_one_whose_loudest_sample_is_in_its_start_at_44100(self):
+        start, loop, end = render_entry(HELD, 48000)
+        self.check(start, 1600, ((0, 0.0), (1, -0.000169), (446, -0.348865), (800, 0.144565), (1599, 0.092932)))
+        self.check(loop, 2400, ((0, 0.093429), (176, -0.320689), (1200, -0.018994), (1600, -0.066889),
+                                (2000, -0.001520), (2398, 0.091780), (2399, 0.092932)))
+        self.check(end, 5600, ((0, 0.001595), (657, 0.446684), (1866, -0.128398), (5599, 0.0)))
+        start, loop, end = render_entry(held(end=TAP))
+        self.check(start, 1470, ((0, 0.0), (1, -0.000274), (410, -0.446684), (735, 0.185114), (1469, 0.118931)))
+        self.check(loop, 2205, ((0, 0.119624), (162, -0.410573), (1102, -0.025169), (1470, -0.085650),
+                                (1838, -0.000534), (2203, 0.117324), (2204, 0.118931)))
+        self.check(end, 2940, ((0, 0.000556), (670, 0.147987), (980, -0.021434), (2939, 0.0)))
+
 
 class ErrorTest(unittest.TestCase):
     def refused(self, entry: object, rate: object = RATE) -> str:
@@ -252,12 +364,96 @@ class ErrorTest(unittest.TestCase):
             for kind in kinds:
                 self.assertIn(f"and has {kind!r}" if kind == kinds[0] else f"and {kind!r}", said)
 
-    def test_refuses_a_held_entry_as_the_one_kind_that_cannot_be_rendered(self):
-        for entry in ({"held": {"note": CHIRP}}, {"held": None, "db": -3}):
-            said = self.refused(entry)
-            self.at("entry", said, entry)
-            self.assertIn("'held'", said)
-            self.assertIn("cannot be rendered", said)
+    def test_refuses_held_that_is_not_a_dict_or_lacks_a_key_or_has_one_too_many(self):
+        for value in (None, [], "held", 3, [HELD["held"]]):
+            self.assertIn("must be a dict", self.refused({"held": value}))
+            self.at("held", self.refused({"held": value}), value)
+        for key in HELD["held"]:
+            said = self.refused({"held": {name: value for name, value in HELD["held"].items() if name != key}})
+            self.at("held", said, key)
+            self.assertIn(f"missing key {key!r}", said)
+        for key in ("letGo", "gain", "db", "Start"):
+            said = self.refused(held(**{key: 1}))
+            self.at("held", said, key)
+            self.assertIn(f"unknown key {key!r}", said)
+
+    def test_refuses_held_lengths_that_are_not_numbers_from_0_on(self):
+        for key in ("start", "loop", "join", "let_go"):
+            for value in ("2", None, True, [2], float("nan"), float("inf"), -0.001, -2):
+                self.at(f"held: {key}", self.refused(held(**{key: value})), (key, value))
+        self.assertEqual(len(render_entry(held(let_go=0), RATE)), 3)
+
+    def test_refuses_a_loop_of_no_samples_and_a_join_of_one(self):
+        # A sample is 0.0075 ticks at 8000 Hz.
+        for loop in (0, 0.003):
+            said = self.refused(held(loop=loop, join=0))
+            self.at("held: loop", said, loop)
+            self.assertIn(f"{loop!r} ticks are none at 8000 Hz", said)
+        self.assertEqual(len(held_parts(held(loop=0.004, join=0), RATE)[1]), 1)
+        for join in (0.0075, 0.004, 0.011):
+            said = self.refused(held(join=join))
+            self.at("held: join", said, join)
+            self.assertIn(f"{join!r} ticks are one at 8000 Hz", said)
+        # The same join is six samples at 48000 Hz.
+        self.assertEqual(len(render_entry(held(join=0.0075), 48000)), 3)
+
+    def test_refuses_a_join_longer_than_the_loop_or_than_the_start(self):
+        wrong = (({"start": 3, "loop": 1, "join": 2}, "the loop: 267 samples against 133"),
+                 ({"start": 1, "loop": 3, "join": 2}, "the start: 267 samples against 133"),
+                 ({"start": 2, "loop": 2, "join": 2.0075}, "the loop: 268 samples against 267"),
+                 ({"start": 0, "loop": 3, "join": 1}, "the start: 133 samples against 0"))
+        for change, why in wrong:
+            said = self.refused(held(**change))
+            self.at("held: join", said, change)
+            self.assertIn("must not be longer than " + why, said)
+
+    def test_refuses_a_note_too_short_for_the_start_and_the_loop(self):
+        # The note is 1200 samples at 8000 Hz. Four ticks and five are 533 and 667.
+        self.assertEqual([len(part) for part in held_parts(held(start=4, loop=5), RATE)], [533, 667, 934])
+        for change in ({"start": 4, "loop": 5.0075}, {"start": 5, "loop": 5}, {"start": 1e9, "loop": 1}):
+            said = self.refused(held(**change))
+            self.at("held: note", said, change)
+            self.assertIn("it is 1200 samples", said)
+        self.assertIn("they take 1201", self.refused(held(start=4, loop=5.0075)))
+
+    def test_refuses_a_held_sound_whose_three_parts_are_all_silent(self):
+        hush = held(note=QUIET, start=1, loop=1, join=0, end=QUIET)
+        said = self.refused(hush)
+        self.at("held", said)
+        self.assertIn("silent", said)
+        for part, count in zip(held_parts(hush, RATE), (133, 133, 267)):
+            self.assertEqual(len(part), count)
+            self.assertFalse(part.any())
+        for change in ({"note": DRONE}, {"end": CHIRP}):
+            self.assertEqual(len(render_entry({**hush, "held": {**hush["held"], **change}}, RATE)), 3)
+
+    def test_refuses_a_db_beside_held_that_is_a_list_or_not_a_number(self):
+        for db in ([-4], [-4, -4, -4], (-4, -3, -2), [], "-4", None, True, float("nan")):
+            said = self.refused({**HELD, "db": db})
+            self.at("db", said, db)
+            self.assertIn("must be a number", said)
+
+    def test_names_the_note_or_the_end_of_a_held_sound_that_is_wrong(self):
+        bad = {"voices": [{"inst": PING, "notes": [[0, "h5", 2]]}]}
+        for key in ("note", "end"):
+            self.at(f"held: {key}: voices[0].notes[0][1]", self.refused(held(**{key: bad})), key)
+            for defn in (None, 3, "drone", [DRONE]):
+                self.at(f"held: {key}: sound", self.refused(held(**{key: defn})), (key, defn))
+
+    def test_held_parts_refuses_what_render_entry_does_and_an_entry_of_another_kind(self):
+        wrong = ((held(join=-1), RATE, "held: join: "), (held(start=5, loop=5), RATE, "held: note: "),
+                 (held(end=None), RATE, "held: end: sound: "), ({"held": None}, RATE, "held: "),
+                 (None, RATE, "entry: "), ({**HELD, "defs": STEPS}, RATE, "entry: "), (HELD, 8000.5, "rate: "),
+                 (HELD, 0, "rate: "))
+        for entry, rate, place in wrong:
+            with self.assertRaises(RowSynthError, msg=repr((entry, rate))) as caught:
+                held_parts(entry, rate)
+            self.assertTrue(str(caught.exception).startswith(place), caught.exception)
+        for kind, entry in (("def", {"def": CHIRP}), ("defs", {"defs": STEPS}), ("parts", BOTH)):
+            with self.assertRaises(RowSynthError, msg=kind) as caught:
+                held_parts(entry, RATE)
+            self.at("entry", str(caught.exception), kind)
+            self.assertIn(f"not one with {kind!r}", str(caught.exception))
 
     def test_refuses_defs_that_are_not_a_list(self):
         for defs in (None, {}, "defs", 3, CHIRP):
@@ -326,21 +522,32 @@ class ErrorTest(unittest.TestCase):
 
 
 class BankTest(unittest.TestCase):
-    def test_every_sound_has_its_buffers_its_meta_and_no_held(self):
+    def test_every_sound_has_its_buffers_its_meta_and_its_held_which_only_a_held_sound_has(self):
         tags = {"priority": 1, "tags": ["ui"]}
         sounds = {"chirp": {"def": CHIRP, "meta": tags}, "steps": {"defs": STEPS, "db": [-1, -3.5, 0]},
-                  "crash": {"def": CRASH, "db": -6, "meta": {}}, "both": {**BOTH, "meta": {"tags": ["hit"]}}}
+                  "crash": {"def": CRASH, "db": -6, "meta": {}}, "both": {**BOTH, "meta": {"tags": ["hit"]}},
+                  "drone": {**HELD, "meta": {"tags": ["loop"]}}}
         bank = render_bank(sounds, RATE)
-        self.assertEqual(list(bank), ["chirp", "steps", "crash", "both"])
+        self.assertEqual(list(bank), ["chirp", "steps", "crash", "both", "drone"])
         for name, entry in sounds.items():
             self.assertEqual(sorted(bank[name]), ["buffers", "held", "meta"], name)
             self.assertTrue(same(bank[name]["buffers"], render_entry(entry, RATE)), name)
-            self.assertIsNone(bank[name]["held"], name)
+            if name != "drone":
+                self.assertIsNone(bank[name]["held"], name)
+        self.assertEqual(len(bank["drone"]["buffers"]), 3)
+        self.assertEqual(bank["drone"]["held"], {"let_go": 4 / 60})
         self.assertIs(bank["chirp"]["meta"], tags)
         self.assertEqual(tags, {"priority": 1, "tags": ["ui"]})
         self.assertEqual(bank["steps"]["meta"], {})
         self.assertEqual(bank["crash"]["meta"], {})
         self.assertEqual(bank["both"]["meta"], {"tags": ["hit"]})
+        self.assertEqual(bank["drone"]["meta"], {"tags": ["loop"]})
+
+    def test_held_says_in_seconds_how_long_the_sound_takes_to_be_let_go_whatever_the_rate(self):
+        for let_go, seconds in ((4, 4 / 60), (0, 0.0), (1.5, 0.025), (90, 1.5)):
+            for rate in (RATE, 11025):
+                self.assertEqual(render_bank({"drone": held(let_go=let_go)}, rate)["drone"]["held"],
+                                 {"let_go": seconds}, (let_go, rate))
 
     def test_rate_left_out_is_44100_and_no_sounds_are_an_empty_bank(self):
         self.assertEqual(len(render_bank({"quiet": {"def": QUIET}})["quiet"]["buffers"][0]), 1470)
@@ -350,7 +557,8 @@ class BankTest(unittest.TestCase):
     def test_puts_the_name_of_the_sound_in_front_of_what_is_refused(self):
         bad = {"voices": [{"inst": PING, "notes": [[0, "h5", 2]]}]}
         wrong = (({"defs": [CHIRP, bad]}, "defs[1]: voices[0].notes[0][1]: "), ({"def": CHIRP, "db": [0, 0]}, "db: "),
-                 ({"def": CHIRP, "defs": STEPS}, "entry: "), ({"held": {}}, "entry: "), (None, "entry: "),
+                 ({"def": CHIRP, "defs": STEPS}, "entry: "), ({"held": {}}, "held: "), (None, "entry: "),
+                 (held(join=4), "held: join: "), (held(end=bad), "held: end: voices[0].notes[0][1]: "),
                  ({"parts": [[0, {"def": CHIRP}], [0.01, {"def": bad}]]}, "parts[1]: def: voices[0].notes[0][1]: "))
         for entry, place in wrong:
             with self.assertRaises(RowSynthError, msg=repr(entry)) as caught:
