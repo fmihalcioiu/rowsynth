@@ -9,9 +9,10 @@ import unittest
 from pathlib import Path
 
 from rowsynth import checks
-from rowsynth.bank import render_entry
+from rowsynth.bank import held_parts, normalise, render_entry
 from rowsynth.checks import Finding, run, sounds
 from rowsynth.errors import RowSynthError
+from rowsynth.measure import measure
 from rowsynth.project import Project
 from rowsynth.sound import KNEE
 
@@ -49,6 +50,12 @@ THUD = sound({"release": 0}, 0, 0.01)
 # Noise clocked far above 4 kHz.
 HISS = sound("hiss", "a6", 4)
 QUIET = {"voices": []}
+# Notes long enough to cut a start and a loop from. From its fourth tick on the beep stays at one level, and
+# six ticks of a4 are 44 periods to the sample.
+TONE = sound("beep", "a4", 12)
+DEEP = sound("beep", "c2", 12)
+DEEPER = sound("beep", "c1", 12)
+GROWL = sound({"wave": "tri"}, 0, 12)
 
 # A set of rules made for a test. Its one finding says what the module was called and what it was handed.
 EXTRA = '''"""A set of rules made for a test."""
@@ -58,6 +65,11 @@ from rowsynth.checks import Finding
 def check(project, rate):
     return [Finding(__name__, str(rate), ", ".join(project.sounds))]
 '''
+
+
+def held(note: dict, start: float, loop: float, join: float, end: dict = BEEP, **rest: object) -> dict:
+    """A held entry: a start and a loop of so many ticks cut from a note, the ticks of fade at the join, an end."""
+    return {"held": {"note": note, "start": start, "loop": loop, "join": join, "end": end, "let_go": 2}, **rest}
 
 
 def project_of(**entries: dict) -> Project:
@@ -70,9 +82,11 @@ def found_in(entry: dict, rate: int = RATE) -> list[Finding]:
     return sounds.check(project_of(zap=entry), rate)
 
 
-def zap(rule: str, message: str, part: int | None = None) -> Finding:
-    """A finding on the sound named zap, or on one of its parts."""
-    return Finding(rule, "sounds.zap" if part is None else f"sounds.zap.parts[{part}]", message)
+def zap(rule: str, message: str, part: int | str | None = None) -> Finding:
+    """A finding on the sound named zap, on one of its parts by number, or on a part of a held sound by name."""
+    if part is None:
+        return Finding(rule, "sounds.zap", message)
+    return Finding(rule, f"sounds.zap.{part}" if isinstance(part, str) else f"sounds.zap.parts[{part}]", message)
 
 
 def rules(found: list[Finding]) -> list[str]:
@@ -126,7 +140,8 @@ class RunTest(unittest.TestCase):
         self.assertEqual(run(project_of(), 8000), [Finding("rowsynth.checks.apple", "8000", "")])
 
     def test_a_project_that_keeps_the_rules_gives_no_findings(self):
-        kept = project_of(pop={"def": BEEP}, pips={"defs": [BEEP, BEEP]}, rest={"def": QUIET})
+        kept = project_of(pop={"def": BEEP}, pips={"defs": [BEEP, BEEP]}, rest={"def": QUIET},
+                          hum=held(TONE, 4, 6, 1))
         for project in (kept, project_of(), Project()):
             self.assertEqual(run(project), [])
 
@@ -285,9 +300,90 @@ class SoundsTest(unittest.TestCase):
             ("sounds.zap.parts[0]", "peak"), ("sounds.zap.parts[1]", "bright"), ("sounds.zap", "length"),
             ("sounds.pop", "peak")])
 
-    def test_an_entry_with_held_gives_nothing_yet(self):
-        held = {"note": LOUD, "start": 2, "loop": 4, "join": 1, "end": LOUD, "let_go": 2}
-        self.assertEqual(found_in({"held": held, "max_seconds": 0.01}), [])
+    def test_a_held_sound_that_keeps_the_rules_gives_nothing(self):
+        self.assertEqual(found_in(held(TONE, 4, 6, 1)), [])
+        # With no fade at the join: the loop is a whole number of periods, and comes round by itself.
+        self.assertEqual(found_in(held(TONE, 4, 6, 0)), [])
+
+    def test_each_part_of_a_held_sound_is_found_under_its_name_and_held_to_the_limits_of_the_entry(self):
+        loud = sound({"gain": 8}, "a4", 12)
+        self.assertEqual(places(found_in(held(loud, 2, 4, 1, LOUD, max_seconds=0.01))), [
+            ("sounds.zap.start", "peak"), ("sounds.zap.start", "length"),
+            ("sounds.zap.loop", "peak"), ("sounds.zap.loop", "length"),
+            ("sounds.zap.end", "peak"), ("sounds.zap.end", "length")])
+
+    def test_the_inner_ends_of_a_held_sound_are_not_held_to_silence_nor_its_start_or_loop_to_dc_alone(self):
+        entry = held(DEEP, 4, 6, 1)
+        start, loop, _ = held_parts(project_of(zap=entry).sound("zap"), RATE)
+        start, loop = (measure(normalise(part), RATE) for part in (start, loop))
+        # Each of these alone is past its limit: a hundredth for a first or last sample, 0.002 for an offset.
+        self.assertEqual((start["tail_step"], loop["head_step"], loop["tail_step"]), (0.099, 0.242, 0.243))
+        self.assertEqual((start["dc"], loop["dc"]), (0.0061, -0.0031))
+        self.assertEqual(found_in(entry), [])
+
+    def test_the_start_of_a_held_sound_is_held_to_its_first_sample(self):
+        self.assertEqual(found_in(held(GROWL, 2, 4, 1, max_dc=0.1)), [
+            zap("ends", "starts with a jump of 0.015 out of silence, and 0.01 or more clicks", part="start")])
+
+    def test_the_end_of_a_held_sound_is_held_to_every_rule(self):
+        self.assertEqual(found_in(held(DEEP, 4, 6, 1, RUMBLE)), [
+            zap("ends", "starts with a jump of 0.015 out of silence, and 0.01 or more clicks", part="end")])
+        self.assertEqual(found_in(held(DEEP, 4, 6, 1, THUD)), [
+            zap("dc", "its mean sample is 0.0077, which is 0.002 or more off zero", part="end")])
+
+    def test_the_check_of_a_held_entry_is_read_on_each_of_its_parts(self):
+        message = "is 100 cents below the note a#4 written at 0.01 seconds, and more than 35 is out of tune"
+        self.assertEqual(found_in(held(TONE, 4, 6, 1, check=[{"at": 0.01, "note": "a#4"}])),
+                         [zap("pitch", message, part) for part in ("start", "loop", "end")])
+
+    def test_join_fires_where_a_loop_with_no_fade_does_not_come_round_to_its_first_sample(self):
+        # Six ticks and two fifths of a4 are not a whole number of periods.
+        self.assertEqual(found_in(held(TONE, 4.1, 6.4, 0)), [
+            zap("join", "steps from the end of its loop round to its beginning by 1.318 of the largest step "
+                        "inside the loop, and 0.25 or more clicks")])
+        self.assertEqual(found_in(held(TONE, 4.1, 6.4, 1)), [])
+
+    def test_join_fires_where_the_start_is_cut_from_the_loop_on_a_tall_step(self):
+        # Two ticks and a quarter in, the pulse is on its way from one side to the other.
+        self.assertEqual(found_in(held(TONE, 2.25, 4, 0)), [
+            zap("join", "steps from its start into its loop by 0.952 of the largest step inside the loop, "
+                        "and 0.25 or more clicks")])
+        # A fade ends the loop on the last sample of the start, and the loop comes round over the same step.
+        self.assertEqual(found_in(held(TONE, 3, 6, 1)), [
+            zap("join", "steps from its start into its loop by 0.560 of the largest step inside the loop, "
+                        "and 0.25 or more clicks"),
+            zap("join", "steps from the end of its loop round to its beginning by 0.560 of the largest step "
+                        "inside the loop, and 0.25 or more clicks")])
+
+    def test_a_flat_loop_clicks_where_a_join_steps_at_all_and_nowhere_else(self):
+        # A loop of one sample has no step inside it, and comes round to itself without one.
+        self.assertEqual(found_in(held(TONE, 4, 0.001, 0)), [
+            zap("join", "steps from its start into its loop by 0.000197, and the loop is flat: any step into it "
+                        "clicks")])
+        # The first sample of the note is silence, and here it is all there is of the start and the loop.
+        self.assertEqual(found_in(held(TONE, 0, 0.001, 0)), [])
+
+    def test_with_no_start_the_loop_is_held_to_its_first_sample_and_nothing_joins_it_but_itself(self):
+        self.assertEqual(found_in(held(GROWL, 0, 4, 0, max_dc=0.2)), [
+            zap("ends", "starts with a jump of 0.015 out of silence, and 0.01 or more clicks", part="loop"),
+            zap("join", "steps from the end of its loop round to its beginning by 0.305 of the largest step "
+                        "inside the loop, and 0.25 or more clicks")])
+
+    def test_dc_fires_on_the_offset_of_the_start_and_the_loop_together_and_max_dc_moves_its_limit(self):
+        self.assertEqual(found_in(held(DEEPER, 4, 6, 1)), [
+            zap("dc", "the mean sample of its start and its loop together is 0.0066, which is 0.002 or more off "
+                      "zero")])
+        self.assertEqual(found_in(held(DEEPER, 4, 6, 1, max_dc=0.01)), [])
+        # A mean at the limit breaks it.
+        self.assertEqual(found_in(held(DEEP, 4, 6, 1, max_dc=0.0017)), [
+            zap("dc", "the mean sample of its start and its loop together is 0.0017, which is 0.0017 or more off "
+                      "zero")])
+
+    def test_findings_on_a_held_sound_come_part_by_part_then_join_by_join_then_the_offset(self):
+        project = project_of(zap=held(TONE, 2.25, 4, 1, max_seconds=0.03), pop={"def": LOUD})
+        self.assertEqual(places(sounds.check(project, RATE)), [
+            ("sounds.zap.start", "length"), ("sounds.zap.loop", "length"), ("sounds.zap.end", "length"),
+            ("sounds.zap", "join"), ("sounds.zap", "join"), ("sounds.zap", "dc"), ("sounds.pop", "peak")])
 
     def test_a_def_that_cannot_be_rendered_is_refused_with_its_target_in_front(self):
         odd = sound({"wave": "sine"}, "a4", 4)
@@ -299,6 +395,13 @@ class SoundsTest(unittest.TestCase):
     def test_parts_the_bank_cannot_add_up_are_refused_with_the_sound_in_front(self):
         self.assertEqual(self.refusal_of({"parts": [[-1, {"def": BEEP}]]}),
                          "sounds.zap: parts[0]: seconds: must be 0 or more, not -1")
+
+    def test_a_held_sound_the_bank_cannot_cut_is_refused_with_the_sound_in_front(self):
+        self.assertEqual(self.refusal_of(held(BEEP, 2, 40, 1)),
+                         "sounds.zap: held: note: must be long enough for the start and the loop: it is 5880 "
+                         "samples at 44100 Hz, and they take 30870")
+        self.assertEqual(self.refusal_of(held(TONE, 4, 6, 1, sound({"wave": "sine"}, "a4", 4))),
+                         "sounds.zap: held: end: voices[0].inst.wave: unknown wave 'sine'")
 
 
 if __name__ == "__main__":

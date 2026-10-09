@@ -12,7 +12,10 @@ from ..project import Project
 class Finding:
     """One breach of a rule: the rule, what broke it, and what was found there.
 
-    target is the place in the project: "sounds.coin", or "sounds.coin[1]" for the second variant of a sound.
+    target is the place in the project. "sounds.coin" is a sound, "sounds.coin[1]" the second variant of one,
+    and "sounds.coin.parts[0]" the first part of one made of parts. A held sound has three parts,
+    "sounds.hum.start", "sounds.hum.loop" and "sounds.hum.end", and what is found between them goes by the
+    sound itself, "sounds.hum".
     message says what was found, with the number.
     """
 
