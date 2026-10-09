@@ -1,4 +1,4 @@
-"""Tests for a layered song: its groups mixed to stereo in every key, and the versions summed from them."""
+"""Tests for a song's stems mixed to stereo: the groups of a layered song in every key, its versions, and an intro."""
 from __future__ import annotations
 
 import copy
@@ -9,7 +9,8 @@ from unittest import mock
 import numpy as np
 
 from rowsynth.errors import RowSynthError
-from rowsynth.layers import bar_rows, group_mix, keyless, mix_version, pan_gains, render_groups, shared_scale
+from rowsynth.layers import (bar_rows, group_mix, keyless, mix_version, pan_gains, render_groups, render_intro,
+                             shared_scale)
 from rowsynth.song import render_stems, up
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz.
@@ -495,6 +496,203 @@ class ErrorTest(unittest.TestCase):
     def test_refuses_a_rate_that_makes_no_sense(self):
         for rate in (0, -8000, 8000.5, "8000", None, True, float("inf")):
             self.assertTrue(self.refused(SONG, rate).startswith("rate: "), rate)
+
+
+# A song with an intro of two patterns in front of its loop of one. The intro gives neither a tail nor a fade.
+# With six ticks to a row, a row is 800 samples at 8000 Hz and a bar is 12800, which is 1.6 seconds. The intro
+# opens on a rest of one row. It ends on a bell that is held to the last row and takes 96 ticks more to die away,
+# which is the length of a bar. The bell is to the left and the reed to the right, and the drum channel has no
+# text in the intro.
+LED_IN = {
+    "row_ticks": 6,
+    "instruments": {**SONG["instruments"], "bell": {"wave": "tri", "vol": [15, 12, 10], "gate": 1, "release": 96}},
+    "drums": SONG["drums"],
+    "channels": {
+        "chime": {"inst": "bell", "pan": -0.5},
+        "tune": {"inst": "reed", "gain": 0.8, "pan": 0.6, "echo": {"rows": 1.5, "gain": 0.4}},
+        "kick": {"inst": "thump", "drums": True},
+    },
+    "patterns": {
+        "rise": {"tune": "r16 l8 e g b r16"},
+        "land": {"chime": "o5 c4 g4", "tune": "o3 c2"},
+        "round": {"tune": "l8 c e g e", "kick": "k4 k4"},
+    },
+    "order": ["round"],
+    "intro": {"order": ["rise", "land"]},
+}
+
+
+def led_in(**intro: object) -> dict:
+    """The song with other settings for its intro, which keeps its two patterns unless it is given others."""
+    return {**LED_IN, "intro": {"order": ["rise", "land"], **intro}}
+
+
+def rung_out() -> tuple[np.ndarray, np.ndarray]:
+    """The two sides of the song's intro before they are cut and faded, made by hand from stems.
+
+    The two patterns are played with a bar of rests on every channel after them. The stems go in in the order
+    the channels first have text in: the reed, the bell, and the drum, which has its rest and nothing else.
+    """
+    rests = {name: "r1" for name in LED_IN["channels"]}
+    played = {**LED_IN, "patterns": {**LED_IN["patterns"], "rests": rests}, "order": ["rise", "land", "rests"]}
+    return by_hand(played, ["tune", "chime", "kick"])
+
+
+def sides(out: dict) -> tuple[np.ndarray, np.ndarray]:
+    """The left side and the right of what `render_intro` gives."""
+    return out["left"], out["right"]
+
+
+def ends(out: dict) -> tuple[int, int]:
+    """Where the loop is to begin and where the sides end, in what `render_intro` gives."""
+    return out["walk_samples"], out["in_samples"]
+
+
+class RenderIntroTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.song = copy.deepcopy(LED_IN)
+        cls.out = render_intro(cls.song, RATE)
+        cls.whole = rung_out()
+
+    def test_gives_the_two_sides_and_where_the_loop_begins_and_where_the_sides_end(self):
+        self.assertEqual(sorted(self.out), ["in_samples", "left", "right", "walk_samples"])
+        # The two patterns have 16 rows, and the tail that was left out is a second and a half.
+        self.assertEqual(ends(self.out), (12800, 24800))
+        self.assertEqual([(side.dtype, side.shape) for side in sides(self.out)], [(np.float32, (24800,))] * 2)
+        self.assertEqual(self.song, LED_IN)
+
+    def test_sides_are_the_stems_of_the_patterns_and_a_bar_of_rests_each_shared_by_its_pan(self):
+        # As far as the fade, which was left out and is the last twentieth of a second: 400 samples.
+        same(self, [side[:24400] for side in sides(self.out)], [hand[:24400] for hand in self.whole])
+
+    def test_last_notes_ring_out_into_the_bar_of_rests_and_are_not_added_back_on_at_the_start(self):
+        for side in sides(self.out):
+            # The bell is heard after the patterns end. The row of rest the intro opens on has none of it: all
+            # there is in that row is what the high-pass of a stem still holds from the stem's end.
+            self.assertGreater(float(np.abs(side[12800:24400]).max()), 0.1)
+            self.assertLess(float(np.abs(side[:800]).max()), 1e-4)
+        # Stems of the two patterns alone are a loop of them, and there the bell dies away over the start.
+        for side in by_hand({**LED_IN, "order": ["rise", "land"]}, ["tune", "chime"]):
+            self.assertGreater(float(np.abs(side[:800]).max()), 0.1)
+
+    def test_end_of_the_tail_falls_away_evenly_to_nothing(self):
+        # The last sample keeps nothing of what it had, the one before it 1 part in 400, and the first 399.
+        kept = np.arange(399, -1, -1) / 400
+        for side, hand in zip(sides(self.out), self.whole):
+            self.assertGreater(float(np.abs(hand[24400:24800]).max()), 0.005)
+            self.assertTrue(np.array_equal(side[24400:], (hand[24400:24800] * kept).astype(np.float32)))
+            self.assertEqual(float(side[-1]), 0.0)
+
+    def test_tail_and_fade_are_seconds_that_come_to_whole_samples_with_a_half_rounded_up(self):
+        # A 128th of a second is 62.5 samples. A fade may be as long as the tail.
+        out = render_intro(led_in(tail=0.0078125, fade=0.0078125), RATE)
+        self.assertEqual(ends(out), (12800, 12863))
+        kept = np.arange(62, -1, -1) / 63
+        for side, hand in zip(sides(out), self.whole):
+            self.assertTrue(np.array_equal(side[:12800], hand[:12800]))
+            self.assertGreater(abs(float(hand[12800])), 0.05)
+            self.assertTrue(np.array_equal(side[12800:], (hand[12800:12863] * kept).astype(np.float32)))
+        # With no tail the sides end where the loop is to begin, and with no fade they end as loud as they are.
+        out = render_intro(led_in(tail=0, fade=0), RATE)
+        self.assertEqual(ends(out), (12800, 12800))
+        same(self, sides(out), [hand[:12800] for hand in self.whole])
+
+    def test_loop_begins_at_the_share_of_the_stems_that_the_patterns_have_of_the_rows(self):
+        # With one tick to a row the 32 rows of the stems are 4266.67 samples, which makes 4267. The patterns
+        # have half of the rows, and half of 4267 is 2133.5, which makes 2134. Their 16 rows alone are 2133.
+        self.assertEqual(ends(render_intro({**led_in(tail=0.25), "row_ticks": 1}, RATE)), (2134, 4134))
+        # With two ticks it is half of 8533. A half goes up to an odd number as it does to an even one.
+        self.assertEqual(ends(render_intro({**led_in(tail=0.25), "row_ticks": 2}, RATE)), (4267, 6267))
+
+    def test_bar_of_rests_is_a_pattern_with_a_name_that_no_pattern_of_the_song_has(self):
+        def bar_of(song: dict) -> tuple[str, dict]:
+            """The name the bar of rests was given in the song the stems were made from, and the intro."""
+            with mock.patch("rowsynth.layers.render_stems", wraps=render_stems) as stems:
+                out = render_intro(song, RATE)
+            played = stems.call_args[0][0]
+            (name,) = set(played["patterns"]) - set(song["patterns"])
+            self.assertEqual(played["order"], [*song["intro"]["order"], name])
+            self.assertEqual(played["patterns"][name], {"chime": "r1", "tune": "r1", "kick": "r1"})
+            return name, out
+
+        first, _ = bar_of(LED_IN)
+        # A song that has a pattern of that name keeps it, and the bar of rests takes another name.
+        patterns = {**LED_IN["patterns"], first: LED_IN["patterns"]["rise"]}
+        second, out = bar_of({**LED_IN, "patterns": patterns, "intro": {"order": [first, "land"]}})
+        self.assertNotEqual(second, first)
+        same(self, sides(out), sides(self.out))
+
+    def test_known_samples_at_8000_44100_and_48000_hz(self):
+        def check(out: dict, where: tuple, spots: tuple, left: tuple, right: tuple) -> None:
+            self.assertEqual(ends(out), where)
+            for side, wanted in zip(sides(out), (left, right)):
+                self.assertEqual(len(side), where[1])
+                np.testing.assert_allclose(side[list(spots)], wanted, rtol=0, atol=1e-6, err_msg=repr(where))
+
+        # The first note starts a row in. The last 400 samples at 8000 Hz are the fade, 2205 at 44100, 2400 at 48000.
+        check(self.out, (12800, 24800), (0, 800, 801, 5000, 12799, 12800, 20000, 24399, 24400, 24600, 24798, 24799),
+              (0.000029, 0.002538, 0.014681, -0.012318, -0.349850, -0.214999, -0.025072, -0.005183, -0.013623,
+               0.008783, -0.000024, 0.0),
+              (0.000012, 0.007813, 0.045182, -0.037911, -0.144913, -0.089056, -0.010385, -0.002147, -0.005643,
+               0.003638, -0.000010, 0.0))
+        check(render_intro(LED_IN, 44100), (70560, 136710),
+              (4410, 30000, 70560, 100000, 134504, 134505, 135600, 136708, 136709),
+              (0.000482, -0.011122, -0.216458, 0.164440, -0.010899, -0.013781, 0.004389, -0.000006, 0.0),
+              (0.001485, -0.034229, -0.089660, 0.068113, -0.004515, -0.005708, 0.001818, -0.000002, 0.0))
+        # The rate left out is 48000.
+        check(render_intro(LED_IN), (76800, 148800),
+              (4800, 30000, 76800, 100000, 146399, 146400, 147600, 148798, 148799),
+              (0.000444, -0.012452, -0.216454, -0.246805, -0.010903, -0.013792, 0.008907, -0.000006, 0.0),
+              (0.001365, -0.038323, -0.089658, -0.102230, -0.004516, -0.005713, 0.003689, -0.000002, 0.0))
+
+
+class IntroErrorTest(unittest.TestCase):
+    def refused(self, song: dict) -> str:
+        """What the error says when the intro of a song is refused, which is before any note is played."""
+        with mock.patch("rowsynth.song.render_note") as played:
+            with self.assertRaises(RowSynthError, msg=repr(song.get("intro"))) as caught:
+                render_intro(song, RATE)
+        played.assert_not_called()
+        return str(caught.exception)
+
+    def test_refuses_a_song_with_no_intro(self):
+        self.assertEqual(self.refused(SONG), "the song has no intro, so there is nothing to play before its loop")
+
+    def test_refuses_an_intro_with_no_patterns_in_its_order(self):
+        for intro in ({}, {"order": []}, {"tail": 1.5, "fade": 0.05}):
+            self.assertEqual(self.refused({**LED_IN, "intro": intro}),
+                             "intro.order: no patterns, so the intro has nothing to play")
+
+    def test_refuses_an_intro_that_names_a_pattern_the_song_lacks(self):
+        self.assertEqual(self.refused(led_in(order=["rise", "fall", "land"])), "intro.order: no pattern called 'fall'")
+
+    def test_refuses_a_tail_or_a_fade_that_is_below_0_or_is_no_number(self):
+        for key in ("tail", "fade"):
+            self.assertEqual(self.refused(led_in(**{key: -0.01})), f"intro.{key}: must be 0 or more, not -0.01")
+            for value in ("1", None, True, float("inf")):
+                self.assertEqual(self.refused(led_in(**{key: value})), f"intro.{key}: must be a number, not {value!r}")
+
+    def test_refuses_a_fade_longer_than_the_tail(self):
+        self.assertEqual(self.refused(led_in(tail=0.25, fade=0.3)),
+                         "intro.fade: 0.3 seconds is longer than the tail, which is 0.25")
+        # Either of them may be the one that was left out.
+        self.assertEqual(self.refused(led_in(fade=2)), "intro.fade: 2 seconds is longer than the tail, which is 1.5")
+        self.assertEqual(self.refused(led_in(tail=0.01)),
+                         "intro.fade: 0.05 seconds is longer than the tail, which is 0.01")
+
+    def test_refuses_a_tail_longer_than_the_bar_of_rests_and_takes_one_that_fills_it(self):
+        out = render_intro(led_in(tail=1.6), RATE)
+        self.assertEqual(ends(out), (12800, 25600))
+        self.assertEqual([len(side) for side in sides(out)], [25600, 25600])
+        # The stems have to be made before it is known how many samples the bar has, so notes are played here.
+        for song, said in ((led_in(tail=1.6001), "1.6001 seconds is 12801 samples at a rate of 8000, and the silent "
+                                                 "bar after the intro has 12800"),
+                           ({**LED_IN, "row_ticks": 3}, "1.5 seconds is 12000 samples at a rate of 8000, and the "
+                                                        "silent bar after the intro has 6400")):
+            with self.assertRaises(RowSynthError) as caught:
+                render_intro(song, RATE)
+            self.assertEqual(str(caught.exception), f"intro.tail: {said}")
 
 
 if __name__ == "__main__":

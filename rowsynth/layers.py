@@ -1,9 +1,12 @@
-"""A layered song: groups of its channels, each mixed to stereo in every key, and the versions summed from them."""
+"""A song's stems mixed to stereo: the groups of a layered song in every key, its versions, and a song's intro."""
 from __future__ import annotations
+
+import math
 
 import numpy as np
 
 from .errors import RowSynthError
+from .note import _length
 from .song import lay, pan_gains, render_stems, up
 
 
@@ -44,14 +47,15 @@ def _groups(song: dict) -> dict[str, list[str]]:
 def _mix(stems: list[dict], size: int) -> tuple[np.ndarray, np.ndarray]:
     """Stems mixed to a left side and a right one of `size` samples, each stem going where its pan puts it.
 
-    The stems are added one at a time in the order given. Each sum is worked out in doubles, and what a side
-    then holds is rounded to float32 before the next stem goes in.
+    A stem that is longer goes in as far as `size` and is cut there. The stems are added one at a time in the
+    order given. Each sum is worked out in doubles, and what a side then holds is rounded to float32 before the
+    next stem goes in.
     """
     left = np.zeros(size, dtype=np.float32)
     right = np.zeros(size, dtype=np.float32)
     for stem in stems:
         to_left, to_right = pan_gains(stem["pan"])
-        wide = stem["samples"].astype(np.float64)
+        wide = stem["samples"][:size].astype(np.float64)
         left += wide * to_left
         right += wide * to_right
     return left, right
@@ -136,3 +140,73 @@ def shared_scale(rendered: dict, peak_db: float = -1.0) -> float:
             for side in sides:
                 peak = max(peak, float(np.abs(side).max(initial=0.0)))
     return 10 ** (peak_db / 20) / peak if peak > 0 else 1.0
+
+
+# The seconds an intro runs on for past the last of its patterns, and how many of them at its very end are
+# faded to nothing, when the intro does not say.
+_TAIL = 1.5
+_FADE = 0.05
+
+
+def _intro(song: dict) -> tuple[list[str], float, float]:
+    """The intro of a song once it is known to make sense: its order, and the seconds of its tail and of its fade."""
+    intro = song.get("intro")
+    if intro is None:
+        raise RowSynthError("the song has no intro, so there is nothing to play before its loop")
+    order = intro.get("order")
+    if not order:
+        raise RowSynthError("intro.order: no patterns, so the intro has nothing to play")
+    for name in order:
+        if name not in song["patterns"]:
+            raise RowSynthError(f"intro.order: no pattern called {name!r}")
+    tail = intro.get("tail", _TAIL)
+    fade = intro.get("fade", _FADE)
+    _length(tail, "intro.tail")
+    _length(fade, "intro.fade")
+    if fade > tail:
+        raise RowSynthError(f"intro.fade: {fade!r} seconds is longer than the tail, which is {tail!r}")
+    return list(order), tail, fade
+
+
+def _unused(patterns: dict) -> str:
+    """A name that none of a song's patterns has."""
+    name = "silence"
+    while name in patterns:
+        name += "_"
+    return name
+
+
+def render_intro(song: dict, rate: int = 48000) -> dict:
+    """The intro of a song as samples: {"left", "right", "walk_samples", "in_samples"}.
+
+    `song["intro"]` is {"order", "tail", "fade"}: the patterns that are played once before the song's loop, and
+    two lengths in seconds, which are 1.5 and 0.05 when left out. The patterns are played as stems with one bar
+    of rests after them, so that what their last notes are still sounding rings out into that bar and is not
+    added back on at the start. The stems are mixed as a group's are, each shared between the two sides by its
+    channel's pan. `walk_samples` is where the patterns end, which is where the loop is to begin. The sides
+    run on past it for the tail and are `in_samples` long, and over the last `fade` seconds of them they fall
+    away evenly to nothing. The tail is cut from the silent bar, and one that is longer than the bar is refused.
+    """
+    order, tail, fade = _intro(song)
+    bar = _unused(song["patterns"])
+    # Every channel of the song rests for a whole note, which is one bar.
+    rests = {name: "r1" for name in song["channels"]}
+    played = render_stems({**song, "patterns": {**song["patterns"], bar: rests}, "order": [*order, bar]}, rate)
+    loop_samples, rows = played["loop_samples"], played["rows"]
+    # The patterns have the rows of the stems less the bar's, and the same share of the samples.
+    walk_samples = math.floor(loop_samples * (rows - bar_rows(song)) / rows + 0.5)
+    tail_samples = math.floor(tail * rate + 0.5)
+    # The stems end where the silent bar does. How many samples the bar came to is known only now they are made.
+    if tail_samples > loop_samples - walk_samples:
+        raise RowSynthError(f"intro.tail: {tail!r} seconds is {tail_samples} samples at a rate of {rate}, and the "
+                            f"silent bar after the intro has {loop_samples - walk_samples}")
+    in_samples = walk_samples + tail_samples
+    fade_samples = math.floor(fade * rate + 0.5)
+    left, right = _mix(played["stems"], in_samples)
+    # The last sample is brought to nothing, and each one before it keeps one more share in `fade_samples` of
+    # what it had. The products are worked out in doubles and rounded to float32 as they go back into a side.
+    # A fade of no samples has no slope, and nothing is changed.
+    slope = np.arange(fade_samples - 1, -1, -1) / fade_samples
+    for side in (left, right):
+        side[in_samples - fade_samples:] *= slope
+    return {"left": left, "right": right, "walk_samples": walk_samples, "in_samples": in_samples}
