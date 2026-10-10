@@ -113,7 +113,8 @@ class App:
             canvas.box(layout.edge(parts[name], side), theme.LINE)
         self._status(parts["status"])
         for panel in self.panels.values():
-            panel.draw(canvas)
+            if panel.shown:
+                panel.draw(canvas)
         self.ui.draw(canvas)
 
     def _status(self, rect: Rect) -> None:
