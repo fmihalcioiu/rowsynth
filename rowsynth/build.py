@@ -10,7 +10,7 @@ import numpy as np
 
 from . import __version__
 from .errors import RowSynthError
-from .layers import bar_rows, group_mix, keyless, mix_version, render_groups, shared_scale
+from .layers import bar_rows, group_mix, keyless, mix_version, render_groups, render_intro
 from .measure import _fixed
 from .note import _count
 from .project import Project
@@ -25,6 +25,9 @@ _PEAK_DB = -1.0
 
 # The file the manifest is written to, beside the files it names.
 _MANIFEST = "music.json"
+
+# A file to write: its name, and the left side and the right of what goes into it.
+_File = tuple[str, tuple[np.ndarray, np.ndarray]]
 
 
 def _rate(rate: object) -> int:
@@ -47,33 +50,34 @@ def source_hash(project: Project, name: str, rate: int) -> str:
     return hashlib.sha1(text.encode("utf-8"), usedforsecurity=False).hexdigest()[:16]
 
 
-def _scale(sides: tuple[np.ndarray, np.ndarray]) -> float:
-    """What two sides are to be multiplied by to have the loudest sample of the two at `_PEAK_DB`.
-
-    Silence has no loudest sample to go by, and what it is multiplied by is 1.
-    """
-    peak = max(float(np.abs(side).max()) for side in sides)
-    return 10 ** (_PEAK_DB / 20) / peak if peak > 0 else 1.0
-
-
 def _factor(value: float) -> float:
     """What a player is to multiply samples by, as the manifest holds it: to six decimal places."""
     return _fixed(value, 6)
 
 
-def _write(path: Path, sides: tuple[np.ndarray, np.ndarray], scale: float, rate: int) -> None:
-    """Writes two sides as one stereo file with every sample multiplied by `scale`. The sides stay as they were."""
-    # Each product is worked out as a double and rounded to float32, and the file is made from the float32.
-    save_wav(path, [(side.astype(np.float64) * scale).astype(np.float32) for side in sides], rate)
+def _write_level(out_dir: Path, files: list[_File], rate: int) -> float:
+    """Writes files in stereo into a folder, all at one scale, and gives the scale.
+
+    The scale is what has the loudest sample of all the files at `_PEAK_DB`. Every sample of every file is
+    multiplied by it, so the files are as loud beside each other as their sides were. Silence has no loudest
+    sample to go by: it is written as it is, and the scale is 1. The sides stay as they were.
+    """
+    peak = max(float(np.abs(side).max(initial=0.0)) for _, sides in files for side in sides)
+    scale = 10 ** (_PEAK_DB / 20) / peak if peak > 0 else 1.0
+    for file, sides in files:
+        # Each product is worked out as a double and rounded to float32, and the file is made from the float32.
+        save_wav(out_dir / file, [(side.astype(np.float64) * scale).astype(np.float32) for side in sides], rate)
+    return scale
 
 
-def _build_loop(song: dict, name: str, out_dir: Path, rate: int, source: str) -> dict:
-    """Writes a song without layers as one loop, at a scale of its own, and gives its entry in the manifest."""
+def _build_loop(song: dict, name: str, out_dir: Path, rate: int, source: str, beside: list[_File]) -> dict:
+    """Writes a song without layers as one loop and gives its entry in the manifest.
+
+    `beside` are the files of the song that are not its loop. They are written with it, at the one scale.
+    """
     loop = render_loop(song, rate)
-    sides = (loop["left"], loop["right"])
-    scale = _scale(sides)
     file = f"{name}.wav"
-    _write(out_dir / file, sides, scale, rate)
+    scale = _write_level(out_dir, [(file, (loop["left"], loop["right"])), *beside], rate)
     return {"loop_samples": loop["loop_samples"], "gain": _factor(1 / scale), "source": source, "file": file}
 
 
@@ -107,14 +111,16 @@ def _distinct(files: list[str]) -> None:
         seen[folded] = file
 
 
-def _layer_files(song: dict, name: str) -> tuple[dict, list[tuple[str, str, int]], list[tuple[str, str, int]]]:
-    """The files a layered song is written as, found before a note of it is played: groups, mixes and premixes.
+def _layer_files(song: dict, name: str,
+                 taken: list[str]) -> tuple[dict, list[tuple[str, str, int]], list[tuple[str, str, int]]]:
+    """The files the layers of a song are written as, found before a note of them is played: groups, mixes, premixes.
 
     `groups` is what the manifest says of them: {group: {"file": file}} for a keyless group, which is the same in
     every key and has one file, and {group: {"files": {key: file}}} for any other, the key as a string, which is
     what it is in JSON. `mixes` has (file, group, key) for every one of those files, and `premixes` has (file,
-    version, key) for every version the song asks to have mixed ahead. A song whose files would not add up to
-    it, a premix of a version or in a key the song does not have, and two files with one name are refused.
+    version, key) for every version the song asks to have mixed ahead. `taken` are the names of the files the
+    song has besides. A song whose files would not add up to it, a premix of a version or in a key the song
+    does not have, and two files with one name, those in `taken` among them, are refused.
     """
     layers = song["layers"]
     keys = layers.get("keys", [0])
@@ -138,28 +144,26 @@ def _layer_files(song: dict, name: str) -> tuple[dict, list[tuple[str, str, int]
         if key not in keys:
             raise RowSynthError(f"layers.premix[{at}]: key {key!r} is not one of the song's keys, {keys}")
         premixes.append((f"{name}.{version}.{key}.wav", version, key))
-    _distinct([file for file, _, _ in mixes + premixes])
+    _distinct([*(file for file, _, _ in mixes + premixes), *taken])
     return groups, mixes, premixes
 
 
-def _build_layers(song: dict, name: str, out_dir: Path, rate: int, source: str) -> dict:
+def _build_layers(song: dict, name: str, out_dir: Path, rate: int, source: str, beside: list[_File]) -> dict:
     """Writes a layered song as a file a group and key, all at one scale, and gives its entry in the manifest.
 
-    A version mixed ahead is written at a scale of its own, and its entry has what brings it to the groups'.
+    `beside` are the files of the song that are not of its groups. They are written with those, at the one
+    scale. A version mixed ahead is written at a scale of its own, and its entry has what brings it to theirs.
     """
-    groups, mixes, premixes = _layer_files(song, name)
+    groups, mixes, premixes = _layer_files(song, name, [file for file, _ in beside])
     rendered = render_groups(song, rate)
     loop_samples = rendered["loop_samples"]
-    scale = shared_scale(rendered, _PEAK_DB)
-    for file, group, key in mixes:
-        _write(out_dir / file, group_mix(rendered["groups"][group], key), scale, rate)
+    mixed = [(file, group_mix(rendered["groups"][group], key)) for file, group, key in mixes]
+    scale = _write_level(out_dir, [*mixed, *beside], rate)
     premixed = []
     for file, version, key in premixes:
         # The groups are added up as they were rendered. Their sum can go past the loudest of them, so it has
         # a scale of its own, and the two scales say how far its file is from theirs.
-        sides = mix_version(rendered, song, version, key)
-        own = _scale(sides)
-        _write(out_dir / file, sides, own, rate)
+        own = _write_level(out_dir, [(file, mix_version(rendered, song, version, key))], rate)
         premixed.append({"id": f"{version}/{key}", "file": file, "scale": _factor(scale / own)})
     entry = {"loop_samples": loop_samples,
              # A bar's share of the rows is its share of the samples, to the nearest sample.
@@ -191,18 +195,31 @@ def build_song(project: Project, name: str, out_dir: str | Path, rate: int = BUI
     key mixed ahead, NAME.VERSION.KEY.wav, with its own loudest sample at 1 dB under full scale. Its "id" is
     VERSION/KEY, and its "scale" is what its samples are to be multiplied by to be at the level of the groups'.
 
+    A song with an intro, with layers or without, has one stereo file more, NAME.intro.wav: what `render_intro`
+    gives, to be played once before the loop. It is at the level of the loop or of the groups: the one number
+    they are multiplied by is the intro's as well, and it has the loudest sample of them all, the intro's with
+    them, at 1 dB under full scale. A version mixed ahead keeps a scale of its own. The entry has "intro" last,
+    {"file", "in_samples", "walk_samples"}: the name of the file, the samples in it, and the sample of it at
+    which the loop is to begin.
+
     A layered song is refused when a channel of it is in no group or in a group more than once, when a premix
     names a version or a key it does not have, and when two of its files would have one name where case does
-    not count. A song with an intro is refused. What is wrong with a song is refused with its name in front.
+    not count. An intro is refused when `render_intro` refuses it. What is wrong with a song is refused with
+    its name in front.
     """
     song = project.song(name)
     rate = _rate(rate)
-    if "intro" in song:
-        raise RowSynthError(f"songs.{name}: a song with an intro cannot be built")
     source = source_hash(project, name, rate)
+    out_dir = Path(out_dir)
     write = _build_layers if "layers" in song else _build_loop
     try:
-        return write(song, name, Path(out_dir), rate, source)
+        if "intro" not in song:
+            return write(song, name, out_dir, rate, source, [])
+        intro = render_intro(song, rate)
+        file = f"{name}.intro.wav"
+        entry = write(song, name, out_dir, rate, source, [(file, (intro["left"], intro["right"]))])
+        entry["intro"] = {"file": file, "in_samples": intro["in_samples"], "walk_samples": intro["walk_samples"]}
+        return entry
     except RowSynthError as error:
         raise RowSynthError(f"songs.{name}: {error}") from None
 

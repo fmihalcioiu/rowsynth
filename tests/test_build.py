@@ -12,7 +12,7 @@ import numpy as np
 
 from rowsynth.build import build, build_song, manifest_path, source_hash, stale
 from rowsynth.errors import RowSynthError
-from rowsynth.layers import group_mix, mix_version, render_groups, shared_scale
+from rowsynth.layers import group_mix, mix_version, render_groups, render_intro, shared_scale
 from rowsynth.project import Project
 from rowsynth.song import render_loop
 from rowsynth.wav import load_wav
@@ -98,6 +98,12 @@ MARCH = {
 GROUP_FILES = ["march-beat.wav", "march-low-0.wav", "march-low-2.wav", "march-top-0.wav", "march-top-2.wav"]
 AHEAD = "march.full.2.wav"
 
+# What only an intro plays: the lead, the bass and the first of the drums together, four times over. It is louder
+# than the loop of the tune. With the alto on the note of the lead it is louder than any group of the march, and
+# than its version that is mixed ahead.
+STAMP = {"lead": "o4 l8 a a a a", "bass": "o2 l8 a a a a", "kit": "l8 k k k k"}
+STAMP_OF_FOUR = {**STAMP, "alto": "o4 l8 a a a a"}
+
 
 def project_of(**songs: dict) -> Project:
     """A project of those songs, in that order, with the instruments above."""
@@ -108,6 +114,18 @@ def march(*left_out: str, **layers: object) -> dict:
     """The march with other layers: its own without the keys named first, and with those given by name over them."""
     kept = {key: value for key, value in MARCH["layers"].items() if key not in left_out}
     return {**MARCH, "layers": {**kept, **layers}}
+
+
+def led_in(song: dict, stamp: dict | None = None) -> dict:
+    """The tune or the march with an intro: one pattern of 8 rows, and half a second of tail after it.
+
+    A bar of either is 0.8 seconds, and the 1.5 seconds of a tail that is left out do not fit in one. With
+    `stamp` the intro is that pattern, which the loop does not play. With none it is the pattern "b" of the song
+    itself, and is quieter than the loop and than the loudest of its groups.
+    """
+    if stamp is None:
+        return {**song, "intro": {"order": ["b"], "tail": 0.5}}
+    return {**song, "patterns": {**song["patterns"], "in": stamp}, "intro": {"order": ["in"], "tail": 0.5}}
 
 
 def loudest(sides: list) -> float:
@@ -127,6 +145,10 @@ class BuildCase(unittest.TestCase):
     def files(self, folder: Path | None = None) -> list[str]:
         """The names of the files in a folder, which is the one built into when none is given."""
         return sorted(path.name for path in (folder or self.out).iterdir())
+
+    def built(self, song: dict = MARCH, rate: int = RATE, folder: Path | None = None) -> dict:
+        """The entry of a song built under the name of the march, into the folder of the test when none is given."""
+        return build_song(project_of(march=song), "march", folder or self.out, rate)
 
     def refused(self, call, *args: object, **keys: object) -> str:
         """What the error says when a call is refused, which is before any note is played."""
@@ -210,14 +232,6 @@ class BuildSongTest(BuildCase):
                          build_song(self.project, "hush", self.out / "again", 8000))
         self.assertEqual(load_wav(self.out / "hush.wav")[1], 8000)
 
-    def test_refuses_a_song_with_an_intro_whether_or_not_it_has_layers(self):
-        intro = {"order": ["a"]}
-        for song in (TUNE, MARCH):
-            project = project_of(hush=HUSH, march={**song, "intro": intro})
-            self.assertEqual(self.refused(build_song, project, "march", self.out, RATE),
-                             "songs.march: a song with an intro cannot be built", "layers" in song)
-        self.assertFalse(self.out.exists())
-
     def test_song_that_cannot_be_rendered_is_refused_with_its_name_in_front(self):
         unread = copy.deepcopy(TUNE)
         unread["patterns"]["b"]["lead"] = "c ? d"
@@ -229,10 +243,6 @@ class BuildSongTest(BuildCase):
 
 
 class BuildLayeredSongTest(BuildCase):
-    def built(self, song: dict = MARCH, rate: int = RATE, folder: Path | None = None) -> dict:
-        """The entry of a song built under the name of the march, into the folder of the test when none is given."""
-        return build_song(project_of(march=song), "march", folder or self.out, rate)
-
     def read(self, file: str) -> list[np.ndarray]:
         """The two sides of a built file, once it is known to be in stereo, a loop long, at the rate of the tests."""
         sides, rate = load_wav(self.out / file)
@@ -449,6 +459,203 @@ class BuildLayeredSongTest(BuildCase):
         self.assertEqual(str(caught.exception), "songs.march: version 'full': group 'gone' was not rendered")
 
 
+class BuildIntroTest(BuildCase):
+    def rendered(self, data: dict) -> tuple[dict, tuple[np.ndarray, np.ndarray]]:
+        """A song as the project gives it, and the two sides of its intro as `render_intro` gives them."""
+        song = project_of(march=data).song("march")
+        intro = render_intro(song, RATE)
+        return song, (intro["left"], intro["right"])
+
+    def loop(self, song: dict) -> tuple[np.ndarray, np.ndarray]:
+        """The two sides of the loop of a song without layers, as it is rendered."""
+        loop = render_loop(song, RATE)
+        return loop["left"], loop["right"]
+
+    def written(self, file: str, wanted: tuple, scale: float) -> list[np.ndarray]:
+        """The two sides of a built file, once they are known to be those given times a scale, in stereo."""
+        sides, rate = load_wav(self.out / file)
+        self.assertEqual((len(sides), rate), (2, RATE), file)
+        for side, was in zip(sides, wanted):
+            self.assertEqual(len(side), len(was), file)
+            np.testing.assert_allclose(side, was.astype(np.float64) * scale, rtol=0, atol=0.51 * STEP, err_msg=file)
+        return sides
+
+    def test_song_with_an_intro_has_one_file_more_which_is_the_intro_as_it_is_rendered(self):
+        data = led_in(TUNE, STAMP)
+        self.built(data)
+        self.assertEqual(self.files(), ["march.intro.wav", "march.wav"])
+        song, intro = self.rendered(data)
+        sides = self.written("march.intro.wav", intro, PEAK / loudest([*intro, *self.loop(song)]))
+        # Its pattern is 8 rows of 400 samples, and it runs on for half a second after them, which is 4000 more.
+        self.assertEqual([len(side) for side in sides], [7200, 7200])
+        # What the pattern is still sounding when it ends is in the file, after it.
+        self.assertTrue(all(side[3200:].any() for side in sides))
+
+    def test_intro_and_loop_are_written_at_the_one_scale_of_the_loudest_sample_of_the_two(self):
+        data = led_in(TUNE, STAMP)
+        entry = self.built(data)
+        song, intro = self.rendered(data)
+        loop = self.loop(song)
+        # The intro is the louder of the two. What has it 1 dB under full scale is the scale of the loop as well,
+        # which is as far under the intro in its file as it was rendered.
+        self.assertGreater(loudest(intro), 1.02 * loudest(loop))
+        scale = PEAK / loudest(intro)
+        self.assertAlmostEqual(loudest(self.written("march.intro.wav", intro, scale)), PEAK, delta=STEP)
+        self.assertAlmostEqual(loudest(self.written("march.wav", loop, scale)), scale * loudest(loop), delta=STEP)
+        # The gain is 1 over that scale, and either file times the gain is at the level of the song.
+        self.assertEqual(entry["gain"], 1.017109)
+        for file, wanted in (("march.intro.wav", intro), ("march.wav", loop)):
+            for side, was in zip(load_wav(self.out / file)[0], wanted):
+                np.testing.assert_allclose(side.astype(np.float64) * entry["gain"], was, rtol=0, atol=STEP)
+
+    def test_intro_that_is_quieter_than_the_loop_leaves_the_loop_and_the_gain_as_they_are_without_it(self):
+        data = led_in(TUNE)
+        entry = self.built(data)
+        apart = self.out.parent / "apart"
+        self.assertEqual(entry["gain"], self.built(TUNE, folder=apart)["gain"])
+        self.assertEqual((self.out / "march.wav").read_bytes(), (apart / "march.wav").read_bytes())
+        # The scale is the one the loop has on its own, and the intro is under the loop by as much as it was.
+        song, intro = self.rendered(data)
+        sides = self.written("march.intro.wav", intro, PEAK / loudest(self.loop(song)))
+        self.assertLess(loudest(sides), 0.85 * PEAK)
+
+    def test_entry_has_the_intro_last_with_its_file_its_samples_and_the_sample_the_loop_begins_at(self):
+        entry = self.built(led_in(TUNE, STAMP))
+        self.assertEqual(list(entry), ["loop_samples", "gain", "source", "file", "intro"])
+        self.assertEqual((entry["loop_samples"], entry["file"]), (6400, "march.wav"))
+        self.assertEqual(entry["source"], source_hash(project_of(march=led_in(TUNE, STAMP)), "march", RATE))
+        self.assertEqual(list(entry["intro"]), ["file", "in_samples", "walk_samples"])
+        self.assertEqual(entry["intro"], {"file": "march.intro.wav", "in_samples": 7200, "walk_samples": 3200})
+        self.assertEqual(json.loads(json.dumps(entry)), entry)
+
+    def test_known_16_bit_values_of_an_intro_and_its_loop_at_44100_and_48000_hz(self):
+        # For each rate: the gain, the samples of the intro and the sample of it the loop begins at; then for the
+        # intro and for the loop, where the samples below are taken, the left and the right there, and the loudest
+        # sample of each side.
+        cases = ((44100, 1.047096, (39690, 17640),
+                  ((0, 1, 500, 17639, 17640, 20000, 39689), (169, 583, -3998, -2078, 2389, -1126, 0),
+                   (121, 294, -2931, 2538, 3433, -270, 0), [29204, 13712]),
+                  ((0, 1, 500, 4410, 17640, 17641, 30000, 35279),
+                   (-625, 4156, -2887, 2461, -2746, -2302, -4783, -790),
+                   (-675, 549, 4434, -2460, 1107, 1294, 2728, 1295), [28459, 13506])),
+                 (48000, 1.049289, (43200, 19200),
+                  ((0, 1, 500, 19199, 19200, 21000, 43199), (155, 536, -5262, -2070, 5065, -1527, 0),
+                   (111, 270, -5059, 2534, 4094, -369, 0), [29204, 13722]),
+                  ((0, 1, 500, 4800, 19200, 19201, 30000, 38399),
+                   (1543, 4822, -3866, 2436, -2750, -2343, 5050, -785),
+                   (-160, 698, 4058, -2466, 1096, 1269, 4262, 1293), [28443, 13524])))
+        for rate, gain, ends, *held in cases:
+            folder = self.out / str(rate)
+            entry = self.built(led_in(TUNE, STAMP), rate, folder)
+            self.assertEqual((entry["gain"], entry["intro"]["in_samples"], entry["intro"]["walk_samples"]),
+                             (gain, *ends), rate)
+            lengths = (ends[0], entry["loop_samples"])
+            for file, length, (spots, left, right, peaks) in zip(("march.intro.wav", "march.wav"), lengths, held):
+                sides, read_rate = load_wav(folder / file)
+                self.assertEqual(read_rate, rate, file)
+                values = [np.rint(side.astype(np.float64) * 32767).astype(int) for side in sides]
+                self.assertEqual([len(side) for side in values], [length] * 2, (rate, file))
+                self.assertEqual([tuple(side[list(spots)].tolist()) for side in values], [left, right], (rate, file))
+                # 29204 steps of 32767 are 1 dB under full scale. The intro is there, and the loop is under it.
+                self.assertEqual([int(np.abs(side).max()) for side in values], peaks, (rate, file))
+
+    def test_silence_is_written_as_it_is_and_the_scale_goes_by_what_sounds_beside_it(self):
+        # Nothing sounds, in the loop or before it: four rows, and half a second after them in the intro.
+        entry = self.built({**HUSH, "intro": {"order": ["p"], "tail": 0.5}})
+        self.assertEqual((entry["gain"], entry["intro"]["in_samples"], entry["intro"]["walk_samples"]),
+                         (1.0, 5600, 1600))
+        for file, length in (("march.wav", 1600), ("march.intro.wav", 5600)):
+            sides, _ = load_wav(self.out / file)
+            self.assertEqual([len(side) for side in sides], [length] * 2, file)
+            self.assertFalse(sides[0].any() or sides[1].any(), file)
+        # Only the intro sounds. It is 1 dB under full scale, and the loop is silence still.
+        woken = {**HUSH, "patterns": {**HUSH["patterns"], "in": {"lead": "o4 c8 e8", "bass": "o2 c4"}},
+                 "intro": {"order": ["in"], "tail": 0.3, "fade": 0}}
+        self.assertEqual(self.built(woken)["gain"], 0.584231)
+        self.assertAlmostEqual(loudest(load_wav(self.out / "march.intro.wav")[0]), PEAK, delta=STEP)
+        self.assertFalse(any(side.any() for side in load_wav(self.out / "march.wav")[0]))
+
+    def test_layered_song_with_an_intro_has_its_file_beside_those_of_its_groups_and_its_entry_last(self):
+        entry = self.built(led_in(MARCH, STAMP_OF_FOUR))
+        self.assertEqual(self.files(), [*GROUP_FILES, AHEAD, "march.intro.wav"])
+        self.assertEqual(list(entry), ["loop_samples", "bar_samples", "gain", "source", "keys", "groups", "versions",
+                                       "premixed", "intro"])
+        self.assertEqual(entry["intro"], {"file": "march.intro.wav", "in_samples": 7200, "walk_samples": 3200})
+        # It comes last with no version mixed ahead as well.
+        bare = self.out.parent / "bare"
+        entry = self.built(led_in(march("premix"), STAMP_OF_FOUR), folder=bare)
+        self.assertEqual(list(entry)[-2:], ["versions", "intro"])
+        self.assertEqual(self.files(bare), [*GROUP_FILES, "march.intro.wav"])
+
+    def test_files_of_the_groups_and_the_intro_are_at_the_one_scale_of_the_loudest_sample_among_them(self):
+        data = led_in(MARCH, STAMP_OF_FOUR)
+        entry = self.built(data)
+        song, intro = self.rendered(data)
+        mixed = render_groups(song, RATE)
+        # The intro is louder than the loudest of the groups. What has it 1 dB under full scale is the scale of
+        # every file of the groups, and none of them is as loud as that now.
+        among_groups = PEAK / shared_scale(mixed)
+        self.assertGreater(loudest(intro), 1.15 * among_groups)
+        scale = PEAK / loudest(intro)
+        self.assertAlmostEqual(loudest(self.written("march.intro.wav", intro, scale)), PEAK, delta=STEP)
+        peaks = {}
+        for group, named in entry["groups"].items():
+            for key in entry["keys"]:
+                file = named["file"] if "file" in named else named["files"][str(key)]
+                peaks[file] = loudest(self.written(file, group_mix(mixed["groups"][group], key), scale))
+        self.assertEqual(sorted(peaks), GROUP_FILES)
+        self.assertAlmostEqual(max(peaks.values()), scale * among_groups, delta=STEP)
+        self.assertLess(max(peaks.values()), 0.85 * PEAK)
+        self.assertEqual(entry["gain"], 1.229206)
+
+    def test_version_mixed_ahead_keeps_its_own_scale_and_is_brought_to_the_level_that_is_shared_with_the_intro(self):
+        data = led_in(MARCH, STAMP_OF_FOUR)
+        entry = self.built(data)
+        apart = self.out.parent / "apart"
+        without = self.built(MARCH, folder=apart)
+        # Its file is the one the march has without an intro. The groups are lower beside this intro than they
+        # were, so what brings the file to their level is less.
+        self.assertEqual((self.out / AHEAD).read_bytes(), (apart / AHEAD).read_bytes())
+        self.assertEqual(without["premixed"], [{"id": "full/2", "file": AHEAD, "scale": 1.041125}])
+        self.assertEqual(entry["premixed"], [{"id": "full/2", "file": AHEAD, "scale": 0.860905}])
+        song, intro = self.rendered(data)
+        scale = PEAK / loudest(intro)
+        for side, wanted in zip(load_wav(self.out / AHEAD)[0], mix_version(render_groups(song, RATE), song, "full", 2)):
+            np.testing.assert_allclose(side.astype(np.float64) * 0.860905, wanted.astype(np.float64) * scale,
+                                       rtol=0, atol=STEP)
+
+    def test_intro_that_is_quieter_than_the_groups_leaves_their_files_and_their_entry_as_they_are_without_it(self):
+        data = led_in(MARCH)
+        entry = self.built(data)
+        apart = self.out.parent / "apart"
+        without = self.built(MARCH, folder=apart)
+        for file in (*GROUP_FILES, AHEAD):
+            self.assertEqual((self.out / file).read_bytes(), (apart / file).read_bytes(), file)
+        # The source is that of another song. The rest of the entry is what it was, with the intro after it.
+        self.assertEqual(list(entry), [*without, "intro"])
+        for key in without:
+            if key != "source":
+                self.assertEqual(entry[key], without[key], key)
+        # The scale is the one the groups share on their own, and the intro is under the loudest of them.
+        song, intro = self.rendered(data)
+        sides = self.written("march.intro.wav", intro, shared_scale(render_groups(song, RATE)))
+        self.assertLess(loudest(sides), 0.9 * PEAK)
+
+    def test_what_an_intro_is_refused_for_comes_with_the_name_of_the_song_in_front_and_nothing_is_written(self):
+        for song in (TUNE, MARCH):
+            layered = "layers" in song
+            # A fade that is longer than its tail is refused before a note is played.
+            self.assertEqual(self.refused(self.built, {**song, "intro": {"order": ["b"], "tail": 0.5, "fade": 0.6}}),
+                             "songs.march: intro.fade: 0.6 seconds is longer than the tail, which is 0.5", layered)
+            # A tail that is left out is 1.5 seconds, and a bar of the song is 0.8. How many samples the silent
+            # bar comes to is known once the intro has been played.
+            with self.assertRaises(RowSynthError) as caught:
+                self.built({**song, "intro": {"order": ["b"]}})
+            self.assertEqual(str(caught.exception), "songs.march: intro.tail: 1.5 seconds is 12000 samples at a "
+                             "rate of 8000, and the silent bar after the intro has 6400", layered)
+            self.assertFalse(self.out.exists(), layered)
+
+
 class BuildTest(BuildCase):
     def test_builds_every_song_in_the_order_of_the_project_and_gives_the_manifest(self):
         manifest = build(self.project, self.out, RATE)
@@ -468,6 +675,16 @@ class BuildTest(BuildCase):
         self.assertEqual(self.files(), ["hush.wav", *GROUP_FILES, AHEAD, "music.json"])
         self.assertEqual(manifest["songs"]["march"], build_song(project, "march", self.out.parent / "apart", RATE))
         # The keys that name the files of a group are strings before the manifest is written, as they are after.
+        self.assertEqual(json.loads((self.out / "music.json").read_text(encoding="utf-8")), manifest)
+        self.assertEqual(stale(project, manifest), [])
+
+    def test_song_with_an_intro_is_built_with_it_and_its_entry_reads_back_from_the_manifest_as_it_was(self):
+        project = project_of(hush=HUSH, tune=led_in(TUNE, STAMP))
+        manifest = build(project, self.out, RATE)
+        self.assertEqual(self.files(), ["hush.wav", "music.json", "tune.intro.wav", "tune.wav"])
+        self.assertEqual(manifest["songs"]["tune"]["intro"],
+                         {"file": "tune.intro.wav", "in_samples": 7200, "walk_samples": 3200})
+        self.assertNotIn("intro", manifest["songs"]["hush"])
         self.assertEqual(json.loads((self.out / "music.json").read_text(encoding="utf-8")), manifest)
         self.assertEqual(stale(project, manifest), [])
 
