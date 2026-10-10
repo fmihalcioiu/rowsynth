@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import shutil
 import tempfile
 import unittest
 from pathlib import Path
@@ -17,8 +18,11 @@ from rowsynth.project import Project
 from rowsynth.song import render_loop
 from rowsynth.wav import load_wav
 
-# With three ticks to a row, a row is 400 samples at 8000 Hz.
+# With three ticks to a row, a row is 400 samples at 8000 Hz. Opus takes this rate.
 RATE = 8000
+
+# The tests that run ffmpeg are left out where there is none.
+with_ffmpeg = unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not on the path")
 
 # One step of a 16-bit file. A sample read back from a file is within half a step of the sample that was written.
 STEP = 1 / 32767
@@ -146,9 +150,9 @@ class BuildCase(unittest.TestCase):
         """The names of the files in a folder, which is the one built into when none is given."""
         return sorted(path.name for path in (folder or self.out).iterdir())
 
-    def built(self, song: dict = MARCH, rate: int = RATE, folder: Path | None = None) -> dict:
+    def built(self, song: dict = MARCH, rate: int = RATE, folder: Path | None = None, fmt: str = "wav") -> dict:
         """The entry of a song built under the name of the march, into the folder of the test when none is given."""
-        return build_song(project_of(march=song), "march", folder or self.out, rate)
+        return build_song(project_of(march=song), "march", folder or self.out, rate, fmt)
 
     def refused(self, call, *args: object, **keys: object) -> str:
         """What the error says when a call is refused, which is before any note is played."""
@@ -659,8 +663,9 @@ class BuildIntroTest(BuildCase):
 class BuildTest(BuildCase):
     def test_builds_every_song_in_the_order_of_the_project_and_gives_the_manifest(self):
         manifest = build(self.project, self.out, RATE)
-        self.assertEqual(list(manifest), ["rate", "songs"])
-        self.assertEqual(manifest["rate"], RATE)
+        self.assertEqual(list(manifest), ["rate", "format", "songs"])
+        # The format left out is WAV.
+        self.assertEqual((manifest["rate"], manifest["format"]), (RATE, "wav"))
         self.assertEqual(list(manifest["songs"]), ["tune", "drone", "hush"])
         self.assertEqual(self.files(), ["drone.wav", "hush.wav", "music.json", "tune.wav"])
         # Each song is written as it is on its own, and its entry is the one it has on its own.
@@ -692,12 +697,13 @@ class BuildTest(BuildCase):
         # The rate left out is 48000, at which four rows of three ticks are 9600 samples.
         manifest = build(self.project, self.out, songs=["hush"])
         source = source_hash(self.project, "hush", 48000)
-        self.assertEqual(manifest, {"rate": 48000, "songs": {"hush": {"loop_samples": 9600, "gain": 1.0,
-                                                                      "source": source, "file": "hush.wav"}}})
+        self.assertEqual(manifest, {"rate": 48000, "format": "wav",
+                                    "songs": {"hush": {"loop_samples": 9600, "gain": 1.0, "source": source,
+                                                       "file": "hush.wav"}}})
         self.assertEqual((self.out / "music.json").read_bytes().decode("utf-8"),
-                         '{\n  "rate": 48000,\n  "songs": {\n    "hush": {\n      "loop_samples": 9600,\n'
-                         f'      "gain": 1.0,\n      "source": "{source}",\n      "file": "hush.wav"\n'
-                         '    }\n  }\n}\n')
+                         '{\n  "rate": 48000,\n  "format": "wav",\n  "songs": {\n    "hush": {\n'
+                         f'      "loop_samples": 9600,\n      "gain": 1.0,\n      "source": "{source}",\n'
+                         '      "file": "hush.wav"\n    }\n  }\n}\n')
 
     def test_manifest_path_is_where_a_build_into_the_folder_writes_its_manifest(self):
         for folder in (self.out, str(self.out)):
@@ -711,7 +717,8 @@ class BuildTest(BuildCase):
         self.assertEqual(list(manifest["songs"]), ["hush", "tune"])
         self.assertEqual(self.files(), ["hush.wav", "music.json", "tune.wav"])
         # With none named, the manifest is all there is to write.
-        self.assertEqual(build(self.project, self.out / "none", RATE, songs=[]), {"rate": RATE, "songs": {}})
+        self.assertEqual(build(self.project, self.out / "none", RATE, songs=[]),
+                         {"rate": RATE, "format": "wav", "songs": {}})
         self.assertEqual(self.files(self.out / "none"), ["music.json"])
 
     def test_makes_the_folder_when_it_is_missing_and_leaves_alone_what_it_did_not_write(self):
@@ -737,6 +744,104 @@ class BuildTest(BuildCase):
             build(self.project, self.out, RATE, songs=["hush", "march", "drone"])
         self.assertEqual(str(caught.exception), "no song named 'march'")
         self.assertEqual(self.files(), ["hush.wav"])
+
+
+class BuildFormatTest(BuildCase):
+    def ogg(self, file: str, rate: int = RATE) -> None:
+        """Holds a built file to being an Ogg file of Opus, in stereo, made from samples at a rate."""
+        raw = (self.out / file).read_bytes()
+        # The first page of an Ogg file is 27 bytes and a table of one entry, and then the head of the Opus stream.
+        # Its tenth byte is how many sides it has, and the four from its thirteenth are the rate, low byte first.
+        self.assertEqual((raw[:4], raw[28:36], raw[37], int.from_bytes(raw[40:44], "little")),
+                         (b"OggS", b"OpusHead", 2, rate), file)
+
+    @with_ffmpeg
+    def test_plain_song_as_opus_is_one_ogg_file_with_that_ending_in_the_folder_and_in_its_entry(self):
+        entry = build_song(self.project, "drone", self.out, RATE, "opus")
+        self.assertEqual(self.files(), ["drone.opus"])
+        self.ogg("drone.opus")
+        # The rest of the entry is what it is for a WAV file: the format changes no sample that goes into a file.
+        apart = self.out.parent / "apart"
+        self.assertEqual(entry, {**build_song(self.project, "drone", apart, RATE), "file": "drone.opus"})
+        self.assertEqual(self.files(apart), ["drone.wav"])
+
+    @with_ffmpeg
+    def test_layered_song_as_opus_has_that_ending_on_the_files_of_its_groups_and_of_its_version_mixed_ahead(self):
+        entry = self.built(fmt="opus")
+        self.assertEqual(self.files(), ["march-beat.opus", "march-low-0.opus", "march-low-2.opus", "march-top-0.opus",
+                                        "march-top-2.opus", "march.full.2.opus"])
+        for file in self.files():
+            self.ogg(file)
+        self.assertEqual(entry["groups"], {"top": {"files": {"0": "march-top-0.opus", "2": "march-top-2.opus"}},
+                                           "low": {"files": {"0": "march-low-0.opus", "2": "march-low-2.opus"}},
+                                           "beat": {"file": "march-beat.opus"}})
+        self.assertEqual(entry["premixed"], [{"id": "full/2", "file": "march.full.2.opus", "scale": 1.041125}])
+
+    @with_ffmpeg
+    def test_song_with_an_intro_as_opus_has_that_ending_on_its_intro_and_on_its_loop(self):
+        entry = self.built(led_in(TUNE), fmt="opus")
+        self.assertEqual(self.files(), ["march.intro.opus", "march.opus"])
+        for file in self.files():
+            self.ogg(file)
+        self.assertEqual((entry["file"], entry["intro"]["file"]), ("march.opus", "march.intro.opus"))
+
+    @with_ffmpeg
+    def test_building_twice_as_opus_gives_the_same_bytes_and_other_bytes_for_another_song(self):
+        again = self.out.parent / "again"
+        self.assertEqual(build(self.project, self.out, RATE, "opus"), build(self.project, again, RATE, "opus"))
+        self.assertEqual(self.files(), ["drone.opus", "hush.opus", "music.json", "tune.opus"])
+        for file in self.files():
+            self.assertEqual((self.out / file).read_bytes(), (again / file).read_bytes(), file)
+        self.assertNotEqual((self.out / "drone.opus").read_bytes(), (self.out / "tune.opus").read_bytes())
+
+    @with_ffmpeg
+    def test_manifest_says_the_format_and_names_the_files_by_it_and_opus_takes_the_rate_that_is_left_out(self):
+        manifest = build(self.project, self.out, fmt="opus", songs=["hush", "drone"])
+        self.assertEqual(list(manifest), ["rate", "format", "songs"])
+        self.assertEqual((manifest["rate"], manifest["format"]), (48000, "opus"))
+        self.assertEqual([entry["file"] for entry in manifest["songs"].values()], ["hush.opus", "drone.opus"])
+        self.assertEqual(self.files(), ["drone.opus", "hush.opus", "music.json"])
+        for file in ("drone.opus", "hush.opus"):
+            self.ogg(file, 48000)
+        self.assertEqual(json.loads((self.out / "music.json").read_text(encoding="utf-8")), manifest)
+        # The format is no part of what a song is made from: the songs are those of the project still.
+        self.assertEqual(stale(self.project, manifest), [])
+
+    def test_wav_by_name_is_the_build_with_the_format_left_out_and_looks_for_no_ffmpeg(self):
+        named = self.out.parent / "named"
+        with mock.patch("shutil.which", return_value=None) as which:
+            self.assertEqual(build(self.project, named, RATE, "wav"), build(self.project, self.out, RATE))
+        which.assert_not_called()
+        self.assertEqual(self.files(named), ["drone.wav", "hush.wav", "music.json", "tune.wav"])
+        for file in self.files(named):
+            self.assertEqual((named / file).read_bytes(), (self.out / file).read_bytes(), file)
+
+    def test_refuses_a_format_a_build_is_not_written_in_before_a_note_is_played_or_the_folder_is_made(self):
+        # MP3 is a format of the listen page, and is none of a build.
+        for fmt in ("mp3", "flac", "WAV", "", None):
+            said = f"format: a build is written as wav or opus, not {fmt!r}"
+            self.assertEqual(self.refused(build, self.project, self.out, RATE, fmt), said)
+            self.assertEqual(self.refused(build_song, self.project, "tune", self.out, RATE, fmt), said)
+        self.assertFalse(self.out.exists())
+
+    def test_refuses_opus_at_a_rate_it_does_not_take_before_a_note_is_played_or_the_folder_is_made(self):
+        # No ffmpeg is needed to know it.
+        with mock.patch("shutil.which", return_value=None):
+            for rate in (44100, 11025.0):
+                said = f"opus takes a rate of 8000, 12000, 16000, 24000 or 48000, got {int(rate)}"
+                self.assertEqual(self.refused(build, self.project, self.out, rate, "opus"), said)
+                self.assertEqual(self.refused(build_song, self.project, "tune", self.out, rate, "opus"), said)
+        self.assertFalse(self.out.exists())
+
+    def test_opus_with_no_ffmpeg_on_the_path_is_refused_as_the_first_file_is_to_be_written_and_none_is(self):
+        with mock.patch("shutil.which", return_value=None):
+            with self.assertRaises(RowSynthError) as caught:
+                build(self.project, self.out, RATE, "opus")
+        # What `save_audio` says comes through, behind the song that was to be written.
+        self.assertEqual(str(caught.exception),
+                         "songs.tune: ffmpeg is needed to write opus, and none is found on the path")
+        # The folder is made by then, and has no file of a song in it and no manifest.
+        self.assertEqual(self.files(), [])
 
 
 class SourceHashTest(BuildCase):

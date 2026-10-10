@@ -29,6 +29,21 @@ _ENCODERS = {
 _NO_TAGS = ("-map_metadata", "-1", "-fflags", "+bitexact", "-flags:a", "+bitexact")
 
 
+def unwritable(fmt: str, rate: int) -> str | None:
+    """Why no file of the format `fmt` can be written at `rate`, or None when one can.
+
+    It goes by the format and the rate alone, so it can be asked before there are samples to write: a format
+    that is none of `FORMATS` cannot be written at all, and Opus only at the rates it takes. Whether ffmpeg
+    is there to make the file is not looked into.
+    """
+    if fmt not in FORMATS:
+        return f"unknown format {fmt!r}: a file is written as {', '.join(FORMATS[:-1])} or {FORMATS[-1]}"
+    if fmt == "opus" and rate not in _OPUS_RATES:
+        rates = f"{', '.join(map(str, _OPUS_RATES[:-1]))} or {_OPUS_RATES[-1]}"
+        return f"opus takes a rate of {rates}, got {rate!r}"
+    return None
+
+
 def save_audio(path: str | Path, samples: np.ndarray | list | tuple, rate: int, fmt: str = "wav") -> None:
     """Write one channel (mono) or a pair (stereo) as a file of the format `fmt`.
 
@@ -37,18 +52,16 @@ def save_audio(path: str | Path, samples: np.ndarray | list | tuple, rate: int, 
     gone again whatever happens. The file is written at `path` as it is given, whatever its ending, and
     nothing is written there unless ffmpeg has made all of it.
 
-    Refused: a format that is none of the three, a rate that Opus does not take, a format that needs ffmpeg
-    when none is found, samples or a rate that `save_wav` refuses, and a run of ffmpeg that ends in an error,
-    with what it printed.
+    Refused: a format at a rate that `unwritable` has a reason against, which is a format that is none of the
+    three and a rate that Opus does not take, a format that needs ffmpeg when none is found, samples or a
+    rate that `save_wav` refuses, and a run of ffmpeg that ends in an error, with what it printed.
     """
-    if fmt not in FORMATS:
-        raise RowSynthError(f"unknown format {fmt!r}: a file is written as {', '.join(FORMATS[:-1])} or {FORMATS[-1]}")
+    why = unwritable(fmt, rate)
+    if why is not None:
+        raise RowSynthError(why)
     if fmt == "wav":
         save_wav(path, samples, rate)
         return
-    if fmt == "opus" and rate not in _OPUS_RATES:
-        rates = f"{', '.join(map(str, _OPUS_RATES[:-1]))} or {_OPUS_RATES[-1]}"
-        raise RowSynthError(f"opus takes a rate of {rates}, got {rate!r}")
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
         raise RowSynthError(f"ffmpeg is needed to write {fmt}, and none is found on the path")

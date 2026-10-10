@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..build import BUILD_RATE, build, manifest_path
+from ..build import BUILD_FORMATS, BUILD_RATE, build, manifest_path
 from . import emit, load_project
 
 NAME = "build"
@@ -11,7 +11,7 @@ HELP = "write songs of a project file into a folder as the files a player loads,
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
-    """Give the parser the project, the songs of it to build, the folder they go in and the rate to render at."""
+    """Give the parser the project, the songs to build, their folder, the rate to render at and the format to write."""
     parser.add_argument("file", metavar="FILE", help="the project file")
     parser.add_argument("names", metavar="NAME", nargs="*",
                         help="a song to build (default: every song of the project)")
@@ -19,13 +19,16 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help="the folder to write into: the files of each song, and the manifest beside them")
     parser.add_argument("--rate", metavar="N", type=int, default=BUILD_RATE,
                         help="the samples a second to render at (default %(default)s)")
+    parser.add_argument("--format", choices=BUILD_FORMATS, default="wav",
+                        help="the format of the files: opus is made by ffmpeg, which has to be on the path "
+                             "(default %(default)s)")
 
 
 def run(args: argparse.Namespace) -> int:
     """Build the songs that are named, or every song of the project in the file, print what was built, and return 0."""
     project = load_project(args.file)
     # With no name typed the list is empty, and to `build` an empty list is no songs at all.
-    manifest = build(project, args.out, args.rate, args.names or None)
+    manifest = build(project, args.out, args.rate, args.format, args.names or None)
     emit({"folder": args.out, "manifest": str(manifest_path(args.out)), "rate": manifest["rate"],
-          "songs": manifest["songs"]})
+          "format": manifest["format"], "songs": manifest["songs"]})
     return 0

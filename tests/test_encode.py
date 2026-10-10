@@ -10,7 +10,7 @@ from unittest import mock
 
 import numpy as np
 
-from rowsynth.encode import FORMATS, save_audio
+from rowsynth.encode import FORMATS, save_audio, unwritable
 from rowsynth.errors import RowSynthError
 from rowsynth.wav import load_wav, save_wav
 
@@ -194,6 +194,23 @@ class RefusalTest(EncodeCase):
         self.assertEqual(said, f"{path}: ffmpeg ended with code 8: Unknown encoder 'libopus'\nEncoder not found")
         self.assertEqual([folder.parent for folder in folders], [temporary])
         self.assertEqual(list(temporary.iterdir()), [])
+
+
+class UnwritableTest(EncodeCase):
+    def test_wav_and_mp3_at_any_rate_and_opus_at_a_rate_it_takes_have_nothing_against_them_ffmpeg_or_none(self) -> None:
+        with mock.patch("shutil.which", return_value=None) as which:
+            for fmt, rates in (("wav", (8000, 11025, 44100)), ("mp3", (8000, 11025, 44100)),
+                               ("opus", (8000, 12000, 16000, 24000, 48000))):
+                for rate in rates:
+                    self.assertIsNone(unwritable(fmt, rate), (fmt, rate))
+        which.assert_not_called()
+
+    def test_an_unknown_format_and_opus_at_another_rate_have_the_reason_save_audio_refuses_them_with(self) -> None:
+        for fmt, rate, why in (("flac", RATE, "unknown format 'flac': a file is written as wav, mp3 or opus"),
+                               ("flac", 44100, "unknown format 'flac': a file is written as wav, mp3 or opus"),
+                               ("opus", 44100, "opus takes a rate of 8000, 12000, 16000, 24000 or 48000, got 44100")):
+            self.assertEqual(unwritable(fmt, rate), why)
+            self.assertEqual(self.refused(self.folder / "tone", tone(), rate, fmt), why)
 
 
 if __name__ == "__main__":

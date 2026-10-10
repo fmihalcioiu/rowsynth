@@ -9,16 +9,20 @@ from pathlib import Path
 import numpy as np
 
 from . import __version__
+from .encode import save_audio, unwritable
 from .errors import RowSynthError
 from .layers import bar_rows, group_mix, keyless, mix_version, render_groups, render_intro
 from .measure import _fixed
 from .note import _count
 from .project import Project
 from .song import render_loop
-from .wav import save_wav
 
 # The samples a second a build is rendered at, when no rate is asked for.
 BUILD_RATE = 48000
+
+# The formats the files of a build are written in. MP3 is not one of them: an MP3 file has silence added at
+# its ends, and a loop of one cannot go round without a gap.
+BUILD_FORMATS = ("wav", "opus")
 
 # Where the loudest sample of a song's files is brought to, in decibels against full scale.
 _PEAK_DB = -1.0
@@ -34,6 +38,20 @@ def _rate(rate: object) -> int:
     """A rate as a plain int, once it is known to be a whole number of 1 or more."""
     _count(rate, "rate", 1)
     return int(rate)
+
+
+def _writable(fmt: object, rate: int) -> None:
+    """Refuses a format that a build is not written in, and one that cannot be written at the rate."""
+    if fmt not in BUILD_FORMATS:
+        raise RowSynthError(f"format: a build is written as {' or '.join(BUILD_FORMATS)}, not {fmt!r}")
+    why = unwritable(fmt, rate)
+    if why is not None:
+        raise RowSynthError(why)
+
+
+def _file(stem: str, fmt: str) -> str:
+    """The name of a file of a build: what it is called, and the format it is written in as its ending."""
+    return f"{stem}.{fmt}"
 
 
 def source_hash(project: Project, name: str, rate: int) -> str:
@@ -55,8 +73,8 @@ def _factor(value: float) -> float:
     return _fixed(value, 6)
 
 
-def _write_level(out_dir: Path, files: list[_File], rate: int) -> float:
-    """Writes files in stereo into a folder, all at one scale, and gives the scale.
+def _write_level(out_dir: Path, files: list[_File], rate: int, fmt: str) -> float:
+    """Writes files in stereo into a folder in the format `fmt`, all at one scale, and gives the scale.
 
     The scale is what has the loudest sample of all the files at `_PEAK_DB`. Every sample of every file is
     multiplied by it, so the files are as loud beside each other as their sides were. Silence has no loudest
@@ -66,18 +84,20 @@ def _write_level(out_dir: Path, files: list[_File], rate: int) -> float:
     scale = 10 ** (_PEAK_DB / 20) / peak if peak > 0 else 1.0
     for file, sides in files:
         # Each product is worked out as a double and rounded to float32, and the file is made from the float32.
-        save_wav(out_dir / file, [(side.astype(np.float64) * scale).astype(np.float32) for side in sides], rate)
+        scaled = [(side.astype(np.float64) * scale).astype(np.float32) for side in sides]
+        save_audio(out_dir / file, scaled, rate, fmt)
     return scale
 
 
-def _build_loop(song: dict, name: str, out_dir: Path, rate: int, source: str, beside: list[_File]) -> dict:
+def _build_loop(song: dict, name: str, out_dir: Path, rate: int, fmt: str, source: str,
+                beside: list[_File]) -> dict:
     """Writes a song without layers as one loop and gives its entry in the manifest.
 
     `beside` are the files of the song that are not its loop. They are written with it, at the one scale.
     """
     loop = render_loop(song, rate)
-    file = f"{name}.wav"
-    scale = _write_level(out_dir, [(file, (loop["left"], loop["right"])), *beside], rate)
+    file = _file(name, fmt)
+    scale = _write_level(out_dir, [(file, (loop["left"], loop["right"])), *beside], rate, fmt)
     return {"loop_samples": loop["loop_samples"], "gain": _factor(1 / scale), "source": source, "file": file}
 
 
@@ -111,16 +131,17 @@ def _distinct(files: list[str]) -> None:
         seen[folded] = file
 
 
-def _layer_files(song: dict, name: str,
+def _layer_files(song: dict, name: str, fmt: str,
                  taken: list[str]) -> tuple[dict, list[tuple[str, str, int]], list[tuple[str, str, int]]]:
     """The files the layers of a song are written as, found before a note of them is played: groups, mixes, premixes.
 
     `groups` is what the manifest says of them: {group: {"file": file}} for a keyless group, which is the same in
     every key and has one file, and {group: {"files": {key: file}}} for any other, the key as a string, which is
     what it is in JSON. `mixes` has (file, group, key) for every one of those files, and `premixes` has (file,
-    version, key) for every version the song asks to have mixed ahead. `taken` are the names of the files the
-    song has besides. A song whose files would not add up to it, a premix of a version or in a key the song
-    does not have, and two files with one name, those in `taken` among them, are refused.
+    version, key) for every version the song asks to have mixed ahead. Every name ends in the format `fmt`.
+    `taken` are the names of the files the song has besides. A song whose files would not add up to it, a
+    premix of a version or in a key the song does not have, and two files with one name, those in `taken`
+    among them, are refused.
     """
     layers = song["layers"]
     keys = layers.get("keys", [0])
@@ -129,11 +150,11 @@ def _layer_files(song: dict, name: str,
     mixes = []
     for group, channels in layers["groups"].items():
         if keyless(song, channels):
-            groups[group] = {"file": f"{name}-{group}.wav"}
+            groups[group] = {"file": _file(f"{name}-{group}", fmt)}
             # The one mix of a keyless group is its mix in every key, and the first key finds it.
             mixes.append((groups[group]["file"], group, keys[0]))
         else:
-            files = [(f"{name}-{group}-{key}.wav", group, key) for key in keys]
+            files = [(_file(f"{name}-{group}-{key}", fmt), group, key) for key in keys]
             groups[group] = {"files": {str(key): file for file, _, key in files}}
             mixes += files
     premixes = []
@@ -143,27 +164,28 @@ def _layer_files(song: dict, name: str,
             raise RowSynthError(f"layers.premix[{at}]: no version named {version!r}")
         if key not in keys:
             raise RowSynthError(f"layers.premix[{at}]: key {key!r} is not one of the song's keys, {keys}")
-        premixes.append((f"{name}.{version}.{key}.wav", version, key))
+        premixes.append((_file(f"{name}.{version}.{key}", fmt), version, key))
     _distinct([*(file for file, _, _ in mixes + premixes), *taken])
     return groups, mixes, premixes
 
 
-def _build_layers(song: dict, name: str, out_dir: Path, rate: int, source: str, beside: list[_File]) -> dict:
+def _build_layers(song: dict, name: str, out_dir: Path, rate: int, fmt: str, source: str,
+                  beside: list[_File]) -> dict:
     """Writes a layered song as a file a group and key, all at one scale, and gives its entry in the manifest.
 
     `beside` are the files of the song that are not of its groups. They are written with those, at the one
     scale. A version mixed ahead is written at a scale of its own, and its entry has what brings it to theirs.
     """
-    groups, mixes, premixes = _layer_files(song, name, [file for file, _ in beside])
+    groups, mixes, premixes = _layer_files(song, name, fmt, [file for file, _ in beside])
     rendered = render_groups(song, rate)
     loop_samples = rendered["loop_samples"]
     mixed = [(file, group_mix(rendered["groups"][group], key)) for file, group, key in mixes]
-    scale = _write_level(out_dir, [*mixed, *beside], rate)
+    scale = _write_level(out_dir, [*mixed, *beside], rate, fmt)
     premixed = []
     for file, version, key in premixes:
         # The groups are added up as they were rendered. Their sum can go past the loudest of them, so it has
         # a scale of its own, and the two scales say how far its file is from theirs.
-        own = _write_level(out_dir, [(file, mix_version(rendered, song, version, key))], rate)
+        own = _write_level(out_dir, [(file, mix_version(rendered, song, version, key))], rate, fmt)
         premixed.append({"id": f"{version}/{key}", "file": file, "scale": _factor(scale / own)})
     entry = {"loop_samples": loop_samples,
              # A bar's share of the rows is its share of the samples, to the nearest sample.
@@ -175,8 +197,11 @@ def _build_layers(song: dict, name: str, out_dir: Path, rate: int, source: str, 
     return entry
 
 
-def build_song(project: Project, name: str, out_dir: str | Path, rate: int = BUILD_RATE) -> dict:
+def build_song(project: Project, name: str, out_dir: str | Path, rate: int = BUILD_RATE, fmt: str = "wav") -> dict:
     """Writes one song of a project into a folder and gives its entry in the manifest.
+
+    Every file is written by `save_audio` in the format `fmt`, "wav" or "opus", and has that as its ending, in
+    the entry as in the folder: the names below are those of a build of WAV files. Opus is made by ffmpeg.
 
     A song without layers is one loop in stereo, NAME.wav, with its loudest sample at 1 dB under full scale. Its
     entry is {"loop_samples", "gain", "source", "file"}: the samples in the loop, what the samples of the file
@@ -206,18 +231,23 @@ def build_song(project: Project, name: str, out_dir: str | Path, rate: int = BUI
     names a version or a key it does not have, and when two of its files would have one name where case does
     not count. An intro is refused when `render_intro` refuses it. What is wrong with a song is refused with
     its name in front.
+
+    A format that is neither of the two, and Opus at a rate it does not take, are refused before a note is
+    played. What `save_audio` refuses besides, which is Opus when no ffmpeg is found or when ffmpeg ends in an
+    error, is refused as a file is to be written, and has the name of the song in front as well.
     """
     song = project.song(name)
     rate = _rate(rate)
+    _writable(fmt, rate)
     source = source_hash(project, name, rate)
     out_dir = Path(out_dir)
     write = _build_layers if "layers" in song else _build_loop
     try:
         if "intro" not in song:
-            return write(song, name, out_dir, rate, source, [])
+            return write(song, name, out_dir, rate, fmt, source, [])
         intro = render_intro(song, rate)
-        file = f"{name}.intro.wav"
-        entry = write(song, name, out_dir, rate, source, [(file, (intro["left"], intro["right"]))])
+        file = _file(f"{name}.intro", fmt)
+        entry = write(song, name, out_dir, rate, fmt, source, [(file, (intro["left"], intro["right"]))])
         entry["intro"] = {"file": file, "in_samples": intro["in_samples"], "walk_samples": intro["walk_samples"]}
         return entry
     except RowSynthError as error:
@@ -229,19 +259,24 @@ def manifest_path(out_dir: str | Path) -> Path:
     return Path(out_dir, _MANIFEST)
 
 
-def build(project: Project, out_dir: str | Path, rate: int = BUILD_RATE, songs: list[str] | None = None) -> dict:
+def build(project: Project, out_dir: str | Path, rate: int = BUILD_RATE, fmt: str = "wav",
+          songs: list[str] | None = None) -> dict:
     """Writes the songs of a project into a folder with their manifest, and gives the manifest.
 
     `songs` names the songs to build, and left out it is every song of the project, in the project's order.
-    The folder is made when it is missing. Each song is written as `build_song` writes it. The manifest is
-    {"rate": rate, "songs": {name: entry}}, and it is written to the folder's `manifest_path` once every song
-    is there. Whatever else the folder holds is left alone.
+    The folder is made when it is missing. Each song is written as `build_song` writes it, in the format `fmt`.
+    The manifest is {"rate": rate, "format": fmt, "songs": {name: entry}}, and it is written to the folder's
+    `manifest_path` once every song is there. Whatever else the folder holds is left alone. A rate that makes
+    no sense, a format a build is not written in and Opus at a rate it does not take are refused before the
+    folder is made or a song is rendered.
     """
     rate = _rate(rate)
+    _writable(fmt, rate)
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     names = project.songs if songs is None else songs
-    manifest = {"rate": rate, "songs": {name: build_song(project, name, out_dir, rate) for name in names}}
+    entries = {name: build_song(project, name, out_dir, rate, fmt) for name in names}
+    manifest = {"rate": rate, "format": fmt, "songs": entries}
     text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
     manifest_path(out_dir).write_text(text, encoding="utf-8", newline="\n")
     return manifest

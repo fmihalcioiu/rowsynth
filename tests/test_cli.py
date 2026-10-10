@@ -196,16 +196,17 @@ class Build(CommandLineCase):
         """
         return self.run_main("build", str(self.saved(data)), *typed, "--out", str(out))
 
-    def test_build_prints_the_folder_as_it_was_typed_the_manifest_the_rate_and_every_song_of_the_project(self) -> None:
+    def test_build_prints_the_folder_as_typed_the_manifest_the_rate_the_format_and_every_song(self) -> None:
         # The folder is typed with a separator after it, which the path of the manifest inside it has no use for.
         typed = f"{self.folder / 'built'}{os.sep}"
         self.assertEqual(self.build(typed), 0)
         manifest = build(Project.from_dict(LOOPS), self.folder / "apart")
         told = {"folder": typed, "manifest": str(self.folder / "built" / "music.json"), **manifest}
         self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
-        self.assertEqual(list(told), ["folder", "manifest", "rate", "songs"])
-        # With no rate typed it is 48000. With no name typed it is every song, in the order of the project.
-        self.assertEqual(told["rate"], 48000)
+        self.assertEqual(list(told), ["folder", "manifest", "rate", "format", "songs"])
+        # With no rate typed it is 48000, and with no format typed it is WAV. With no name typed it is every song,
+        # in the order of the project.
+        self.assertEqual((told["rate"], told["format"]), (48000, "wav"))
         self.assertEqual([(name, entry["loop_samples"], entry["file"]) for name, entry in told["songs"].items()],
                          [("sting", 24000, "sting.wav"), ("hum", 9600, "hum.wav")])
 
@@ -216,7 +217,7 @@ class Build(CommandLineCase):
         told = json.loads(self.out.getvalue())
         self.assertEqual(Path(told["manifest"]), out / "music.json")
         self.assertEqual(json.loads(Path(told["manifest"]).read_text(encoding="utf-8")),
-                         {"rate": told["rate"], "songs": told["songs"]})
+                         {"rate": told["rate"], "format": told["format"], "songs": told["songs"]})
         self.assertEqual([entry["file"] for entry in told["songs"].values()], ["sting.wav", "hum.wav"])
 
     def test_names_after_the_file_are_the_only_songs_built_in_the_order_they_are_named_in(self) -> None:
@@ -246,6 +247,32 @@ class Build(CommandLineCase):
             sides, rate = load_wav(out / entry["file"])
             self.assertEqual((rate, [len(side) for side in sides]), (8000, [entry["loop_samples"]] * 2), name)
             self.assertEqual((out / entry["file"]).read_bytes(), (apart / entry["file"]).read_bytes(), name)
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not on the path")
+    def test_format_is_what_the_files_are_written_as_and_named_by_and_is_printed_and_in_the_manifest(self) -> None:
+        out = self.folder / "built"
+        self.assertEqual(self.build(out, "--rate", "8000", "--format", "opus"), 0)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual(list(told), ["folder", "manifest", "rate", "format", "songs"])
+        self.assertEqual((told["rate"], told["format"]), (8000, "opus"))
+        self.assertEqual([entry["file"] for entry in told["songs"].values()], ["sting.opus", "hum.opus"])
+        self.assertEqual(sorted(found.name for found in out.iterdir()), ["hum.opus", "music.json", "sting.opus"])
+        # A file of Opus starts as an Ogg file does.
+        for file in ("hum.opus", "sting.opus"):
+            self.assertEqual((out / file).read_bytes()[:4], b"OggS", file)
+        self.assertEqual(json.loads((out / "music.json").read_text(encoding="utf-8")),
+                         {"rate": 8000, "format": "opus", "songs": told["songs"]})
+
+    def test_a_format_that_is_not_wav_or_opus_is_refused_with_code_2(self) -> None:
+        # MP3 is a format of the listen page, and is none of a build.
+        for fmt in ("mp3", "flac"):
+            with self.assertRaises(SystemExit) as left:
+                self.build(self.folder / "built", "--format", fmt)
+            self.assertEqual(left.exception.code, 2)
+            out, err = self.printed()
+            self.assertEqual(out, "")
+            self.assertIn(f"argument --format: invalid choice: {fmt!r}", err)
+        self.assertFalse((self.folder / "built").exists())
 
     def test_build_of_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
         path, out = self.folder / "nowhere.json", self.folder / "built"
