@@ -886,6 +886,13 @@ class Refusals(CommandLineCase):
         self.assertEqual(self.run_main("measure", str(path)), 2)
         self.assertEqual(self.printed(), ("", f"error: {path}: not a RIFF/WAVE file\n"))
 
+    def test_gui_without_pygame_is_an_error_saying_how_to_get_it_with_code_2(self) -> None:
+        # With None in its place, importing pygame fails as it does where pygame is not installed.
+        with mock.patch.dict(sys.modules, {"pygame": None}):
+            self.assertEqual(self.run_main("gui", str(self.saved(PROJECT))), 2)
+        self.assertEqual(self.printed(), ("", "error: the GUI needs pygame, which is not installed: "
+                                              "pip install rowsynth[gui]\n"))
+
     def test_an_unknown_command_is_refused_with_code_2(self) -> None:
         with self.assertRaises(SystemExit) as left:
             self.run_main("play", "project.json")
@@ -904,7 +911,7 @@ class Refusals(CommandLineCase):
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
         self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()),
-                         ["build", "check", "info", "measure", "page", "render"])
+                         ["build", "check", "gui", "info", "measure", "page", "render"])
 
 
 class Process(CommandLineCase):
