@@ -10,8 +10,8 @@ from rowsynth.gui.layout import edge, frame
 
 
 class Frame(unittest.TestCase):
-    def test_at_the_smallest_art_size_the_parts_are_where_they_were_drawn(self) -> None:
-        self.assertEqual(frame((960, 540)), {
+    def test_at_the_art_size_it_is_drawn_for_the_parts_are_where_they_were_drawn(self) -> None:
+        self.assertEqual(frame(theme.DESIGN), {
             "top": (0, 0, 960, 22),
             "left": (0, 22, 124, 504),
             "middle": (124, 22, 662, 504),
@@ -19,10 +19,20 @@ class Frame(unittest.TestCase):
             "status": (0, 526, 960, 14),
         })
 
+    def test_at_the_least_art_size_only_the_height_between_the_bars_is_less(self) -> None:
+        self.assertEqual(theme.MIN_ART, (960, 480))
+        self.assertEqual(frame(theme.MIN_ART), {
+            "top": (0, 0, 960, 22),
+            "left": (0, 22, 124, 444),
+            "middle": (124, 22, 662, 444),
+            "right": (786, 22, 174, 444),
+            "status": (0, 466, 960, 14),
+        })
+
     def test_the_parts_cover_the_art_surface_with_no_gap_and_no_overlap(self) -> None:
         # The last four are too small for the bars and the panels to be whole.
-        for width, height in ((960, 540), (1280, 720), (1920, 1080), (961, 547), (640, 360), (200, 30), (90, 400),
-                              (1, 1)):
+        for width, height in ((960, 540), (960, 480), (1280, 720), (1920, 1080), (961, 547), (640, 360), (200, 30),
+                              (90, 400), (1, 1)):
             with self.subTest(size=(width, height)):
                 covered = np.zeros((height, width), dtype=int)
                 for x, y, w, h in frame((width, height)).values():

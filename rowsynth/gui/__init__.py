@@ -29,12 +29,20 @@ def start(path: str | Path, scale: int | None = None) -> App:
     return App(path, scale)
 
 
+def check_frames(frames: int | None) -> None:
+    """Refuse a count of frames to run for that is under 1. None is no count: the window stays until it is closed."""
+    if frames is not None and frames < 1:
+        raise RowSynthError(f"a run of {frames} frames shows nothing: the count of frames is a whole number, "
+                            "1 or more")
+
+
 def run(path: str | Path, scale: int | None = None, frames: int | None = None,
         shot: str | Path | None = None) -> int:
     """Open the project in a file in a window, keep it until the window is closed, and return 0.
 
-    With `frames` the window closes by itself after that many frames. With `shot` its last frame is written to
-    that path as a PNG, at the size of the art surface.
+    With `frames` the window closes by itself after that many frames: a count under 1 is refused, before any
+    window opens. With `shot` its last frame is written to that path as a PNG, at the size of the art surface.
     """
+    check_frames(frames)
     start(path, scale).run(frames, shot)
     return 0

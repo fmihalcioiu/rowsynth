@@ -893,6 +893,13 @@ class Refusals(CommandLineCase):
         self.assertEqual(self.printed(), ("", "error: the GUI needs pygame, which is not installed: "
                                               "pip install rowsynth[gui]\n"))
 
+    def test_gui_for_no_frames_is_refused_with_code_2_before_any_window(self) -> None:
+        # With pygame out of reach no window can open: the count is refused before pygame is so much as asked for.
+        with mock.patch.dict(sys.modules, {"pygame": None}):
+            self.assertEqual(self.run_main("gui", str(self.saved(PROJECT)), "--frames", "0"), 2)
+        self.assertEqual(self.printed(), ("", "error: a run of 0 frames shows nothing: the count of frames is a "
+                                              "whole number, 1 or more\n"))
+
     def test_an_unknown_command_is_refused_with_code_2(self) -> None:
         with self.assertRaises(SystemExit) as left:
             self.run_main("play", "project.json")

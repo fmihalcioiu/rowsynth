@@ -1,6 +1,9 @@
 """The window, and the small surface that is drawn on and scaled up whole to fill it."""
 from __future__ import annotations
 
+import ctypes
+import sys
+
 import pygame
 
 from ..errors import RowSynthError
@@ -10,9 +13,9 @@ from . import theme
 def fit(window: tuple[int, int], scale: int | None = None) -> tuple[int, tuple[int, int]]:
     """The scale and the size of the art surface for a window of a size. The scale is a whole number.
 
-    With no scale given it is the largest at which the art surface is still at least the smallest the layout is
-    made for, and 1 in a window too small for that. The art surface is the window's size divided by the scale,
-    rounded down, so a larger window shows more and shows nothing larger. A scale under 1 is refused.
+    With no scale given it is the largest at which the art surface is no smaller than `theme.MIN_ART`, and 1 in
+    a window too small for that. The art surface is the window's size divided by the scale, rounded down, so a
+    larger window shows more and shows nothing larger. A scale under 1 is refused.
     """
     width, height = window
     if scale is None:
@@ -22,15 +25,49 @@ def fit(window: tuple[int, int], scale: int | None = None) -> tuple[int, tuple[i
     return scale, (max(1, width // scale), max(1, height // scale))
 
 
+def opening(desktop: tuple[int, int], scale: int | None = None) -> tuple[int, int]:
+    """The size a window opens at on a desktop of a size, so that it fits there.
+
+    The desktop's height is first less by what the title bar and the task bar take. The window is the size the
+    layout is drawn for times a scale, cut down to what the desktop has left. The scale is the one given, or
+    with none the largest that `fit` would still choose in what is left. A desktop too small for the layout at
+    scale 1 gets a window of what it has left.
+    """
+    width, height = max(1, desktop[0]), max(1, desktop[1] - theme.DESKTOP_TAKEN_H)
+    scale, _ = fit((width, height), scale)
+    return min(theme.DESIGN[0] * scale, width), min(theme.DESIGN[1] * scale, height)
+
+
+def dpi_aware() -> None:
+    """On Windows, tell the system that this process draws its own pixels. Elsewhere there is nothing to tell.
+
+    Untold, Windows stretches the whole window on a display that is scaled above 100%, which smooths the pixels.
+    It has to be told before the display is started. Where it cannot be told, the window is opened all the same.
+    """
+    if sys.platform != "win32":
+        return
+    try:
+        ctypes.windll.user32.SetProcessDPIAware()
+    except (AttributeError, OSError):
+        pass
+
+
 class Screen:
     """The window and the art surface. Everything is drawn on the art surface, in art pixels."""
 
-    def __init__(self, size: tuple[int, int] = theme.WINDOW, scale: int | None = None) -> None:
-        """Open a window of `size` that can be resized. `scale` is kept at every size when one is given."""
+    def __init__(self, size: tuple[int, int] | None = None, scale: int | None = None) -> None:
+        """Open a window that can be resized. `scale` is kept at every size when one is given.
+
+        A `size` that is given is the window's, as it is. With none the window opens at the size that fits the
+        first desktop, which is the main one.
+        """
         self._given = scale
-        # A scale that cannot be drawn is refused here, before there is a window.
-        fit(size, scale)
+        # A scale that cannot be drawn is refused here, before the display is started.
+        fit(theme.DESIGN, scale)
+        dpi_aware()
         pygame.display.init()
+        if size is None:
+            size = opening(pygame.display.get_desktop_sizes()[0], scale)
         pygame.display.set_caption("rowsynth")
         self.window = pygame.display.set_mode(size, pygame.RESIZABLE)
         # The window may not have come out at the size asked for, so its own size is the one that counts.

@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..gui import start
+from ..gui import check_frames, start
 from ..gui.theme import MIN_ART
 from . import emit
 
@@ -18,12 +18,15 @@ def configure(parser: argparse.ArgumentParser) -> None:
                         help="how many pixels of the window one drawn pixel takes each way, a whole number "
                              f"(default: the largest that leaves {MIN_ART[0]} by {MIN_ART[1]} drawn pixels or more)")
     parser.add_argument("--frames", metavar="N", type=int,
-                        help="close the window after this many frames (default: it stays until it is closed)")
+                        help="close the window after this many frames, 1 or more (default: it stays until it is "
+                             "closed)")
     parser.add_argument("--shot", metavar="PATH", help="write the last frame to this path as a PNG")
 
 
 def run(args: argparse.Namespace) -> int:
     """Open the project in the file in a window. When the window has closed, print what was shown, and return 0."""
+    # A count of frames that cannot be run is refused here, before the window opens.
+    check_frames(args.frames)
     drawn = start(args.file, args.scale).run(args.frames, args.shot)
     told = {"file": args.file, "frames": drawn}
     if args.shot is not None:

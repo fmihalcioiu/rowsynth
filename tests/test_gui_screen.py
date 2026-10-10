@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -20,7 +21,7 @@ try:
 except ImportError:
     pygame = None
 else:
-    from rowsynth.gui.screen import Screen, fit
+    from rowsynth.gui.screen import Screen, dpi_aware, fit, opening
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
@@ -28,19 +29,24 @@ NEEDS = "pygame is not installed"
 
 @unittest.skipUnless(pygame, NEEDS)
 class Fit(unittest.TestCase):
-    def test_a_full_hd_window_shows_the_smallest_art_size_at_twice_its_size(self) -> None:
-        self.assertEqual(theme.MIN_ART, (960, 540))
+    def test_a_full_hd_window_shows_the_size_the_layout_is_drawn_for_at_twice_its_size(self) -> None:
+        self.assertEqual(theme.DESIGN, (960, 540))
         self.assertEqual(fit((1920, 1080)), (2, (960, 540)))
 
+    def test_a_window_that_fills_a_full_hd_desktop_under_its_title_bar_is_still_at_twice(self) -> None:
+        self.assertEqual(fit((1920, 1009)), (2, (960, 504)))
+        # The least a scale of 2 is chosen at.
+        self.assertEqual(fit((1920, 960)), (2, theme.MIN_ART))
+
     def test_a_window_with_no_room_for_twice_keeps_every_pixel_of_its_own_at_scale_1(self) -> None:
-        # The last two are smaller than the smallest art size, and are not scaled down to hold it.
-        for size in ((1280, 720), (960, 540), (1919, 1080), (1920, 1079), (800, 600), (640, 360)):
+        # The last two are smaller than the least art size, and are not scaled down to hold it.
+        for size in ((1280, 720), (960, 540), (1919, 1080), (1920, 959), (800, 600), (640, 360)):
             with self.subTest(size=size):
                 self.assertEqual(fit(size), (1, size))
 
-    def test_a_larger_window_takes_the_largest_scale_that_leaves_the_smallest_art_size(self) -> None:
+    def test_a_larger_window_takes_the_largest_scale_that_leaves_the_least_art_size(self) -> None:
         self.assertEqual(fit((2560, 1440)), (2, (1280, 720)))
-        self.assertEqual(fit((2880, 1620)), (3, (960, 540)))
+        self.assertEqual(fit((2880, 1440)), (3, (960, 480)))
         self.assertEqual(fit((3840, 2160)), (4, (960, 540)))
         # The side with the least room decides, and what does not divide is rounded down.
         self.assertEqual(fit((3841, 1100)), (2, (1920, 550)))
@@ -59,18 +65,77 @@ class Fit(unittest.TestCase):
 
 
 @unittest.skipUnless(pygame, NEEDS)
+class Opening(unittest.TestCase):
+    def test_a_window_opens_at_the_size_the_layout_is_drawn_for_times_the_largest_scale_with_room(self) -> None:
+        self.assertEqual(opening((2560, 1440)), (1920, 1080))
+        self.assertEqual(opening((1366, 768)), (960, 540))
+
+    def test_it_is_cut_down_to_the_desktop_less_what_its_bars_take_and_keeps_its_scale(self) -> None:
+        self.assertEqual(theme.DESKTOP_TAKEN_H, 80)
+        for desktop, size, scale in (((1920, 1080), (1920, 1000), 2), ((3840, 2160), (3840, 2080), 4)):
+            with self.subTest(desktop=desktop):
+                self.assertEqual(opening(desktop), size)
+                self.assertEqual(fit(size)[0], scale)
+
+    def test_on_a_desktop_too_small_for_scale_1_it_opens_at_what_fits(self) -> None:
+        self.assertEqual(opening((800, 600)), (800, 520))
+
+    def test_a_scale_that_is_given_takes_the_place_of_the_largest(self) -> None:
+        self.assertEqual(opening((2560, 1440), 1), (960, 540))
+        self.assertEqual(opening((3840, 2160), 2), (1920, 1080))
+        # One too large for the desktop is kept, and the window is cut down.
+        self.assertEqual(opening((1920, 1080), 3), (1920, 1000))
+
+
+@unittest.skipUnless(pygame, NEEDS)
+class DpiAware(unittest.TestCase):
+    def told(self, platform: str, **fails: object) -> mock.Mock:
+        """What was asked of ctypes by `dpi_aware` on a system of that name. `fails` is how the asking goes wrong."""
+        with mock.patch.object(sys, "platform", platform), mock.patch("rowsynth.gui.screen.ctypes") as ctypes:
+            ctypes.windll.user32.SetProcessDPIAware.configure_mock(**fails)
+            dpi_aware()
+        return ctypes
+
+    def test_on_windows_the_system_is_told_once(self) -> None:
+        self.assertEqual(self.told("win32").mock_calls, [mock.call.windll.user32.SetProcessDPIAware()])
+
+    def test_on_another_system_nothing_is_asked(self) -> None:
+        for platform in ("linux", "darwin"):
+            with self.subTest(platform=platform):
+                self.assertEqual(self.told(platform).mock_calls, [])
+
+    def test_a_failure_to_tell_it_is_passed_over(self) -> None:
+        asked = self.told("win32", side_effect=OSError("no such thing"))
+        asked.windll.user32.SetProcessDPIAware.assert_called_once_with()
+
+
+@unittest.skipUnless(pygame, NEEDS)
 class Window(unittest.TestCase):
-    def opened(self, *args: object) -> Screen:
+    def opened(self, *args: object, **named: object) -> Screen:
         """A screen that is closed again when the test is over."""
-        screen = Screen(*args)
+        screen = Screen(*args, **named)
         self.addCleanup(screen.close)
         return screen
 
-    def test_it_opens_a_window_that_can_be_resized_with_an_art_surface_of_its_size_over_the_scale(self) -> None:
-        screen = self.opened()
-        self.assertEqual(pygame.display.get_surface().get_size(), theme.WINDOW)
-        self.assertTrue(pygame.display.get_surface().get_flags() & pygame.RESIZABLE)
-        self.assertEqual((screen.scale, screen.begin().get_size()), (2, (960, 540)))
+    def test_with_no_size_given_it_opens_at_the_size_that_fits_the_first_desktop(self) -> None:
+        started = []
+
+        def told() -> None:
+            started.append(pygame.display.get_init())
+
+        pygame.display.quit()
+        with mock.patch("pygame.display.get_desktop_sizes", return_value=[(2560, 1440), (1080, 1920)]), \
+                mock.patch("rowsynth.gui.screen.dpi_aware", side_effect=told):
+            screen = self.opened()
+            self.assertEqual(pygame.display.get_surface().get_size(), (1920, 1080))
+            self.assertTrue(pygame.display.get_surface().get_flags() & pygame.RESIZABLE)
+            self.assertEqual((screen.scale, screen.begin().get_size()), (2, (960, 540)))
+            # A scale that is given is the one the size is worked out at.
+            screen.close()
+            screen = self.opened(scale=1)
+            self.assertEqual((pygame.display.get_surface().get_size(), screen.scale), ((960, 540), 1))
+        # Each time, the system was told whose the pixels are before the display was started.
+        self.assertEqual(started, [False, False])
 
     def test_to_art_turns_a_position_in_the_window_into_art_pixels(self) -> None:
         screen = self.opened((1920, 1080))
@@ -121,6 +186,10 @@ class Run(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.folder = Path(folder.name)
+        # The desktop is a full HD one, whatever the machine the tests are run on has.
+        desktop = mock.patch("pygame.display.get_desktop_sizes", return_value=[(1920, 1080)])
+        desktop.start()
+        self.addCleanup(desktop.stop)
 
     def test_run_for_3_frames_returns_0_and_its_shot_is_a_png_of_the_empty_frame(self) -> None:
         # The folder of the shot is not there yet, and its name does not end as that of a PNG does.
@@ -130,12 +199,22 @@ class Run(unittest.TestCase):
         self.assertEqual(shot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         with open(shot, "rb") as file:
             drawn = pygame.image.load(file, ".png")
-        self.assertEqual(drawn.get_size(), (960, 540))
+        # The window was 1920 by 1000, to fit the desktop, and so at twice.
+        self.assertEqual(drawn.get_size(), (960, 500))
         # The top bar and its line, the left panel's line, the middle, the right panel's line and the status bar's.
         self.assertEqual([drawn.get_at(pos)[:3] for pos in ((0, 0), (0, 21), (123, 22), (124, 22), (786, 300),
-                                                            (787, 300), (500, 526), (500, 539))],
+                                                            (787, 300), (500, 486), (500, 499))],
                          [theme.PANEL, theme.LINE, theme.LINE, theme.BACKGROUND, theme.LINE, theme.PANEL,
                           theme.LINE, theme.PANEL])
+
+    def test_a_run_for_no_frames_is_refused_before_any_window_is_opened(self) -> None:
+        for frames in (0, -2):
+            with self.subTest(frames=frames), mock.patch("pygame.display.set_mode") as opened:
+                with self.assertRaises(RowSynthError) as refused:
+                    run(EXAMPLES / "arcade.json", frames=frames)
+                self.assertEqual(str(refused.exception), f"a run of {frames} frames shows nothing: the count of "
+                                                         "frames is a whole number, 1 or more")
+                opened.assert_not_called()
 
     def test_a_window_that_is_closed_ends_the_run_before_its_frames_are_up(self) -> None:
         app = start(EXAMPLES / "arcade.json")

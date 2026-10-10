@@ -44,7 +44,10 @@ STATUS_H = 14
 LEFT_W = 124
 RIGHT_W = 174
 
-# The smallest art surface the layout is made for. A full HD window shows it at twice its size.
-MIN_ART = (960, 540)
-# The size the window opens at.
-WINDOW = (MIN_ART[0] * 2, MIN_ART[1] * 2)
+# The art size the layout is drawn for. A full HD window shows it at twice its size.
+DESIGN = (960, 540)
+# The least art size a scale is chosen at. It is less high than the layout is drawn for, so that a window filling
+# a full HD desktop, where the title bar and the task bar take their share, is still shown at twice.
+MIN_ART = (960, 480)
+# What a desktop loses to the title bar of a window and to the task bar, in window pixels of height: an allowance.
+DESKTOP_TAKEN_H = 80
