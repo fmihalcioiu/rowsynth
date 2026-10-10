@@ -228,6 +228,11 @@ class Build(CommandLineCase):
         self.assertEqual(self.build(both, "hum", "sting", "--rate", "8000"), 0)
         self.assertEqual(list(json.loads(self.out.getvalue())["songs"]), ["hum", "sting"])
 
+    def test_a_name_may_come_after_a_flag(self) -> None:
+        out = self.folder / "late"
+        self.assertEqual(self.run_main("build", str(self.saved(LOOPS)), "--out", str(out), "--rate", "8000", "hum"), 0)
+        self.assertEqual(sorted(found.name for found in out.iterdir()), ["hum.wav", "music.json"])
+
     def test_rate_is_the_samples_a_second_the_songs_are_built_at(self) -> None:
         out, apart = self.folder / "built", self.folder / "apart"
         self.assertEqual(self.build(out, "--rate", "8000"), 0)
@@ -501,6 +506,16 @@ class Measure(CommandLineCase):
         # Alone, the same file is read as a WAV, which it is not.
         self.assertEqual(self.run_main("measure", str(path)), 2)
         self.assertEqual(self.err.getvalue(), f"error: {path}: not a RIFF/WAVE file\n")
+
+    def test_the_name_may_come_after_a_flag(self) -> None:
+        path = str(self.saved(PROJECT))
+        self.assertEqual(self.run_main("measure", path, "--rate", "8000", "tap"), 0)
+        after = json.loads(self.out.getvalue())
+        # Each document is read on its own.
+        self.out = io.StringIO()
+        self.assertEqual(self.run_main("measure", "--rate", "8000", path, "tap"), 0)
+        self.assertEqual(json.loads(self.out.getvalue()), after)
+        self.assertEqual((after["name"], after["rate"]), ("tap", 8000))
 
     def test_three_positionals_are_refused_with_code_2(self) -> None:
         with self.assertRaises(SystemExit) as left:

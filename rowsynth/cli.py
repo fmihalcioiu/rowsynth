@@ -18,15 +18,20 @@ def _command_modules() -> list[ModuleType]:
     return [import_module(f"{commands.__name__}.{name}") for name in names]
 
 
-def _parser() -> argparse.ArgumentParser:
-    """The parser of the whole command line: a sub-command for every command module, set up by the module itself."""
+def _parsers() -> tuple[argparse.ArgumentParser, dict[str, argparse.ArgumentParser]]:
+    """The parser of the whole command line, and the parser of each command by its name.
+
+    There is a sub-command for every command module, set up by the module itself.
+    """
     parser = argparse.ArgumentParser(prog="rowsynth", description="A chip synth driven by text.")
     subs = parser.add_subparsers(title="commands", metavar="COMMAND")
+    named = {}
     for module in _command_modules():
         sub = subs.add_parser(module.NAME, help=module.HELP, description=module.HELP)
         module.configure(sub)
         sub.set_defaults(run=module.run)
-    return parser
+        named[module.NAME] = sub
+    return parser, named
 
 
 def _utf8(stream: object) -> None:
@@ -42,14 +47,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     A command that stops on a RowSynthError or an OSError has the message printed to standard error after
     "error: ", and the code is 2. With no command named the help goes to standard error, and the code is 2 again.
     What is printed is UTF-8 whatever the console is set to, so a name in any script comes through a pipe whole.
+    After the command its flags and its other words may come in any order.
     """
     _utf8(sys.stdout)
     _utf8(sys.stderr)
-    parser = _parser()
-    args = parser.parse_args(argv)
-    if not hasattr(args, "run"):
+    parser, named = _parsers()
+    argv = list(sys.argv[1:] if argv is None else argv)
+    command = named.get(argv[0]) if argv else None
+    if command is None:
+        # No command, a call for help or a word that is no command: the whole parser has the answer to each.
+        parser.parse_args(argv)
         parser.print_help(sys.stderr)
         return 2
+    # Read by the whole parser, a word after a flag is lost to a command that takes a word or two: the parser
+    # hands out the words it has seen when it meets the first flag. The command's own parser can be told to
+    # read the flags first and the words after.
+    args = command.parse_intermixed_args(argv[1:])
     try:
         return args.run(args)
     except (RowSynthError, OSError) as error:
