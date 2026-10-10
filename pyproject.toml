@@ -11,5 +11,8 @@ license-files = ["LICENSE"]
 requires-python = ">=3.10"
 dependencies = ["numpy>=1.24", "numba>=0.60"]
 
+[project.scripts]
+rowsynth = "rowsynth.cli:main"
+
 [tool.setuptools.packages.find]
 include = ["rowsynth*"]
