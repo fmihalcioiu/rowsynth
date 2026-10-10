@@ -122,3 +122,16 @@ LIST_BAR_W = 4
 LIST_THUMB_MIN = 8
 # How many rows one step of the wheel scrolls.
 LIST_WHEEL = 3
+
+# A bar, the one along the top or the one along the bottom: from an end of it to the first thing it shows.
+BAR_MARGIN = 6
+# The top bar. How wide and how high a button is that shows an icon and no text. Between two buttons that stand
+# together, and between two groups of things. How wide the findings are: an icon, the gap, and a count of three
+# figures.
+ICON_BUTTON = (17, 16)
+BUTTON_GAP = 2
+GROUP_GAP = 12
+FOUND_W = 29
+# The left panel: from its sides and its foot to the list in it, the panel's line not counted, and from its top.
+BROWSER_PAD = 2
+BROWSER_TOP = 4

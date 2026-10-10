@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import threading
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -25,6 +26,13 @@ else:
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
+
+
+def settle() -> None:
+    """Waits for every render and every run of the checks that is still on a thread of a model's."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("rowsynth-"):
+            thread.join()
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -186,12 +194,14 @@ class Run(unittest.TestCase):
         folder = tempfile.TemporaryDirectory()
         self.addCleanup(folder.cleanup)
         self.folder = Path(folder.name)
+        # A run leaves its render and its checks on their threads: none is left to run into the next test.
+        self.addCleanup(settle)
         # The desktop is a full HD one, whatever the machine the tests are run on has.
         desktop = mock.patch("pygame.display.get_desktop_sizes", return_value=[(1920, 1080)])
         desktop.start()
         self.addCleanup(desktop.stop)
 
-    def test_run_for_3_frames_returns_0_and_its_shot_is_a_png_of_the_empty_frame(self) -> None:
+    def test_run_for_3_frames_returns_0_and_its_shot_is_a_png_of_the_frame(self) -> None:
         # The folder of the shot is not there yet, and its name does not end as that of a PNG does.
         shot = self.folder / "shots" / "frame"
         self.assertEqual(run(EXAMPLES / "arcade.json", frames=3, shot=shot), 0)

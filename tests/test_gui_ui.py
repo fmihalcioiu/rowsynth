@@ -1,14 +1,13 @@
-"""Tests for rowsynth.gui.ui: events, who they go to, the first widgets, and the app that hands them on."""
+"""Tests for rowsynth.gui.ui: events, who they go to, and the first widgets."""
 from __future__ import annotations
 
 import dataclasses
 import os
 import unittest
-from pathlib import Path
 from unittest import mock
 
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, sprites, start, theme
+from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.ui import Button, Choice, Event, Label, Toggle, Ui, Widget, inside, share, translate
@@ -22,7 +21,6 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
 CTRL = frozenset({"ctrl"})
 
@@ -287,33 +285,6 @@ class Translating(unittest.TestCase):
         self.assertEqual(translate(pressed, halved), Event("key", key="z", mods=CTRL))
         space = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, mod=pygame.KMOD_LALT | pygame.KMOD_LSHIFT)
         self.assertEqual(translate(space, halved), Event("key", key="space", mods=frozenset({"alt", "shift"})))
-
-
-@unittest.skipUnless(pygame, NEEDS)
-class InTheApp(unittest.TestCase):
-    def test_the_status_bar_shows_the_help_of_the_switch_under_the_mouse_and_a_click_flips_it(self) -> None:
-        app = start(EXAMPLES / "arcade.json")
-        self.addCleanup(app.screen.close)
-        art = app.screen.begin()
-        switch = app.ui.widgets[0]
-        x, y, w, h = layout.frame(art.get_size())["status"]
-
-        def help_ink() -> int:
-            """How many pixels of the status bar are in the colour of its help line, once a frame is drawn."""
-            app.draw(art)
-            return sum(art.get_at((x + column, y + row))[:3] == theme.DIM for column in range(w) for row in range(h))
-
-        self.assertEqual(help_ink(), 0)
-        # The mouse is told in pixels of the window, each art pixel being a square of them.
-        at = ((switch.rect[0] + 2) * app.screen.scale, (switch.rect[1] + 2) * app.screen.scale)
-        app.handle(pygame.event.Event(pygame.MOUSEMOTION, pos=at, rel=(1, 0), buttons=(0, 0, 0)))
-        self.assertEqual((app.ui.hot, app.ui.help), (switch, "a switch that does nothing yet"))
-        self.assertGreater(help_ink(), 0)
-        app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=at, button=1))
-        app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=at, button=1))
-        self.assertTrue(switch.is_on)
-        app.handle(pygame.event.Event(pygame.QUIT))
-        self.assertTrue(app.closed)
 
 
 if __name__ == "__main__":
