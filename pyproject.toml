@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "rowsynth"
 version = "0.1.0"
 description = "A chip synth driven by text: sound effects and songs written as data, rendered to WAV."
+readme = "README.md"
 license = "MIT"
 license-files = ["LICENSE"]
 requires-python = ">=3.10"
