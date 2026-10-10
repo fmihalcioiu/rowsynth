@@ -10,7 +10,7 @@ from pathlib import Path
 
 from rowsynth import checks
 from rowsynth.bank import held_parts, normalise, render_entry
-from rowsynth.checks import Finding, run, sounds
+from rowsynth.checks import Finding, _at, _same_rows, _whole_rows, run, sounds
 from rowsynth.errors import RowSynthError
 from rowsynth.measure import measure
 from rowsynth.project import Project
@@ -112,6 +112,33 @@ class FindingTest(unittest.TestCase):
             finding.rule = "dc"
         self.assertEqual(finding, Finding("peak", "sounds.zap", "too loud"))
         self.assertNotEqual(finding, Finding("peak", "sounds.zap[0]", "too loud"))
+
+
+class SharedTest(unittest.TestCase):
+    def test_what_is_refused_at_a_target_is_refused_with_the_target_in_front(self):
+        with self.assertRaises(RowSynthError) as caught:
+            with _at("songs.tune"):
+                raise RowSynthError("order: no pattern called 'b'")
+        self.assertEqual(str(caught.exception), "songs.tune: order: no pattern called 'b'")
+        # Anything else that goes wrong there is no refusal, and comes out as it went in.
+        with self.assertRaises(KeyError) as caught:
+            with _at("songs.tune"):
+                raise KeyError("b")
+        self.assertEqual(caught.exception.args, ("b",))
+
+    def test_rows_a_hair_apart_are_the_same_and_rows_a_thousandth_apart_are_not(self):
+        # What six triplets to a bar add up to beside the sixteen rows they fill, and forty-eight beside their 64.
+        self.assertTrue(_same_rows(15.999999999999998, 16.0))
+        self.assertTrue(_same_rows(64.0, 64.00000000000004))
+        self.assertTrue(_same_rows(16.0, 16.0))
+        self.assertFalse(_same_rows(15.999, 16.0))
+        self.assertFalse(_same_rows(16.0, 16.001))
+
+    def test_rows_a_hair_off_a_whole_number_are_that_number_and_any_others_stay_as_they_are(self):
+        self.assertEqual([_whole_rows(rows) for rows in (15.999999999999998, 64.00000000000004, 14.0, 0.0)],
+                         [16.0, 64.0, 14.0, 0.0])
+        self.assertEqual([_whole_rows(rows) for rows in (11.333333333333334, 15.999, 16.001, 0.5)],
+                         [11.333333333333334, 15.999, 16.001, 0.5])
 
 
 class RunTest(unittest.TestCase):

@@ -9,6 +9,7 @@ import numpy as np
 from rowsynth.checks import Finding, run, songs
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
+from rowsynth.song import parse
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz and a bar of sixteen rows is 6400.
 RATE = 8000
@@ -31,6 +32,10 @@ RUNG = "r8 k4 k4 t4."
 # Bars that are short of their sixteen rows: by two, and by a triplet's odd share.
 BASS_SHORT = "o2 r8 c4 c4 g4"
 BEAT_SHORT = "r8 k4 k4 k12"
+# Bars of triplets for the lead: six to the bar, and three of those with six half as long after them. Each fills
+# its sixteen rows, and added up as floats the first comes to a hair under them and the second to a hair over.
+TRIPLETS = "l6 r e g > c < b r"
+TRIPLETS_OVER = "l6 r e g l12 > c < b a g e r"
 
 # The tuned channels as one group and the drums as another, heard as written and three semitones up.
 LAYERS = {"groups": {"tune": ["lead", "bass"], "kit": ["beat"]},
@@ -133,6 +138,19 @@ class RowsTest(unittest.TestCase):
         tune = song()
         tune["patterns"]["spare"] = {"lead": LEAD, "bass": BASS_SHORT}
         self.assertEqual(found_in(tune), [short("bass", "14", "spare")])
+
+    def test_a_channel_of_triplets_is_as_long_as_the_channels_of_even_notes_beside_it(self):
+        for lead, rows in ((TRIPLETS, 15.999999999999998), (TRIPLETS_OVER, 16.000000000000004)):
+            self.assertEqual(parse(lead, "pipe")[1], rows)
+            # With no "rows" finding the song is played, and it keeps the other rules too.
+            self.assertEqual(found_in(song(lead=lead)), [])
+
+    def test_rows_fires_on_a_channel_a_row_short_of_triplets_and_says_their_whole_count_whole(self):
+        # The triplets are the longest channel of the pattern, and the bass ends a sixteenth before the bar does.
+        for lead in (TRIPLETS, TRIPLETS_OVER):
+            tune = song()
+            tune["patterns"]["b"] = {"lead": lead, "bass": "o2 r8 c4 c4 g4 r16"}
+            self.assertEqual(found_in(tune), [short("bass", "15", "b")])
 
     def test_a_song_with_a_rows_finding_is_not_played_and_its_layers_are_still_read(self):
         # Loud enough for the level and cut off at the join, were it played.

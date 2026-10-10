@@ -129,6 +129,32 @@ class ChordsTest(unittest.TestCase):
         self.assertEqual(found_in({"lead": "o4 l4 c e g a | g b > d c"}, ["C", "G7"], rows_per_beat=3),
                          [off("a", 1, "C"), off("c", 2, "G7")])
 
+    def test_a_tune_of_triplets_that_keeps_to_its_chords_gives_nothing(self):
+        # Six triplets fill a bar. Added up as floats they come to a hair under its sixteen rows, and are one bar.
+        self.assertEqual(found_in({"lead": "o4 l6 c e g c e g"}, ["C"]), [])
+        self.assertEqual(found_in({"lead": "o4 l6 c e g c e g | l4 g b > d f"}, ["C", "G7"]), [])
+
+    def test_a_wrong_note_is_found_on_a_beat_that_triplets_have_left_a_hair_off_its_row(self):
+        # The a opens the second bar on row 15.999999999999998.
+        self.assertEqual(found_in({"lead": "o4 l6 c e g c e g | l4 a b > d f"}, ["C", "G7"]), [off("a", 2, "G7")])
+        # The seventh of twelve triplets is on the third beat, and starts on row 7.999999999999999.
+        self.assertEqual(found_in({"lead": "o4 l12 c e g e g c d e g c e g"}, ["C"]), [off("d", 1, "C")])
+
+    def test_a_note_a_triplet_past_a_beat_is_not_on_the_beat(self):
+        # Every d is one triplet or two after a beat, and what is on the four beats is in the chord.
+        self.assertEqual(found_in({"lead": "o4 l12 c d d e d d g d d c d d"}, ["C"]), [])
+
+    def test_a_channel_a_hair_off_the_rows_of_its_pattern_is_as_long_as_it_and_is_held_to_the_chords(self):
+        # A bar of triplets comes to a hair under the sixteen rows of the bass beside it.
+        self.assertEqual(found_in({"lead": "o4 l6 d e g c e g", "bass": "o2 l1 c"}, ["C"]), [off("d", 1, "C")])
+        # Four bars of them come to 64.00000000000004 rows, and there it is the bass that is a hair under.
+        pattern = {"lead": "o4 l12 " + "c e g " * 16, "bass": "o2 l1 c c d c"}
+        self.assertEqual(found_in(pattern, ["C", "C", "C", "C"]), [off("d", 3, "C", channel="bass")])
+
+    def test_the_bars_of_a_pattern_of_triplets_are_a_whole_count(self):
+        self.assertEqual(found_in({"lead": "o4 l12 " + "c e g " * 16}, ["C", "C", "C"]), [
+            Finding("chords", "songs.tune.patterns.a", "its length in bars is 4, and chords are written for 3")])
+
     def test_findings_come_by_song_then_by_pattern_as_chords_has_them_then_by_channel_then_in_time(self):
         wrong = {"lead": "o4 l4 c d e f", "bass": "o2 l2 c b"}
         project = project_of(tune=song_of({"a": wrong, "b": wrong}, {"b": ["C", "C"], "a": ["C"]}),

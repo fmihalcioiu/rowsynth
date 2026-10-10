@@ -3,18 +3,16 @@ from __future__ import annotations
 
 import math
 from collections.abc import Iterator
-from contextlib import contextmanager
 from dataclasses import dataclass
 
 import numpy as np
 
 from ..bank import PEAK_DB, RENDER_GAIN, held_parts, render_entry
-from ..errors import RowSynthError
 from ..measure import brightness, measure, pitch_at
 from ..notes import hz, midi
 from ..project import Project
 from ..sound import KNEE, render_sound
-from . import Finding
+from . import Finding, _at
 
 # A first or a last sample of this size or more is a jump out of silence or back into it, and clicks.
 _STEP = 0.01
@@ -55,15 +53,6 @@ class _Render:
     head: bool = True
     tail: bool = True
     dc: bool = True
-
-
-@contextmanager
-def _at(target: str) -> Iterator[None]:
-    """What is refused inside is refused with the target in front."""
-    try:
-        yield
-    except RowSynthError as error:
-        raise RowSynthError(f"{target}: {error}") from None
 
 
 def _findings(target: str, entry: dict, rate: int) -> Iterator[Finding]:

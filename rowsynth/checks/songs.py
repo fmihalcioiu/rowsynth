@@ -8,8 +8,7 @@ import numpy as np
 from ..layers import group_mix, mix_version, render_groups, shared_scale
 from ..project import Project
 from ..song import _channels, _mix_stems, _within, parse, render_stems
-from . import Finding
-from .sounds import _at
+from . import Finding, _at, _same_rows, _whole_rows
 
 # A loop clicks each time it comes round when its last sample and its first are this far apart, or more.
 _JOIN = 0.02
@@ -23,7 +22,8 @@ _FULL = 0.999
 
 
 def _said(rows: float) -> str:
-    """A number of rows as a message says it: a whole one without its point, and any other in full."""
+    """A count of rows as a message says it: a whole one, or one a hair off it, with no point, and any other in full."""
+    rows = _whole_rows(rows)
     return str(int(rows)) if rows == int(rows) else str(rows)
 
 
@@ -31,8 +31,9 @@ def _rows(target: str, song: dict) -> list[Finding]:
     """What the patterns of a song break of the "rows" rule, which wants the same rows of every channel of a pattern.
 
     A pattern runs for the rows of its longest channel. A channel with fewer was miscounted somewhere, and from
-    there on its notes do not fall on the rows they were written for. Every pattern of the song is read,
-    whether the order plays it or not.
+    there on its notes do not fall on the rows they were written for. A channel of triplets is not such a one:
+    its rows add up to a hair off those of the channels beside it, and `_same_rows` takes them for the same.
+    Every pattern of the song is read, whether the order plays it or not.
     """
     rows_per_beat = song.get("rows_per_beat", 4)
     found = []
@@ -44,7 +45,7 @@ def _rows(target: str, song: dict) -> list[Finding]:
                                            song.get("drums") if settings.get("drums") else None)
         longest = max(filled.values(), default=0.0)
         for channel, rows in filled.items():
-            if rows != longest:
+            if not _same_rows(rows, longest):
                 found.append(Finding("rows", f"{target}.patterns.{name}",
                                      f"channel {channel!r} has {_said(rows)} rows, and the longest channel of the "
                                      f"pattern has {_said(longest)}"))
