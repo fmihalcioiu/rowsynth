@@ -53,9 +53,10 @@ DUO = {
 }
 
 
-def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1) -> dict:
-    """One event as lay gives it."""
-    return {"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel}
+def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1, drum: str = "") -> dict:
+    """One event as lay gives it. One made from a drum letter has that letter as well."""
+    found = {"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel}
+    return {**found, "drum": drum} if drum else found
 
 
 def tunes(patterns: dict, order: list, **keys: object) -> dict:
@@ -125,19 +126,19 @@ class LayTest(unittest.TestCase):
                                         event(8, 4, 72),
                                         event(16, 2, 60), event(18, 2, 64), event(20, 2, 67), event(22, 2, 72)])
         self.assertEqual(laid["low"], [event(0, 8, 36, "bass"), event(16, 8, 36, "bass")])
-        self.assertEqual(laid["beat"], [event(0, 4, 36, "thud"), event(4, 2, 90, "tick", 0.5),
-                                        event(6, 1, 62, "thud", 0.7),
-                                        event(8, 2, 36, "thud"), event(10, 2, 90, "tick", 0.5),
-                                        event(12, 2, 36, "thud"), event(14, 2, 90, "tick", 0.5),
-                                        event(16, 4, 36, "thud"), event(20, 2, 90, "tick", 0.5),
-                                        event(22, 1, 62, "thud", 0.7)])
+        self.assertEqual(laid["beat"], [event(0, 4, 36, "thud", drum="k"), event(4, 2, 90, "tick", 0.5, "h"),
+                                        event(6, 1, 62, "thud", 0.7, "s"),
+                                        event(8, 2, 36, "thud", drum="k"), event(10, 2, 90, "tick", 0.5, "h"),
+                                        event(12, 2, 36, "thud", drum="k"), event(14, 2, 90, "tick", 0.5, "h"),
+                                        event(16, 4, 36, "thud", drum="k"), event(20, 2, 90, "tick", 0.5, "h"),
+                                        event(22, 1, 62, "thud", 0.7, "s")])
         self.assertEqual(rows, 24)
 
     def test_one_pattern_gives_its_channels_as_they_are_written(self):
         laid, rows = lay({**SONG, "order": ["b"]})
         self.assertEqual(laid, {"tune": [event(0, 4, 72)],
-                                "beat": [event(0, 2, 36, "thud"), event(2, 2, 90, "tick", 0.5),
-                                         event(4, 2, 36, "thud"), event(6, 2, 90, "tick", 0.5)]})
+                                "beat": [event(0, 2, 36, "thud", drum="k"), event(2, 2, 90, "tick", 0.5, "h"),
+                                         event(4, 2, 36, "thud", drum="k"), event(6, 2, 90, "tick", 0.5, "h")]})
         self.assertEqual(rows, 8)
 
     def test_pattern_lasts_as_long_as_the_longest_of_its_channels(self):
@@ -205,9 +206,9 @@ class LayTest(unittest.TestCase):
         song = copy.deepcopy(SONG)
         song["patterns"] = {"a": {"beat": "k c s"}}
         song["order"] = ["a", "a"]
-        self.assertEqual(lay(song), ({"beat": [event(0, 1, 36, "thud"), event(1, 1, 60, "thud"),
-                                               event(2, 1, 62, "thud", 0.7), event(3, 1, 36, "thud"),
-                                               event(4, 1, 60, "thud"), event(5, 1, 62, "thud", 0.7)]}, 6))
+        self.assertEqual(lay(song), ({"beat": [event(0, 1, 36, "thud", drum="k"), event(1, 1, 60, "thud"),
+                                               event(2, 1, 62, "thud", 0.7, "s"), event(3, 1, 36, "thud", drum="k"),
+                                               event(4, 1, 60, "thud"), event(5, 1, 62, "thud", 0.7, "s")]}, 6))
 
     def test_pattern_left_out_of_the_order_is_not_read(self):
         song = tunes({"a": {"lead": "c"}, "b": {"lead": "c ? d", "nobody": "c"}}, ["a"])

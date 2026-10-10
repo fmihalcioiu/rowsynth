@@ -55,6 +55,7 @@ def parse(text: str, inst: str, rows_per_beat: int = 4, drums: dict | None = Non
     """Reads a channel's text. Gives its events, each {"row", "rows", "note", "inst", "vel"}, and the rows it fills.
 
     `drums` is what each drum letter plays: {letter: {"inst", "note", "rows", "vel"}}, the last two optional.
+    An event made from a drum letter has one key more, "drum", which is that letter.
     """
     events = []
     row = 0.0
@@ -93,7 +94,7 @@ def parse(text: str, inst: str, rows_per_beat: int = 4, drums: dict | None = Non
                 raise _unread(text, at)
             rows = _rows(length, len(found["drum_dots"]), rows_per_beat)
             events.append({"row": row, "rows": min(rows, hit.get("rows", rows)), "note": midi(hit["note"]),
-                           "inst": hit["inst"], "vel": vel * hit.get("vel", 1)})
+                           "inst": hit["inst"], "vel": vel * hit.get("vel", 1), "drum": found["drum"]})
             row += rows
         elif found["default"]:
             default = int(found["default"])

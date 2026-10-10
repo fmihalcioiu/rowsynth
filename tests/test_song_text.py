@@ -26,9 +26,10 @@ SONG = {"row_ticks": 6,
         "order": ["a", "b", "a"]}
 
 
-def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1) -> dict:
-    """One event as parse gives it."""
-    return {"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel}
+def event(row: float, rows: float, note: float, inst: str = "lead", vel: float = 1, drum: str = "") -> dict:
+    """One event as parse gives it. One made from a drum letter has that letter as well."""
+    found = {"row": row, "rows": rows, "note": note, "inst": inst, "vel": vel}
+    return {**found, "drum": drum} if drum else found
 
 
 class ParseTest(unittest.TestCase):
@@ -184,32 +185,33 @@ class ParseTest(unittest.TestCase):
 
     def test_a_drum_letter_plays_what_the_drums_say(self):
         events, rows = parse("k s h H t", "lead", drums=DRUMS)
-        self.assertEqual(events, [event(0, 1, 36, "thud"), event(1, 1, 50, "crack"), event(2, 1, 80, "tick", 0.5),
-                                  event(3, 1, 78, "tick", 0.8), event(4, 0.5, 51, "tub")])
+        self.assertEqual(events, [event(0, 1, 36, "thud", drum="k"), event(1, 1, 50, "crack", drum="s"),
+                                  event(2, 1, 80, "tick", 0.5, "h"), event(3, 1, 78, "tick", 0.8, "H"),
+                                  event(4, 0.5, 51, "tub", drum="t")])
         self.assertEqual(rows, 5)
 
     def test_a_drum_sounds_no_longer_than_its_rows_and_still_takes_its_length(self):
         events, rows = parse("k2 s2 H2 t2", "lead", drums=DRUMS)
-        self.assertEqual(events, [event(0, 8, 36, "thud"), event(8, 2, 50, "crack"), event(16, 3, 78, "tick", 0.8),
-                                  event(24, 0.5, 51, "tub")])
+        self.assertEqual(events, [event(0, 8, 36, "thud", drum="k"), event(8, 2, 50, "crack", drum="s"),
+                                  event(16, 3, 78, "tick", 0.8, "H"), event(24, 0.5, 51, "tub", drum="t")])
         self.assertEqual(rows, 32)
 
     def test_a_drum_takes_a_length_dots_and_the_length_l_set(self):
         events, rows = parse("l8 k h. s4.. t", "lead", drums=DRUMS)
-        self.assertEqual(events, [event(0, 2, 36, "thud"), event(2, 3, 80, "tick", 0.5), event(5, 2, 50, "crack"),
-                                  event(12, 0.5, 51, "tub")])
+        self.assertEqual(events, [event(0, 2, 36, "thud", drum="k"), event(2, 3, 80, "tick", 0.5, "h"),
+                                  event(5, 2, 50, "crack", drum="s"), event(12, 0.5, 51, "tub", drum="t")])
         self.assertEqual(rows, 14)
 
     def test_the_volume_scales_the_level_a_drum_has_of_its_own(self):
         events, rows = parse("v6 k h v15 H", "lead", drums=DRUMS)
-        self.assertEqual(events, [event(0, 1, 36, "thud", 0.4), event(1, 1, 80, "tick", 0.2),
-                                  event(2, 1, 78, "tick", 0.8)])
+        self.assertEqual(events, [event(0, 1, 36, "thud", 0.4, "k"), event(1, 1, 80, "tick", 0.2, "h"),
+                                  event(2, 1, 78, "tick", 0.8, "H")])
         self.assertEqual(rows, 3)
 
     def test_notes_and_drums_can_share_a_channel(self):
         events, rows = parse("c k @bass d s", "lead", drums=DRUMS)
-        self.assertEqual(events, [event(0, 1, 60), event(1, 1, 36, "thud"), event(2, 1, 62, "bass"),
-                                  event(3, 1, 50, "crack")])
+        self.assertEqual(events, [event(0, 1, 60), event(1, 1, 36, "thud", drum="k"), event(2, 1, 62, "bass"),
+                                  event(3, 1, 50, "crack", drum="s")])
         self.assertEqual(rows, 4)
 
     def test_text_that_cannot_be_read_is_quoted_from_where_it_starts(self):
