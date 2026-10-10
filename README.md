@@ -10,9 +10,11 @@ A chip synth driven by text. A sound effect is a list of notes for an instrument
 "lead": "o5 l4 e a >c< a8 b8 | >c< a f a8 g8 | g >c e c8< b8 | b >d< b g"
 ```
 
-rowsynth reads JSON files of such sounds and songs and computes the audio sample by sample. Its voices are pulse, sawtooth, triangle and noise waves, and FM with four operators. It writes WAV files, measures and checks what it renders, builds layered music for a player to mix, and writes a page to listen on.
+rowsynth reads JSON files of such sounds and songs and computes the audio sample by sample. Its voices are pulse, sawtooth, triangle and noise waves, and FM with four operators. It writes WAV files, measures and checks what it renders, builds layered music for a player to mix, and writes a page to listen on. Through ffmpeg the music can be Opus, and the page MP3 or Opus.
 
 It is made so that a program, or a person who cannot listen while writing, can still work. Every result can be read back as numbers: its level, the pitch at a given time, its brightness, and the jumps at its ends that would click.
+
+The two examples can be heard in a browser: [six sound effects and a layered tune](https://fmihalcioiu.github.io/rowsynth/), and [a longer piece](https://fmihalcioiu.github.io/rowsynth/piece/).
 
 ## Running it
 
@@ -25,6 +27,8 @@ pip install .
 That installs it with NumPy and Numba and adds a `rowsynth` command. In the clone, `python -m rowsynth` is the same command line, and the examples below are written that way.
 
 The first run is slower than the ones after it, because Numba compiles the loops over samples and keeps what it compiled. `ROWSYNTH_NO_JIT=1` in the environment switches the compiling off: the samples come out the same, and a long song takes far longer.
+
+MP3 and Opus files are made by ffmpeg, which has to be on the path. Nothing else needs it.
 
 ## A first sound
 
@@ -328,7 +332,7 @@ A chord in the project's `chords` table is the pitch class of its root and the p
 }
 ```
 
-`intro` is `{"order", "tail", "fade"}`. The patterns of its `order` are played once. The intro runs on for `tail` seconds past them, 1.5 when left out, for what is still sounding, and falls away to nothing over its last `fade` seconds, 0.05 when left out. The tail cannot be longer than one bar. The listen page has a player for the intro.
+`intro` is `{"order", "tail", "fade"}`. The patterns of its `order` are played once. The intro runs on for `tail` seconds past them, 1.5 when left out, for what is still sounding, and falls away to nothing over its last `fade` seconds, 0.05 when left out. The tail cannot be longer than one bar. `build` writes the intro as a file of its own, and the listen page has a player for it.
 
 ## Commands
 
@@ -493,7 +497,8 @@ python -m rowsynth check examples/arcade.json
 ### build
 
 ```
-usage: rowsynth build [-h] --out DIR [--rate N] FILE [NAME ...]
+usage: rowsynth build [-h] --out DIR [--rate N] [--format {wav,opus}]
+                      FILE [NAME ...]
 ```
 
 Writes songs into a folder as the files a player loads, with a manifest, `music.json`, that names them. With no `NAME` it builds every song of the project, and the rate is 48000 unless `--rate` gives another.
@@ -507,6 +512,7 @@ python -m rowsynth build examples/piece.json --out out/music
   "folder": "out/music",
   "manifest": "out/music/music.json",
   "rate": 48000,
+  "format": "wav",
   "songs": {
     "piece": {
       "loop_samples": 2534400,
@@ -518,15 +524,47 @@ python -m rowsynth build examples/piece.json --out out/music
 }
 ```
 
-A song without layers is one stereo loop, `NAME.wav`, with its loudest sample 1 dB under full scale. The loop is made to go round: what the song is still sounding when its rows end is added on at the start. `loop_samples` is its length. `gain` is what a player multiplies the samples by to have the song at its own level again. `source` is 16 hex digits made from the song, the rate and the version of rowsynth, and other digits in an older manifest mean its files are out of date. The manifest holds the `rate` and the `songs` printed here.
+A song without layers is one stereo loop, `NAME.wav`, with its loudest sample 1 dB under full scale. The loop is made to go round: what the song is still sounding when its rows end is added on at the start. `loop_samples` is its length. `gain` is what a player multiplies the samples by to have the song at its own level again. `source` is 16 hex digits made from the song, the rate and the version of rowsynth, and other digits in an older manifest mean its files are out of date. The manifest holds the `rate`, the `format` and the `songs` printed here.
+
+With `--format opus` the files are Opus and end in `.opus`, in the folder as in the manifest. Opus takes a rate of 8000, 12000, 16000, 24000 or 48000, and any other is refused. A build has no MP3: an MP3 file has silence added at its ends, and a loop of one cannot go round without a gap.
+
+A song with an `intro` has one more file, `NAME.intro.wav`, to be played once before the loop. It is multiplied by the same factor as the loop, so the two are at one level, and the entry of the song ends with `intro`. With `"intro": {"order": ["a"]}` added to the song in `walk.json`:
+
+```
+python -m rowsynth build walk.json --out out/walk
+```
+
+```
+{
+  "folder": "out/walk",
+  "manifest": "out/walk/music.json",
+  "rate": 48000,
+  "format": "wav",
+  "songs": {
+    "walk": {
+      "loop_samples": 153600,
+      "gain": 0.782657,
+      "source": "c45def5719929ca1",
+      "file": "walk.wav",
+      "intro": {
+        "file": "walk.intro.wav",
+        "in_samples": 225600,
+        "walk_samples": 153600
+      }
+    }
+  }
+}
+```
+
+`in_samples` is the length of the intro's file. `walk_samples` is the sample of it at which the loop is to begin, and the 1.5 seconds after that are the tail.
 
 ### page
 
 ```
-usage: rowsynth page [-h] --out DIR [--rate N] FILE
+usage: rowsynth page [-h] --out DIR [--rate N] [--format {wav,mp3,opus}] FILE
 ```
 
-Writes the listen page of a project into a folder.
+Writes the listen page of a project into a folder, with its audio as WAV unless `--format` asks for MP3 or Opus.
 
 ```
 python -m rowsynth page examples/arcade.json --out out/arcade
@@ -537,6 +575,7 @@ python -m rowsynth page examples/arcade.json --out out/arcade
   "page": "out/arcade/index.html",
   "folder": "out/arcade",
   "rate": 48000,
+  "format": "wav",
   "sounds": 6,
   "songs": 1,
   "files": 17
@@ -556,7 +595,7 @@ python -m rowsynth page examples/arcade.json --out out/arcade
 | `length` | A sound that lasts longer than its `max_seconds` |
 | `pitch` | A note in a sound's `check` that reads back more than 35 cents off, or cannot be read at all |
 | `join` | A loop that steps where it comes round. In a held sound, a step into the loop or round it of 0.25 or more of the largest step inside the loop. In a song, a stem or the mix of a group whose last sample is 0.02 or more from its first |
-| `rows` | A channel with fewer rows than the longest channel of its pattern |
+| `rows` | A channel with fewer rows than the longest channel of its pattern. Counts within a millionth of a row of each other are the same, so a channel of triplets adds up |
 | `level` | A mix that peaks at -1 dB against full scale or over, or that has samples at full scale. A layered song is held to it one version at a time, in every key |
 | `layers` | Groups that do not add up into versions: a channel in no group or in two, a group with no channels or in no version, a version that names a group twice, two groups in exactly the same versions |
 | `chords` | A note that starts on a beat and is none of the tones of the chord under it, or a pattern with more or fewer chords written than it has bars |
@@ -611,6 +650,7 @@ That writes seven WAV files and this manifest, `out/layers/music.json`:
 ```
 {
   "rate": 8000,
+  "format": "wav",
   "songs": {
     "tune": {
       "loop_samples": 102400,
@@ -648,15 +688,21 @@ The manifest is cut at each line of `...`: `middle` and `top` are listed as `low
 
 `layers` can also hold `premix`, a list of `{"version", "key"}`. Each is one more file, `NAME.VERSION.KEY.wav`: that version in that key already mixed, with its own loudest sample 1 dB under full scale. The manifest lists it under `premixed` with a `scale`, which is what its samples are multiplied by to be at the level of the groups' files.
 
+The intro of a layered song is at the level of its groups: the factor they share is the intro's as well.
+
 ## The listen page
 
-`page` renders every sound and every song of a project and writes `index.html`, one page with a player for each. A row of the page has a name, a player, and the length, the peak and the loudness that `measure` reads. The audio is WAV files in `audio` beside the page, and the page loads nothing else.
+`page` renders every sound and every song of a project and writes `index.html`, one page with a player for each. A row of the page has a name, a player, and the length, the peak and the loudness that `measure` reads. The audio is in `audio` beside the page, and the page loads nothing else.
 
-A sound has a row for each of its variants, and a held sound one each for its start, its loop and its end. A song has a row for its loop, and a layered song has one more for each of its versions in each of its keys. The players of loops go round. The files of one song are all multiplied by one factor, which puts the loudest sample among them 1 dB under full scale, and the numbers in a song's row are those of its mix before that factor.
+A sound has a row for each of its variants, and a held sound one each for its start, its loop and its end. A song has a row for its loop. A layered song has one more for each of its versions in each of its keys, and a song with an intro has one for that. The players of loops go round. The files of one song are all multiplied by one factor, which puts the loudest sample among them 1 dB under full scale, and the numbers in a song's row are those of its mix before that factor.
+
+The audio is WAV unless `--format` says `mp3` or `opus`. MP3 is written at a variable bit rate and Opus at about 96 kbit/s, both without tags, so the same samples make the same bytes from run to run. The numbers in the rows are read before a file is encoded, so they are the same in every format. Opus is held to the same rates as in a build.
+
+The two pages linked at the top of this file are in `docs`. They are the listen pages of the examples as MP3, made with:
 
 ```
-python -m rowsynth page examples/arcade.json --out out/arcade
-python -m rowsynth page examples/piece.json --out out/piece
+python -m rowsynth page examples/arcade.json --out docs --format mp3
+python -m rowsynth page examples/piece.json --out docs/piece --format mp3
 ```
 
 ## From Python
@@ -676,7 +722,19 @@ rowsynth.save_wav("out/tune.wav", [tune["left"], tune["right"]])
 
 `project.sound` and `project.song` give a copy with every instrument written out, which is what the renderers take. `render_entry` gives the buffers of a sound, levelled as the commands level it: one, or one a variant, or the start, the loop and the end of a held sound. `render_bank` does that for a whole table of sounds, and `render_sound` renders one `def` at its own gain. `render_song` gives the two sides of a song, `render_stems` one loop a channel, and `render_loop` those loops mixed to stereo.
 
-Samples are float32 NumPy arrays. The renderers work at 44100 samples a second unless they are given a `rate`. `build` and `write_page` do what the `build` and `page` commands do, at 48000 unless they are given another. `load_wav` reads a 16-bit WAV file back, and whatever the package refuses, it refuses with a `RowSynthError`.
+Samples are float32 NumPy arrays. The renderers work at 44100 samples a second unless they are given a `rate`. `build` and `write_page` do what the `build` and `page` commands do, at 48000 unless they are given another, and they take the format as `fmt`. `load_wav` reads a 16-bit WAV file back, and `save_audio` in `rowsynth.encode` writes samples in any of the formats. Whatever the package refuses, it refuses with a `RowSynthError`.
+
+## A skill for Claude
+
+`skills/rowsynth` is a skill that teaches Claude to make sounds and songs with this package: write the data, render it, read the numbers, run the checks, fix what they find, and build the listen page for a person to hear.
+
+For Claude Code, copy the folder into your skills folder, or into `.claude/skills/` of one project:
+
+```
+cp -r skills/rowsynth ~/.claude/skills/
+```
+
+The skill calls `python -m rowsynth`, so the package has to be installed where Claude runs, or Claude has to work from a clone of this repo.
 
 ## Licence
 
