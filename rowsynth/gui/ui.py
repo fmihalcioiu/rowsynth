@@ -16,13 +16,6 @@ if TYPE_CHECKING:
 
     from .canvas import Canvas
 
-#: From a side of a button to what is on it, the outline counted.
-PAD = 4
-#: Between the icon of a button and its text.
-GAP = 3
-#: How thick the strip along the lower edge of a toggle that is on.
-STRIP = 2
-
 #: What an event can be: a mouse button going down or up, the mouse moving, a step of the wheel, a key going down.
 KINDS = ("down", "up", "move", "wheel", "key")
 
@@ -230,10 +223,10 @@ def draw_button(canvas: Canvas, rect: Rect, text: str = "", icon: str = "", ink:
         canvas.hline(x + 1, y + 1, w - 2, theme.LIT)
     canvas.frame(rect, theme.LINE)
     if strip is not None:
-        canvas.box((x, y + h - STRIP, w, STRIP), strip)
+        canvas.box((x, y + h - theme.STRIP, w, theme.STRIP), strip)
     icon_w, icon_h = canvas.icon_size(icon) if icon else (0, 0)
-    gap = GAP if icon and text else 0
-    shown = fit(text, w - 2 * PAD - icon_w - gap)
+    gap = theme.GAP if icon and text else 0
+    shown = fit(text, w - 2 * theme.PAD - icon_w - gap)
     left = x + (w - icon_w - gap - Font.width(shown)) // 2
     top = y + int(pressed)
     with canvas.clip(rect):
@@ -324,7 +317,7 @@ class Choice(Widget):
         """The rectangle of each option, side by side from the left: together they are the whole rectangle."""
         x, y, _, h = self.rect
         cells = []
-        for width in share(self.rect[2], [Font.width(text) + 2 * PAD for text in self.options]):
+        for width in share(self.rect[2], [Font.width(text) + 2 * theme.PAD for text in self.options]):
             cells.append((x, y, width, h))
             x += width
         return cells
