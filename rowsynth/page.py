@@ -1,4 +1,4 @@
-"""A listen page: every sound and every song of a project as WAV files, and one HTML page with a player for each."""
+"""A listen page: every sound and every song of a project as audio files, and one HTML page with a player for each."""
 from __future__ import annotations
 
 import html
@@ -9,12 +9,12 @@ from urllib.parse import quote
 import numpy as np
 
 from .bank import _to_peak, render_bank
+from .encode import save_audio
 from .errors import RowSynthError
 from .layers import mix_version, render_groups, render_intro
 from .measure import measure
 from .project import Project
 from .song import render_loop
-from .wav import save_wav
 
 # The samples a second the audio of a page is rendered at, when no rate is asked for.
 PAGE_RATE = 48000
@@ -109,12 +109,17 @@ def _parts(entry: dict, count: int) -> list[int | str | None]:
     return [None]
 
 
-def _file(name: str, part: int | str | None, joint: str = "-") -> str:
-    """The name of the file of a row: the name of its sound or its song, then, after `joint`, which one of it."""
-    return f"{name}.wav" if part is None else f"{name}{joint}{part}.wav"
+def _file(name: str, part: int | str | None, fmt: str, joint: str = "-") -> str:
+    """The name of the file of a row.
+
+    It is the name of its sound or its song, then, after `joint`, which one of it, and the format the file is
+    written in as its ending.
+    """
+    stem = name if part is None else f"{name}{joint}{part}"
+    return f"{stem}.{fmt}"
 
 
-def _sound_rows(project: Project, rate: int) -> list[_Row]:
+def _sound_rows(project: Project, rate: int, fmt: str) -> list[_Row]:
     """The rows of the sounds, in the order of the project: one for each buffer of the bank that has samples."""
     entries = {name: project.sound(name) for name in project.sounds}
     rows = []
@@ -123,7 +128,7 @@ def _sound_rows(project: Project, rate: int) -> list[_Row]:
         for part, samples in zip(_parts(entries[name], len(buffers)), buffers):
             if len(samples):
                 which = f"variant {part}" if isinstance(part, int) else part or ""
-                rows.append(_row(name, which, _file(name, part), (samples,), part == "loop", rate))
+                rows.append(_row(name, which, _file(name, part, fmt), (samples,), part == "loop", rate))
     return rows
 
 
@@ -149,7 +154,7 @@ def _mixes(song: dict, rate: int) -> list[tuple[str | None, str, tuple[np.ndarra
     return mixes
 
 
-def _song_rows(project: Project, rate: int) -> list[_Row]:
+def _song_rows(project: Project, rate: int, fmt: str) -> list[_Row]:
     """The rows of the songs, in the order of the project: one for each mix of each song.
 
     The figures of a row are of its mix at the level the song's data gives it. The files are at another. Every
@@ -161,7 +166,7 @@ def _song_rows(project: Project, rate: int) -> list[_Row]:
     rows = []
     for name in project.songs:
         try:
-            made = [_row(name, which, f"{_SONGS}/{_file(name, part, '.')}", sides, loop, rate)
+            made = [_row(name, which, f"{_SONGS}/{_file(name, part, fmt, '.')}", sides, loop, rate)
                     for part, which, sides, loop in _mixes(project.song(name), rate)]
         except RowSynthError as error:
             raise RowSynthError(f"songs.{name}: {error}") from None
@@ -213,7 +218,7 @@ def _section(kind: str, rows: list[_Row]) -> str:
             "</table>\n</section>\n")
 
 
-def write_page(project: Project, out_dir: str | Path, rate: int = PAGE_RATE) -> dict:
+def write_page(project: Project, out_dir: str | Path, rate: int = PAGE_RATE, fmt: str = "wav") -> dict:
     """Writes a page to listen to a project by, `out_dir/index.html`, and says what it wrote.
 
     The page has a section of the sounds and after it one of the songs. Each has a row for every audio file,
@@ -221,14 +226,18 @@ def write_page(project: Project, out_dir: str | Path, rate: int = PAGE_RATE) -> 
     the length, the peak and the loudness that `measure` reads. A section with no rows has a line that says
     so. The page is one file of HTML, and loads nothing but the audio beside it.
 
+    Every audio file is written by `save_audio` in the format `fmt`, "wav", "mp3" or "opus", and has that as
+    its ending: the names below are those of a page of WAV files. MP3 and Opus are made by ffmpeg. The figures
+    of a row are read before its file is encoded, so they are the same in every format.
+
     Every sound is rendered by the bank at `rate`, so that it is heard at the level it would be played at.
-    Each of its buffers is a mono WAV file in `out_dir/audio/`: NAME.wav for one sound or a sound of parts,
+    Each of its buffers is a mono file in `out_dir/audio/`: NAME.wav for one sound or a sound of parts,
     NAME-0.wav, NAME-1.wav and so on for variants, and NAME-start.wav, NAME-loop.wav and NAME-end.wav for a
     held sound. A buffer of no samples gets no file and no row. Only the start of a held sound can be one,
     when the sound starts at 0. The figures of a row are those of its buffer. The player of a held sound's
     loop goes round.
 
-    Every song is a stereo WAV file in `out_dir/audio/songs/`, NAME.wav: the loop that `render_loop` makes of
+    Every song is a stereo file in `out_dir/audio/songs/`, NAME.wav: the loop that `render_loop` makes of
     it. A song with layers has a file for each of its versions in each of its keys after that,
     NAME.VERSION.KEY.wav, whose row says "VERSION, key +2". A song with an intro has NAME.intro.wav last. The
     player of an intro stops at its end, and that of every other file of a song goes round. The files of one
@@ -239,20 +248,22 @@ def write_page(project: Project, out_dir: str | Path, rate: int = PAGE_RATE) -> 
 
     Everything is rendered before anything is written. A sound that cannot be rendered is refused with its
     name in front, and a song with "songs." and its name. So are two rows whose files would have one name
-    with case set aside. Files that are there already are written over.
+    with case set aside. What `save_audio` refuses of a format, one it does not know, one it finds no ffmpeg
+    for or a rate that Opus does not take, is refused as the first file is to be written, with nothing written
+    yet. Files that are there already are written over.
     What comes back is {"page": path, "files": [path, ...]}: the page, and the audio files in the order of
     their rows, those of the sounds first. It holds what this call wrote and no more, so a file that an
     earlier page left in the folder is not in it.
     """
-    sounds = _sound_rows(project, rate)
-    songs = _song_rows(project, rate)
+    sounds = _sound_rows(project, rate, fmt)
+    songs = _song_rows(project, rate, fmt)
     _apart(sounds + songs)
     out_dir = Path(out_dir)
     files = []
     for row in sounds + songs:
         path = out_dir / "audio" / row.file
-        # `save_wav` takes one side on its own and two as a pair.
-        save_wav(path, row.sides[0] if len(row.sides) == 1 else row.sides, rate)
+        # `save_audio` takes one side on its own and two as a pair.
+        save_audio(path, row.sides[0] if len(row.sides) == 1 else row.sides, rate, fmt)
         files.append(str(path))
     # With no sounds and no songs, nothing has made the folder yet.
     out_dir.mkdir(parents=True, exist_ok=True)

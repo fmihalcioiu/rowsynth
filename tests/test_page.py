@@ -1,10 +1,12 @@
 """Tests for rowsynth.page."""
 from __future__ import annotations
 
+import shutil
 import tempfile
 import unittest
 from html.parser import HTMLParser
 from pathlib import Path
+from unittest import mock
 from urllib.parse import unquote
 
 import numpy as np
@@ -517,6 +519,52 @@ class SongRowsTest(PageCase):
                 write_page(project, out / "site", RATE)
             self.assertEqual(str(caught.exception), f"{files}: two rows of the page cannot have one file, and these "
                                                     "names are the same once case is set aside")
+            self.assertEqual(list(out.iterdir()), [])
+
+
+class FormatTest(PageCase):
+    # What a file of each format that ffmpeg makes starts with. An MP3 file starts with an ID3 tag or with a frame.
+    STARTS = {"mp3": (b"ID3", b"\xff"), "opus": (b"OggS",)}
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not on the path")
+    def test_a_format_is_the_ending_of_every_file_and_of_every_address_and_the_rest_of_the_page_is_the_same(self):
+        # Variants, a held sound and a song: a file of each kind of name, one of them in the folder of the songs.
+        project = project_of({"march": SONGS["march"]}, steps=SOUNDS["steps"], hum=SOUNDS["hum"])
+        names = ["steps-0", "steps-1", "hum-start", "hum-loop", "hum-end", "songs/march"]
+        as_wav = Path(write_page(project, self.folder(), RATE)["page"]).read_text(encoding="ascii")
+        for fmt, starts in self.STARTS.items():
+            out = self.folder()
+            written = write_page(project, out, RATE, fmt)
+            files = [out / "audio" / f"{name}.{fmt}" for name in names]
+            self.assertEqual(written["files"], [str(path) for path in files])
+            self.assertEqual(sorted(path for path in (out / "audio").rglob("*") if path.is_file()), sorted(files))
+            for path in files:
+                self.assertTrue(path.read_bytes().startswith(starts), path)
+            text = Path(written["page"]).read_text(encoding="ascii")
+            self.assertEqual(sources(Page(text)), [f"audio/{name}.{fmt}" for name in names])
+            # The figures are read before a file is encoded, so every row says what it says of a WAV file.
+            self.assertEqual(text, as_wav.replace(".wav", f".{fmt}"))
+
+    def test_wav_as_the_format_writes_the_page_and_the_files_that_are_written_with_none_given(self):
+        project = project_of({"march": SONGS["march"]}, chime=SOUNDS["chime"])
+        left_out, named = self.folder(), self.folder()
+        write_page(project, left_out, RATE)
+        written = write_page(project, named, RATE, "wav")
+        files = ("audio/chime.wav", "audio/songs/march.wav")
+        self.assertEqual(written["files"], [str(named / file) for file in files])
+        for file in ("index.html", *files):
+            self.assertEqual((named / file).read_bytes(), (left_out / file).read_bytes(), file)
+
+    def test_a_format_or_a_rate_for_it_that_cannot_be_written_is_refused_and_nothing_is_written(self):
+        # MP3 is refused for want of ffmpeg. The other two are refused whether there is one or not.
+        refused = [("flac", RATE, "unknown format 'flac': a file is written as wav, mp3 or opus"),
+                   ("opus", 11025, "opus takes a rate of 8000, 12000, 16000, 24000 or 48000, got 11025"),
+                   ("mp3", RATE, "ffmpeg is needed to write mp3, and none is found on the path")]
+        for fmt, rate, said in refused:
+            out = self.folder()
+            with mock.patch("shutil.which", return_value=None), self.assertRaises(RowSynthError) as caught:
+                write_page(project_of(chime=SOUNDS["chime"]), out / "site", rate, fmt)
+            self.assertEqual(str(caught.exception), said)
             self.assertEqual(list(out.iterdir()), [])
 
 

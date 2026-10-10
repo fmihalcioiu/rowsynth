@@ -7,11 +7,13 @@ import json
 import math
 import os
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -557,12 +559,12 @@ class Page(CommandLineCase):
         """What main returns for writing the listen page of a project file holding `data` into the folder `out`."""
         return self.run_main("page", str(self.saved(data)), "--out", str(out), *flags)
 
-    def test_page_prints_the_page_the_folder_as_it_was_typed_the_rate_and_how_much_is_on_the_page(self) -> None:
+    def test_page_prints_the_page_the_folder_as_typed_the_rate_the_format_and_how_much_is_on_the_page(self) -> None:
         # The folder is typed with a separator after it, which the path of the page inside it has no use for.
         typed = f"{self.folder / 'site'}{os.sep}"
         self.assertEqual(self.page(typed), 0)
-        told = {"page": str(self.folder / "site" / "index.html"), "folder": typed, "rate": 48000, "sounds": 4,
-                "songs": 2, "files": len(self.FILES) + len(self.SONG_FILES)}
+        told = {"page": str(self.folder / "site" / "index.html"), "folder": typed, "rate": 48000, "format": "wav",
+                "sounds": 4, "songs": 2, "files": len(self.FILES) + len(self.SONG_FILES)}
         self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
 
     def test_the_page_and_its_audio_files_are_in_a_folder_the_command_makes(self) -> None:
@@ -587,10 +589,44 @@ class Page(CommandLineCase):
     def test_a_project_with_no_sounds_gets_a_page_and_no_audio_files(self) -> None:
         out = self.folder / "site"
         self.assertEqual(self.page(out, data={}), 0)
-        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 48000, "sounds": 0, "songs": 0,
-                "files": 0}
+        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 48000, "format": "wav", "sounds": 0,
+                "songs": 0, "files": 0}
         self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
         self.assertEqual([found.name for found in out.iterdir()], ["index.html"])
+
+    @unittest.skipUnless(shutil.which("ffmpeg"), "ffmpeg is not on the path")
+    def test_format_is_what_the_audio_files_are_written_as_and_named_by_and_is_printed(self) -> None:
+        data = {"instruments": PROJECT["instruments"], "sounds": {"tap": PROJECT["sounds"]["tap"]},
+                "songs": {"sting": PROJECT["songs"]["sting"]}}
+        out = self.folder / "site"
+        self.assertEqual(self.page(out, "--rate", "8000", "--format", "opus", data=data), 0)
+        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 8000, "format": "opus", "sounds": 1,
+                "songs": 1, "files": 2}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        self.assertEqual(sorted(found.name for found in (out / "audio").iterdir()), ["songs", "tap.opus"])
+        self.assertEqual([found.name for found in (out / "audio" / "songs").iterdir()], ["sting.opus"])
+        # A file of Opus starts as an Ogg file does, and the page plays the files by their names.
+        page = (out / "index.html").read_text(encoding="ascii")
+        for file in ("tap.opus", "songs/sting.opus"):
+            self.assertEqual((out / "audio" / file).read_bytes()[:4], b"OggS", file)
+            self.assertIn(f'src="audio/{file}"', page)
+
+    def test_a_format_that_is_not_wav_mp3_or_opus_is_refused_with_code_2(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.page(self.folder / "site", "--format", "flac")
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertIn("argument --format: invalid choice: 'flac'", err)
+        self.assertFalse((self.folder / "site").exists())
+
+    def test_a_format_that_needs_ffmpeg_is_an_error_with_code_2_when_none_is_found_and_no_page_is_written(self) -> None:
+        data = {"instruments": PROJECT["instruments"], "sounds": {"tap": PROJECT["sounds"]["tap"]}}
+        out = self.folder / "site"
+        with mock.patch("shutil.which", return_value=None):
+            self.assertEqual(self.page(out, "--rate", "8000", "--format", "mp3", data=data), 2)
+        self.assertEqual(self.printed(), ("", "error: ffmpeg is needed to write mp3, and none is found on the path\n"))
+        self.assertFalse(out.exists())
 
     def test_page_of_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
         path, out = self.folder / "nowhere.json", self.folder / "site"
