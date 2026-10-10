@@ -49,7 +49,8 @@ def _song(project: Project, name: str) -> dict:
         told["layers"] = {
             "groups": list(layers["groups"]),
             "versions": list(layers["versions"]),
-            "keys": layers["keys"],
+            # Keys left out are the one key the song is written in.
+            "keys": layers.get("keys", [0]),
         }
     return told
 

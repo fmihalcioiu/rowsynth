@@ -317,6 +317,12 @@ class Info(CommandLineCase):
         self.assertEqual(self.run_main("info", str(self.saved(PROJECT))), 0)
         self.assertEqual(self.printed(), (json.dumps(INFO, indent=2) + "\n", ""))
 
+    def test_info_of_a_layered_song_with_its_keys_left_out_gives_the_one_key_it_is_written_in(self) -> None:
+        keyless = json.loads(json.dumps(PROJECT))
+        del keyless["songs"]["round"]["layers"]["keys"]
+        self.assertEqual(self.run_main("info", str(self.saved(keyless))), 0)
+        self.assertEqual(json.loads(self.out.getvalue())["songs"]["round"]["layers"]["keys"], [0])
+
     def test_info_of_a_project_with_nothing_in_it_prints_every_table_empty(self) -> None:
         self.assertEqual(self.run_main("info", str(self.saved({}))), 0)
         self.assertEqual(json.loads(self.out.getvalue()), {"instruments": [], "sounds": {}, "songs": {}, "chords": []})
