@@ -71,20 +71,20 @@ class Opening(unittest.TestCase):
         self.assertEqual(opening((1366, 768)), (960, 540))
 
     def test_it_is_cut_down_to_the_desktop_less_what_its_bars_take_and_keeps_its_scale(self) -> None:
-        self.assertEqual(theme.DESKTOP_TAKEN_H, 80)
-        for desktop, size, scale in (((1920, 1080), (1920, 1000), 2), ((3840, 2160), (3840, 2080), 4)):
+        self.assertEqual(theme.DESKTOP_TAKEN_H, 96)
+        for desktop, size, scale in (((1920, 1080), (1920, 984), 2), ((3840, 2160), (3840, 2064), 4)):
             with self.subTest(desktop=desktop):
                 self.assertEqual(opening(desktop), size)
                 self.assertEqual(fit(size)[0], scale)
 
     def test_on_a_desktop_too_small_for_scale_1_it_opens_at_what_fits(self) -> None:
-        self.assertEqual(opening((800, 600)), (800, 520))
+        self.assertEqual(opening((800, 600)), (800, 504))
 
     def test_a_scale_that_is_given_takes_the_place_of_the_largest(self) -> None:
         self.assertEqual(opening((2560, 1440), 1), (960, 540))
         self.assertEqual(opening((3840, 2160), 2), (1920, 1080))
         # One too large for the desktop is kept, and the window is cut down.
-        self.assertEqual(opening((1920, 1080), 3), (1920, 1000))
+        self.assertEqual(opening((1920, 1080), 3), (1920, 984))
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -199,11 +199,11 @@ class Run(unittest.TestCase):
         self.assertEqual(shot.read_bytes()[:8], b"\x89PNG\r\n\x1a\n")
         with open(shot, "rb") as file:
             drawn = pygame.image.load(file, ".png")
-        # The window was 1920 by 1000, to fit the desktop, and so at twice.
-        self.assertEqual(drawn.get_size(), (960, 500))
+        # The window was 1920 by 984, to fit the desktop, and so at twice.
+        self.assertEqual(drawn.get_size(), (960, 492))
         # The top bar and its line, the left panel's line, the middle, the right panel's line and the status bar's.
         self.assertEqual([drawn.get_at(pos)[:3] for pos in ((0, 0), (0, 21), (123, 22), (124, 22), (786, 300),
-                                                            (787, 300), (500, 486), (500, 499))],
+                                                            (787, 300), (500, 478), (500, 491))],
                          [theme.PANEL, theme.LINE, theme.LINE, theme.BACKGROUND, theme.LINE, theme.PANEL,
                           theme.LINE, theme.PANEL])
 

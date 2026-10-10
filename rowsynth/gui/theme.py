@@ -50,4 +50,6 @@ DESIGN = (960, 540)
 # a full HD desktop, where the title bar and the task bar take their share, is still shown at twice.
 MIN_ART = (960, 480)
 # What a desktop loses to the title bar of a window and to the task bar, in window pixels of height: an allowance.
-DESKTOP_TAKEN_H = 80
+# The window is centred on the desktop, so half of it is left free above and half below, and each half must
+# clear a task bar of 48.
+DESKTOP_TAKEN_H = 96
