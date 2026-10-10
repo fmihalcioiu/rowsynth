@@ -7,7 +7,8 @@ import unittest
 
 import numpy as np
 
-from rowsynth.bank import PEAK_DB, RENDER_GAIN, held_parts, normalise, render_bank, render_entry
+from rowsynth.bank import (PEAK_DB, RENDER_GAIN, entry_kind, held_parts, held_spans, normalise, part_start,
+                           render_bank, render_entry)
 from rowsynth.errors import RowSynthError
 from rowsynth.sound import render_sound
 
@@ -332,6 +333,41 @@ class KnownSamplesTest(unittest.TestCase):
         self.check(loop, 2205, ((0, 0.119624), (162, -0.410573), (1102, -0.025169), (1470, -0.085650),
                                 (1838, -0.000534), (2203, 0.117324), (2204, 0.118931)))
         self.check(end, 2940, ((0, 0.000556), (670, 0.147987), (980, -0.021434), (2939, 0.0)))
+
+
+class UnrenderedTest(unittest.TestCase):
+    """What is told of an entry with nothing rendered."""
+
+    def refused(self, call, wrong: tuple) -> None:
+        """Holds that each (value, rate) is refused by call, with an error that opens with its place."""
+        for value, rate, place in wrong:
+            with self.assertRaises(RowSynthError, msg=repr((value, rate))) as caught:
+                call(value, rate)
+            self.assertTrue(str(caught.exception).startswith(place), caught.exception)
+
+    def test_entry_kind_is_the_one_key_an_entry_is_made_of(self):
+        self.assertEqual([entry_kind(entry) for entry in ({"def": CHIRP, "db": -2}, {"defs": STEPS}, BOTH, HELD)],
+                         ["def", "defs", "parts", "held"])
+
+    def test_part_start_is_the_sample_a_part_starts_at_and_its_entry_and_refuses_what_render_entry_does(self):
+        first, second = BOTH["parts"]
+        self.assertEqual(part_start(first, RATE), (0, first[1]))
+        # Half way between two samples is taken to the later one.
+        self.assertEqual(part_start(second, RATE), (63, second[1]))
+        self.assertEqual(part_start((1, {"def": QUIET}))[0], 44100)
+        self.refused(part_start, (([0], RATE, "must be [seconds, entry]"), ([-1, {"def": CHIRP}], RATE, "seconds: "),
+                                  ([0, {"defs": STEPS}], RATE, "entry: a part is one sound"),
+                                  ([0, None], RATE, "entry: "), (first, 0, "rate: ")))
+
+    def test_held_spans_are_the_samples_held_parts_cuts_and_fades_by_and_the_note_is_not_looked_at(self):
+        self.assertEqual(held_spans(HELD, RATE), (267, 400, 133))
+        self.assertEqual(held_spans(HELD), (1470, 2205, 735))
+        self.assertEqual([len(part) for part in held_parts(HELD, RATE)[:2]], [267, 400])
+        # The note is 1200 samples, too short for this start and this loop, which `held_parts` refuses.
+        self.assertEqual(held_spans(held(start=5, loop=5), RATE), (667, 667, 133))
+        self.refused(held_spans, ((held(join=-1), RATE, "held: join: "), (held(loop=0), RATE, "held: loop: "),
+                                  ({"held": None}, RATE, "held: "), ({"def": CHIRP}, RATE, "entry: only an entry"),
+                                  (HELD, 0, "rate: ")))
 
 
 class ErrorTest(unittest.TestCase):

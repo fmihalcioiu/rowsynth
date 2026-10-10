@@ -157,6 +157,37 @@ def _k_line(out, dry, line, delay, feedback, ease, level):
         out[i] = float(out[i]) + level * back
 
 
+class Lines(NamedTuple):
+    """The delay lines the settings of an echo come to at a rate."""
+
+    delays: list[int]
+    feedback: float
+    level: float
+    samples: int
+
+
+def echo_lines(time: float | list[float], feedback: float = 0.3, mix: float = 0.3, lp: float = 3000.0,
+               rate: int = DEFAULT_RATE) -> Lines:
+    """The delay lines `echo` runs a sound through with these settings, with nothing run through them.
+
+    delays has the samples each line holds the sound back by, one line for every time above 0. feedback is the
+    share of what comes back that a line takes in again, held between 0 and 0.95. level is that of each line's
+    first return: the mix, shared between the lines. samples is how much longer than the sound its buffer gets:
+    the longest time, once for every return that is less than sixty decibels under the first. With no line it
+    is 0. lp is checked with the other settings, and none of the four goes by it.
+    """
+    _settings({"time": time, "feedback": feedback, "mix": mix, "lp": lp})
+    _count(rate, "rate", 1)
+    times = [seconds for seconds in (time if isinstance(time, (list, tuple)) else (time,)) if seconds > 0]
+    kept = min(max(feedback, 0), _TOP_FEEDBACK)
+    if not times:
+        return Lines([], float(kept), 0.0, 0)
+    returns = math.ceil(-_HEARD / math.log10(kept)) if kept > 0 else 1
+    # A time under half a sample would be no delay at all, and a line cannot read the cell it is writing.
+    delays = [max(1, math.floor(seconds * rate + 0.5)) for seconds in times]
+    return Lines(delays, float(kept), mix / len(times), math.ceil(returns * max(times) * rate))
+
+
 def echo(dry: np.ndarray, time: float | list[float], feedback: float = 0.3, mix: float = 0.3, lp: float = 3000.0,
          rate: int = DEFAULT_RATE) -> np.ndarray:
     """dry with its echo added, in a new and longer buffer. dry is left as it was.
@@ -167,28 +198,22 @@ def echo(dry: np.ndarray, time: float | list[float], feedback: float = 0.3, mix:
     the lines share `mix` between them. With one line the first return is at `mix` of the sound, with two each
     line's is at half of that. A time that is not above 0 is no line, and with no line at all what comes back
     is dry as it is. feedback is held between 0 and 0.95. The buffer is longer than dry by the longest time,
-    once for every return that is less than sixty decibels under the first.
+    once for every return that is less than sixty decibels under the first. `echo_lines` gives the lines.
     """
     _buffer(dry, "dry")
-    _settings({"time": time, "feedback": feedback, "mix": mix, "lp": lp})
-    _count(rate, "rate", 1)
-    times = [seconds for seconds in (time if isinstance(time, (list, tuple)) else (time,)) if seconds > 0]
-    if not times:
+    lines = echo_lines(time, feedback, mix, lp, rate)
+    if not lines.delays:
         return dry.copy()
-    kept = min(max(feedback, 0), _TOP_FEEDBACK)
-    returns = math.ceil(-_HEARD / math.log10(kept)) if kept > 0 else 1
-    out = np.zeros(len(dry) + math.ceil(returns * max(times) * rate), dtype=np.float32)
+    out = np.zeros(len(dry) + lines.samples, dtype=np.float32)
     out[:len(dry)] = dry
     ease = 1 - math.exp((-2 * math.pi * lp) / rate)
     line = np.zeros(len(out), dtype=np.float32)
-    for seconds in times:
-        # A time under half a sample would be no delay at all, and a line cannot read the cell it is writing.
-        delay = max(1, math.floor(seconds * rate + 0.5))
-        _k_line(out, dry, line, delay, float(kept), ease, mix / len(times))
+    for delay in lines.delays:
+        _k_line(out, dry, line, delay, lines.feedback, ease, lines.level)
     return out
 
 
-class _Sound(NamedTuple):
+class Sound(NamedTuple):
     """What a sound definition says, once it has been checked."""
 
     notes: list[tuple]
@@ -196,12 +221,13 @@ class _Sound(NamedTuple):
     echo: dict | None
 
 
-def _read(defn: object) -> _Sound:
+def read_sound(defn: object) -> Sound:
     """Checks a sound definition from end to end, and returns what it says: its notes, its gain and its echo.
 
-    A note comes back as (instrument, tick, note number, ticks, velocity). The echo comes back as its settings,
-    or as None from a sound that has none. Whatever is wrong is refused with the place it sits at:
-    "voices[1].notes[0][2]" is the third value of the first note of the second voice.
+    A note comes back as (instrument, tick, note number, ticks, velocity, voice), the last of them the voice it
+    is in, counted from 0. The echo comes back as its settings, or as None from a sound that has none. Whatever
+    is wrong is refused with the place it sits at: "voices[1].notes[0][2]" is the third value of the first note
+    of the second voice.
     """
     _keys(defn, "sound", ("voices",), ("gain", "echo"))
     gain = defn.get("gain", 0.5)
@@ -230,8 +256,29 @@ def _read(defn: object) -> _Sound:
             _number(number, f"{spot}[1]")
             _length(ticks, f"{spot}[2]")
             _number(velocity, f"{spot}[3]")
-            notes.append((voice["inst"], tick, number, ticks, velocity))
-    return _Sound(notes, gain, defn.get("echo"))
+            notes.append((voice["inst"], tick, number, ticks, velocity, i))
+    return Sound(notes, gain, defn.get("echo"))
+
+
+def tick_sample(tick: float, rate: int = DEFAULT_RATE) -> int:
+    """The sample a time in ticks falls on at a rate: the nearest one. A length in ticks is as many samples long."""
+    _length(tick, "tick")
+    _count(rate, "rate", 1)
+    return math.floor(tick * (rate / TICK_HZ) + 0.5)
+
+
+def _dry_samples(sound: Sound, rate: int) -> int:
+    """The samples of a sound's buffer before its echo: it runs until two ticks after the last release is over."""
+    end = max((tick + ticks + inst.get("release", _RELEASE) for inst, tick, _, ticks, _, _ in sound.notes), default=0)
+    return math.ceil((end + _TAIL) * (rate / TICK_HZ))
+
+
+def sound_samples(defn: dict, rate: int = DEFAULT_RATE) -> int:
+    """How many samples `render_sound` makes of a definition at a rate, counted with nothing rendered."""
+    sound = read_sound(defn)
+    _count(rate, "rate", 1)
+    dry = _dry_samples(sound, rate)
+    return dry if sound.echo is None else dry + echo_lines(**sound.echo, rate=rate).samples
 
 
 def render_sound(defn: dict, rate: int = DEFAULT_RATE, gain: float | None = None) -> np.ndarray:
@@ -246,16 +293,14 @@ def render_sound(defn: dict, rate: int = DEFAULT_RATE, gain: float | None = None
     A gain handed in beside the definition is the one the sound goes through the output stage at, in place of
     the definition's own.
     """
-    sound = _read(defn)
+    sound = read_sound(defn)
     _count(rate, "rate", 1)
     if gain is None:
         gain = sound.gain
     _number(gain, "gain")
-    tick_samples = rate / TICK_HZ
-    end = max((tick + ticks + inst.get("release", _RELEASE) for inst, tick, _, ticks, _ in sound.notes), default=0)
-    out = np.zeros(math.ceil((end + _TAIL) * tick_samples), dtype=np.float32)
-    for inst, tick, note, ticks, velocity in sound.notes:
-        render_note(out, math.floor(tick * tick_samples + 0.5), inst, note, ticks, velocity, rate)
+    out = np.zeros(_dry_samples(sound, rate), dtype=np.float32)
+    for inst, tick, note, ticks, velocity, _ in sound.notes:
+        render_note(out, tick_sample(tick, rate), inst, note, ticks, velocity, rate)
     if sound.echo is not None:
         out = echo(out, **sound.echo, rate=rate)
     return finish(out, gain, rate)

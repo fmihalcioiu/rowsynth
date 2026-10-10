@@ -7,7 +7,7 @@ import numpy as np
 
 from .errors import RowSynthError
 from .note import DEFAULT_RATE, TICK_HZ, _buffer, _count, _length, _number
-from .sound import _keys, _list, render_sound
+from .sound import _keys, _list, render_sound, tick_sample
 
 # The gain every sound of a bank is rendered at, whatever gain it has of its own: low enough for a sound to
 # stay under the knee of the output stage and come out with its shape unbent.
@@ -69,8 +69,11 @@ def _levels(db: object, count: int) -> list:
     return list(db)
 
 
-def _kind(entry: object) -> str:
-    """The kind of an entry: the one key of _KINDS it has. Refuses what is not an entry, or is of no kind or of two."""
+def entry_kind(entry: object) -> str:
+    """The kind of an entry: the one key of 'def', 'defs', 'parts' and 'held' it has.
+
+    Refuses what is not an entry, or is of no kind or of two.
+    """
     _keys(entry, "entry", (), _KINDS + _REST)
     kinds = [kind for kind in _KINDS if kind in entry]
     if len(kinds) != 1:
@@ -113,17 +116,27 @@ def _variants(entry: dict, rate: int) -> list[np.ndarray]:
     return [_levelled(defn, f"defs[{i}]", level, rate) for i, (defn, level) in enumerate(zip(defs, levels))]
 
 
-def _placed(part: object, rate: int) -> tuple[int, np.ndarray]:
-    """One part of a timeline, [seconds, entry]: the sample it starts at, and its buffer at its own level."""
+def part_start(part: object, rate: int = DEFAULT_RATE) -> tuple[int, dict]:
+    """One part of a timeline, [seconds, entry]: the sample it starts at, and its entry, which is of one def.
+
+    The sample is the one nearest to its seconds. Nothing is rendered.
+    """
+    _count(rate, "rate", 1)
     if not isinstance(part, (list, tuple)) or len(part) != 2:
         raise RowSynthError(f"must be [seconds, entry], not {part!r}")
     seconds, entry = part
     _length(seconds, "seconds")
-    kind = _kind(entry)
+    kind = entry_kind(entry)
     if kind != "def":
         # A part gives the timeline one buffer. Of variants, all but the first would be lost without a word.
         raise RowSynthError(f"entry: a part is one sound: it must have 'def', not {kind!r}")
-    return math.floor(seconds * rate + 0.5), _one(entry, rate)
+    return math.floor(seconds * rate + 0.5), entry
+
+
+def _placed(part: object, rate: int) -> tuple[int, np.ndarray]:
+    """One part of a timeline, [seconds, entry]: the sample it starts at, and its buffer at its own level."""
+    at, entry = part_start(part, rate)
+    return at, _one(entry, rate)
 
 
 def _timeline(entry: dict, rate: int) -> np.ndarray:
@@ -164,17 +177,15 @@ def _joined(note: np.ndarray, start: int, loop: int, join: int) -> np.ndarray:
     return out
 
 
-def _cut(entry: dict, rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """The start, the loop and the end of {"held": {...}}, as they come before they are levelled.
+def _spans(held: object, rate: int) -> tuple[int, int, int]:
+    """The samples the start, the loop and the join of a held sound take, once its keys and lengths are checked.
 
     What is wrong with the held sound is refused with "held" and its key in front: "held: join: ...".
     """
-    held = entry["held"]
     _keys(held, "held", ("note", "end") + _HELD_TICKS)
     for key in _HELD_TICKS:
         _length(held[key], f"held: {key}")
-    tick_samples = rate / TICK_HZ
-    start, loop, join = (math.floor(held[key] * tick_samples + 0.5) for key in ("start", "loop", "join"))
+    start, loop, join = (tick_sample(held[key], rate) for key in ("start", "loop", "join"))
     if loop == 0:
         raise RowSynthError(f"held: loop: must be at least one sample long, and {held['loop']!r} ticks "
                             f"are none at {rate} Hz")
@@ -187,11 +198,40 @@ def _cut(entry: dict, rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
             # The fade is laid on the end of the loop, and reads as many samples from the end of the start.
             raise RowSynthError(f"held: join: must not be longer than the {key}: {join} samples "
                                 f"against {count} at {rate} Hz")
+    return start, loop, join
+
+
+def _cut(entry: dict, rate: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """The start, the loop and the end of {"held": {...}}, as they come before they are levelled.
+
+    What is wrong with the held sound is refused with "held" and its key in front: "held: join: ...".
+    """
+    held = entry["held"]
+    start, loop, join = _spans(held, rate)
     note = _raw(held["note"], "held: note", rate)
     if len(note) < start + loop:
         raise RowSynthError(f"held: note: must be long enough for the start and the loop: it is {len(note)} "
                             f"samples at {rate} Hz, and they take {start + loop}")
     return note[:start].copy(), _joined(note, start, loop, join), _raw(held["end"], "held: end", rate)
+
+
+def _only_held(entry: object, rate: object) -> None:
+    """Refuses an entry of another kind than a held one, and a rate that is none."""
+    kind = entry_kind(entry)
+    if kind != "held":
+        raise RowSynthError(f"entry: only an entry with 'held' has a start, a loop and an end, not one with {kind!r}")
+    _count(rate, "rate", 1)
+
+
+def held_spans(entry: dict, rate: int = DEFAULT_RATE) -> tuple[int, int, int]:
+    """The samples the start, the loop and the join of a held entry take at a rate, with nothing rendered.
+
+    They are what `held_parts` cuts and fades by: each length in ticks taken to the nearest sample. What it
+    refuses of the entry's keys and lengths is refused here. Whether the note is long enough for its start and
+    its loop is not looked at, since that takes the note.
+    """
+    _only_held(entry, rate)
+    return _spans(entry["held"], rate)
 
 
 def held_parts(entry: dict, rate: int = DEFAULT_RATE) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
@@ -206,10 +246,7 @@ def held_parts(entry: dict, rate: int = DEFAULT_RATE) -> tuple[np.ndarray, np.nd
     without a click. A join of 0 leaves the loop as it was cut. The end is its def rendered on its own, at
     RENDER_GAIN. "let_go" is checked here and not used.
     """
-    kind = _kind(entry)
-    if kind != "held":
-        raise RowSynthError(f"entry: only an entry with 'held' has a start, a loop and an end, not one with {kind!r}")
-    _count(rate, "rate", 1)
+    _only_held(entry, rate)
     return _cut(entry, rate)
 
 
@@ -241,7 +278,7 @@ def render_entry(entry: dict, rate: int = DEFAULT_RATE) -> list[np.ndarray]:
     levelled as one: a single factor brings the loudest sample of them all to PEAK_DB and sets it at the
     entry's "db", which is one number.
     """
-    kind = _kind(entry)
+    kind = entry_kind(entry)
     _count(rate, "rate", 1)
     if kind == "def":
         return [_one(entry, rate)]
