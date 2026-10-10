@@ -1,6 +1,6 @@
-# Songs: the text language, chords, layers and the build
+# Songs: the text language, chords, layers, the intro and the build
 
-A whole project file with one song of two bars. It passes `check`.
+A whole project file with one song: a loop of two bars, and an intro of one bar before it. It passes `check`.
 
 ```json
 {
@@ -33,9 +33,14 @@ A whole project file with one song of two bars. It passes `check`.
           "lead": "o5 l8 e g a g e4 c4 | c f a f c2",
           "bass": "o2 l4 a a a a | f f f f",
           "kit": "l8 k h s h k k s h | k h s h k k s h"
+        },
+        "in": {
+          "bass": "o2 l4 a a a a",
+          "kit": "l8 k h k h k s s s"
         }
       },
       "order": ["a"],
+      "intro": {"order": ["in"]},
       "chords": {"a": ["Am", "F"]},
       "layers": {
         "groups": {"rhythm": ["kit"], "low": ["bass"], "top": ["lead"]},
@@ -61,6 +66,7 @@ A whole project file with one song of two bars. It passes `check`.
 | `instruments` | none | Instruments of the song's own, laid over the file's: a name with an instrument, or with the name of one of the file's |
 | `chords` | none | `{pattern: [one string for each bar]}` |
 | `layers` | none | Groups, versions and keys |
+| `intro` | none | `{"order", "tail", "fade"}`: patterns played once before the loop |
 
 A channel's `"echo"` is `{"rows": 3, "gain": 0.3}`, both needed: every note is played again that many rows later at that share of its velocity.
 
@@ -104,7 +110,7 @@ A pattern is as long as its longest channel, and `check` wants every channel in 
 - Set `l` once at the start of a text and write lengths only on the notes that differ.
 - A channel that is silent for a pattern is left out of the pattern, or written as rests: `r1 | r1`.
 - When `check` reports `channel 'bass' has 62 rows, and the longest channel of the pattern has 64`, the bass is two rows short, an eighth note, somewhere in that pattern.
-- Keep to the lengths of the table. A length of 12 is a triplet eighth, three to a beat, but thirds of a row do not always add up exactly: a bar of six notes of length 6 comes to 15.999999999999998 rows, and `check` reports it as shorter than a bar of 16.
+- Triplets count too. A length of 12 is a triplet eighth, three to a beat, and 6 a triplet quarter, three to two beats. Their rows are thirds and add up a hair off a whole number, which `check` takes for that number: a bar of six notes of length 6 is a bar of 16 rows.
 
 ## Chords
 
@@ -129,20 +135,43 @@ A drum channel is not moved with the key, so a group of drum channels alone is t
 
 `check` holds every version in every key to the `level` rule and every group to the `join` rule. A song without layers has the mix of all its channels held to `level`.
 
+## An intro
+
+`"intro": {"order": ["in"]}` has the patterns of its `"order"` played once, before the loop. They are patterns of the song as any other is, whether the song's own `"order"` plays them or not.
+
+| Key | Left out | Is |
+|---|---|---|
+| `order` | needed | The patterns of the intro, end to end |
+| `tail` | 1.5 | Seconds the intro runs on past its last pattern, for what is still sounding there. No longer than one bar |
+| `fade` | 0.05 | Seconds at the very end of the tail over which it falls away to nothing. No longer than the tail |
+
+The loop is to begin where the patterns of the intro end, and the tail rings on over its first bar.
+
+- `page` gives the intro a row of its own, the last of the song's, with a player that stops at its end. Every other player of a song goes round.
+- `build` writes it as one file more, `NAME.intro.wav`, and names it in the song's entry of the manifest.
+- An intro is one file whatever the layers and the keys: all of the song's channels, in the key the song is written in.
+- `check` holds the patterns of an intro to `rows` and does not play it. So build the page to know that it renders.
+- At four rows to a beat a bar is `16 * row_ticks / 60` seconds. With `"row_ticks"` under 5.625, which is faster than 160 beats a minute, a bar is shorter than 1.5 seconds, and `page` and `build` refuse the song until the intro has a `"tail"` that fits.
+
 ## What `build` writes
 
 `python -m rowsynth build audio.json --out out/music` writes into the folder, at 48000 samples a second unless `--rate` says otherwise:
 
 | File | Is |
 |---|---|
-| `music.json` | The manifest: `{"rate": ..., "songs": {name: entry}}` |
-| `NAME.wav` | A song without layers: one stereo loop, its loudest sample at -1 dBFS |
+| `music.json` | The manifest: `{"rate": ..., "format": ..., "songs": {name: entry}}` |
+| `NAME.wav` | A song without layers: one stereo loop |
 | `NAME-GROUP-KEY.wav` | A layered song: one stereo loop for each group in each key |
 | `NAME-GROUP.wav` | A group of drum channels alone |
+| `NAME.intro.wav` | The intro of a song that has one |
 | `NAME.VERSION.KEY.wav` | A version of `"premix"` |
 
-The files of the groups of one song all share one scale, with the loudest sample among them at -1 dBFS, so that adding the files of a version gives that version.
+With `--format opus` every file ends in `.opus`, in the folder and in the manifest, and the manifest's `"format"` is `"opus"` where it was `"wav"`. A build has no MP3: an MP3 file has silence added at its ends, and a loop of one cannot go round without a gap. Opus needs ffmpeg on the path, and a rate of 8000, 12000, 16000, 24000 or 48000.
+
+The loop of a song or the files of its groups, and its intro with them, all share one scale, which has the loudest sample among them at -1 dBFS. So adding the files of a version gives that version, and the intro is as loud as the loop it runs into. A premixed version has a scale of its own.
 
 The entry of a song without layers has `"loop_samples"`, `"gain"`, `"source"` and `"file"`. That of a layered song has `"loop_samples"`, `"bar_samples"`, `"gain"`, `"source"`, `"keys"`, `"groups"` and `"versions"`, and `"premixed"` when the song has a premix. `"gain"` is what a player multiplies the samples by to have the song at its own level again. `"source"` is 16 hex digits that change when the song, the rate or the package's version does. In `"groups"` a group has `{"files": {"0": file, "3": file}}`, a file for each key, or `{"file": file}` when it is drums alone.
+
+A song with an intro has `"intro"` last in its entry: `{"file", "in_samples", "walk_samples"}`, the name of the file, the samples in it, and the sample of it at which a player starts the loop.
 
 `build` refuses a layered song with a channel in no group or in two. It leaves alone whatever else the folder holds.

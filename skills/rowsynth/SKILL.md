@@ -38,7 +38,7 @@ python -m rowsynth check audio.json
 python -m rowsynth page audio.json --out out/page
 ```
 
-`page` writes `out/page/index.html`, one page with a player for every sound and every song, and their WAV files in `out/page/audio`. The page is for the person. The numbers are for you.
+`page` writes `out/page/index.html`, one page with a player for every sound and every song, and their audio files in `out/page/audio`. The files are WAV unless `--format mp3` or `--format opus` asks for smaller ones, which takes ffmpeg on the path. The page is for the person. The numbers are for you.
 
 ## Reading the numbers
 
@@ -158,7 +158,7 @@ A finding can be meant: a hi-hat is bright. Give that entry a `"max_bright"` or 
 
 ## Songs
 
-A song is channels, patterns and an order. A channel plays one instrument, a pattern holds a line of text for each channel, and the order plays the patterns end to end as one loop. `references/songs.md` has a whole song to start from, the text language, chords, layers and what `build` writes. While you write one:
+A song is channels, patterns and an order. A channel plays one instrument, a pattern holds a line of text for each channel, and the order plays the patterns end to end as one loop. `references/songs.md` has a whole song to start from, the text language, chords, layers, the intro and what `build` writes. While you write one:
 
 - A row is `"row_ticks"` ticks. At four rows to a beat the tempo is `900 / row_ticks` beats a minute: 6 gives 150 and 7.5 gives 120. A bar is 16 rows.
 - Every channel of a pattern must fill the same number of rows. A length of 4 is 4 rows, 8 is 2, 16 is 1, and a dot adds half. Write `|` between bars and count each bar to 16.
@@ -171,7 +171,7 @@ python -m rowsynth measure out/stems/bass.wav --at 0.05
 python -m rowsynth build audio.json --out out/music
 ```
 
-`--stems` writes each channel as a loop of its own, `CHANNEL.wav`. Without it `render` writes the song played once, with half a second after its last row. `build` writes the loops a game loads and `music.json`, which names them.
+`--stems` writes each channel as a loop of its own, `CHANNEL.wav`. Without it `render` writes the song played once, with half a second after its last row. `build` writes the loops a game loads, as WAV or with `--format opus` as Opus, and `music.json`, which names them.
 
 ## Commands
 
@@ -183,8 +183,8 @@ rowsynth check [-h] [--rate N] FILE
 rowsynth render [-h] --out PATH [--rate N] [--variant N] [--part {start,loop,end}] [--stems] FILE NAME
 rowsynth measure [-h] WAV [--at SECONDS]
 rowsynth measure [-h] FILE NAME [--rate N] [--variant N] [--part {start,loop,end}] [--at SECONDS]
-rowsynth page [-h] --out DIR [--rate N] FILE
-rowsynth build [-h] --out DIR [--rate N] FILE [NAME ...]
+rowsynth page [-h] --out DIR [--rate N] [--format {wav,mp3,opus}] FILE
+rowsynth build [-h] --out DIR [--rate N] [--format {wav,opus}] FILE [NAME ...]
 ```
 
 | Command | Use |
@@ -192,8 +192,10 @@ rowsynth build [-h] --out DIR [--rate N] FILE [NAME ...]
 | `info` | What the file holds by name, with the rows and the seconds of each song |
 | `check` | The findings; exit code 1 when there are any |
 | `render` | A sound as a mono WAV or a song as a stereo one, with its figures. `--variant` picks a variant counted from 0, and `--part` a part of a held sound |
-| `measure` | The figures of a WAV file, or of a sound or a song of a project file, with the brightness and the pitch |
-| `page` | The listen page, `index.html`, with its WAV files in a folder `audio` beside it |
+| `measure` | The figures of a WAV file, or of a sound or a song of a project file, with the brightness and the pitch. It reads no MP3 and no Opus |
+| `page` | The listen page, `index.html`, with its audio files in a folder `audio` beside it |
 | `build` | The songs named, or every song, as loops in a folder with `music.json` |
 
 `check`, `render` and `measure` work at 44100 samples a second unless `--rate` says otherwise, and `page` and `build` at 48000.
+
+WAV needs nothing but the package. MP3 and Opus are made by ffmpeg, and without it on the path the command stops with `error: ffmpeg is needed to write mp3, and none is found on the path` before a file is written. Opus takes a rate of 8000, 12000, 16000, 24000 or 48000 and no other.

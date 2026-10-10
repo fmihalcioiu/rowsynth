@@ -64,8 +64,9 @@ Samples are float32 NumPy arrays, with full scale at 1. The renderers and `measu
 | `checks.run(project, rate)` | The findings as a list, each with `.rule`, `.target`, `.message` and `.to_dict()` |
 | `save_wav(path, samples, rate)` | Writes a 16-bit WAV, and the folders above it when they are missing. One array is mono, and `[left, right]` is stereo |
 | `load_wav(path)` | `(channels, rate)`: one array or two, and the rate of the file |
-| `build(project, out_dir, rate=48000, songs=None)` | What the `build` command does. Gives the manifest |
-| `write_page(project, out_dir, rate=48000)` | What the `page` command does. Gives `{"page": path, "files": [paths]}` |
+| `save_audio(path, samples, rate, fmt="wav")` | The same file as `save_wav` for `"wav"`, and an MP3 or an Opus file through ffmpeg for `"mp3"` and `"opus"`. From `rowsynth.encode` |
+| `build(project, out_dir, rate=48000, fmt="wav", songs=None)` | What the `build` command does, with `fmt` for its `--format`: `"wav"` or `"opus"`. Gives the manifest |
+| `write_page(project, out_dir, rate=48000, fmt="wav")` | What the `page` command does, with `fmt` as `"wav"`, `"mp3"` or `"opus"`. Gives `{"page": path, "files": [paths]}` |
 
 `rowsynth.measure` is the function, so the two others in its module are reached with `from rowsynth.measure import brightness, pitch_at`.
 
