@@ -1,0 +1,334 @@
+{
+  "instruments": {
+    "hat": {"wave": "noise", "vol": [4, 2, 1], "release": 0, "gate": 1, "lp": 4500},
+    "ohat": {
+      "wave": "noise",
+      "vol": [4, 4, 3, 3, 2, 2, 1, 1],
+      "release": 2,
+      "gate": 1,
+      "lp": 4500
+    },
+    "punch": {
+      "wave": "tri",
+      "vol": [15, 15, 13, 10, 7, 4, 2],
+      "pitch": [0, -6, -5, -4, -3, -2],
+      "release": 1,
+      "gate": 1
+    },
+    "snare": {
+      "wave": "noise",
+      "vol": [15, 12, 9, 7, 5, 4, 3, 2, 1],
+      "release": 2,
+      "gate": 1,
+      "lp": 4000
+    },
+    "fmpad": {
+      "wave": "fm",
+      "alg": 5,
+      "ops": [
+        {"mul": 1, "level": 1, "env": {"a": 0.3, "d": 1, "s": 0.8, "r": 0.6}},
+        {"mul": 1, "level": 0.5, "env": {"a": 0.25, "d": 0.5, "s": 1, "r": 0.6}},
+        {"mul": 2, "det": 1, "level": 0.22, "env": {"a": 0.35, "d": 0.5, "s": 1, "r": 0.6}},
+        {"mul": 1, "det": -1.3, "level": 0.5, "env": {"a": 0.3, "d": 0.5, "s": 1, "r": 0.6}}
+      ],
+      "vol": [15],
+      "release": 40,
+      "gate": 0.97,
+      "lp": 1800,
+      "key_scale": -4
+    },
+    "fmdrive": {
+      "wave": "fm",
+      "alg": 4,
+      "fb": 0.45,
+      "ops": [
+        {"mul": 1, "level": 2.4, "env": {"a": 0, "d": 0.1, "s": 0.35, "sd": 4, "r": 0.05}},
+        {"mul": 1, "level": 0.9, "env": {"a": 0, "d": 0.3, "s": 0.7, "r": 0.06}},
+        {"mul": 2, "level": 0.6, "env": {"a": 0, "d": 0.04, "s": 0.05, "r": 0.04}},
+        {"mul": 1, "level": 0.6, "env": {"a": 0, "d": 0.3, "s": 0.7, "r": 0.06}}
+      ],
+      "vol": [15],
+      "release": 3,
+      "gate": 0.7,
+      "lp": 1600
+    },
+    "fmbrass": {
+      "wave": "fm",
+      "alg": 4,
+      "fb": 0.25,
+      "ops": [
+        {"mul": 1, "level": 2, "env": {"a": 0.03, "d": 0.3, "s": 0.6, "r": 0.12}},
+        {"mul": 1, "level": 0.8, "env": {"a": 0.01, "d": 0.3, "s": 0.85, "r": 0.12}},
+        {"mul": 1, "level": 1.2, "env": {"a": 0.02, "d": 0.2, "s": 0.5, "r": 0.12}},
+        {"mul": 1, "det": 1.2, "level": 0.5, "env": {"a": 0.01, "d": 0.3, "s": 0.85, "r": 0.12}}
+      ],
+      "vol": [15],
+      "vib": {"delay": 20, "depth": 0.12, "rate": 6},
+      "release": 6,
+      "gate": 0.9,
+      "lp": 2800,
+      "key_scale": -4
+    },
+    "fmstab": {
+      "wave": "fm",
+      "alg": 4,
+      "fb": 0.2,
+      "ops": [
+        {"mul": 1, "level": 1.8, "env": {"a": 0, "d": 0.12, "s": 0.2, "r": 0.05}},
+        {"mul": 1, "level": 0.7, "env": {"a": 0, "d": 0.2, "s": 0.3, "r": 0.06}},
+        {"mul": 2, "level": 0.6, "env": {"a": 0, "d": 0.08, "s": 0.1, "r": 0.05}},
+        {"mul": 1, "det": -1.1, "level": 0.5, "env": {"a": 0, "d": 0.2, "s": 0.3, "r": 0.06}}
+      ],
+      "vol": [15],
+      "release": 3,
+      "gate": 0.6,
+      "lp": 2400,
+      "key_scale": -4
+    },
+    "fmarp": {
+      "wave": "fm",
+      "alg": 4,
+      "ops": [
+        {"mul": 2, "level": 1.2, "env": {"a": 0, "d": 0.08, "s": 0.05, "r": 0.05}},
+        {"mul": 1, "level": 0.6, "env": {"a": 0, "d": 0.18, "s": 0.1, "r": 0.06}},
+        {"mul": 1, "level": 0.6, "env": {"a": 0, "d": 0.1, "s": 0.1, "r": 0.05}},
+        {"mul": 1, "det": 0.8, "level": 0.4, "env": {"a": 0, "d": 0.18, "s": 0.1, "r": 0.06}}
+      ],
+      "vol": [15],
+      "release": 2,
+      "gate": 0.5,
+      "lp": 2600,
+      "key_scale": -4
+    },
+    "crash": {
+      "wave": "noise",
+      "vol": [
+        8,
+        8,
+        8,
+        8,
+        7,
+        7,
+        7,
+        7,
+        7,
+        7,
+        6,
+        6,
+        6,
+        6,
+        6,
+        6,
+        5,
+        5,
+        5,
+        5,
+        5,
+        5,
+        4,
+        4,
+        4,
+        4,
+        4,
+        4,
+        3,
+        3,
+        3,
+        3,
+        3,
+        3,
+        2,
+        2,
+        2,
+        2,
+        2,
+        2,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1,
+        1
+      ],
+      "release": 4,
+      "gate": 1,
+      "lp": 4200
+    },
+    "sub": {
+      "wave": "fm",
+      "alg": 4,
+      "ops": [
+        {"mul": 1, "level": 0.5, "env": {"a": 0, "d": 0.08, "s": 0.1, "r": 0.03}},
+        {"mul": 1, "level": 1, "env": {"a": 0, "d": 0.2, "s": 0.7, "r": 0.05}},
+        {"mul": 1, "level": 0},
+        {"mul": 2, "level": 0.3, "env": {"a": 0, "d": 0.2, "s": 0.6, "r": 0.05}}
+      ],
+      "vol": [15],
+      "release": 2,
+      "gate": 0.55,
+      "lp": 500
+    },
+    "stamp": {
+      "wave": "fm",
+      "alg": 4,
+      "fb": 0.3,
+      "ops": [
+        {"mul": 3.5, "level": 1.6, "env": {"a": 0, "d": 0.04, "s": 0.02, "r": 0.03}},
+        {"mul": 1, "level": 1, "env": {"a": 0, "d": 0.12, "s": 0.05, "r": 0.04}},
+        {"mul": 1, "level": 0.9, "env": {"a": 0, "d": 0.06, "s": 0.05, "r": 0.03}},
+        {"mul": 1, "det": 1.5, "level": 0.45, "env": {"a": 0, "d": 0.1, "s": 0.05, "r": 0.04}}
+      ],
+      "vol": [15],
+      "pitch": [2, 0],
+      "release": 2,
+      "gate": 0.4,
+      "lp": 3000,
+      "key_scale": -4
+    }
+  },
+  "songs": {
+    "piece": {
+      "row_ticks": 6,
+      "gain": 0.3,
+      "drums": {
+        "k": {"inst": "punch", "note": "e3", "rows": 1},
+        "s": {"inst": "snare", "note": "g5", "rows": 2},
+        "h": {"inst": "hat", "note": "a7", "rows": 1},
+        "H": {"inst": "ohat", "note": "a7", "rows": 2},
+        "t": {"inst": "crash", "note": "g6", "rows": 8}
+      },
+      "channels": {
+        "lead": {"inst": "fmbrass", "gain": 0.8, "pan": 0},
+        "lead_high": {"inst": "fmbrass", "gain": 0.45, "pan": 0.1},
+        "lead_low": {"inst": "fmbrass", "gain": 0.3, "pan": -0.1},
+        "stab1": {"inst": "fmstab", "gain": 0.35, "pan": -0.3},
+        "stab2": {"inst": "fmstab", "gain": 0.35, "pan": 0},
+        "stab3": {"inst": "fmstab", "gain": 0.35, "pan": 0.3},
+        "bass": {"inst": "fmdrive", "gain": 0.9, "pan": 0},
+        "sub": {"inst": "sub", "gain": 0.5, "pan": 0},
+        "arp": {"inst": "fmarp", "gain": 0.35, "pan": -0.25},
+        "stamp": {"inst": "stamp", "gain": 0.36, "pan": 0.35},
+        "kick": {"inst": "punch", "gain": 0.9, "pan": 0, "drums": true},
+        "hkick": {"inst": "punch", "gain": 0.9, "pan": 0, "drums": true},
+        "snare": {"inst": "snare", "gain": 0.55, "pan": 0.05, "drums": true},
+        "hsnare": {"inst": "snare", "gain": 0.6, "pan": 0.05, "drums": true},
+        "hats": {"inst": "hat", "gain": 0.35, "pan": 0.25, "drums": true},
+        "shaker": {"inst": "hat", "gain": 0.2, "pan": -0.35, "drums": true},
+        "ohat": {"inst": "ohat", "gain": 0.25, "pan": 0.35, "drums": true},
+        "crash": {"inst": "crash", "gain": 0.25, "pan": -0.3, "drums": true}
+      },
+      "patterns": {
+        "cold": {
+          "kick": "k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4",
+          "snare": "r4 s4 r4 s4 | r4 s4 r4 s8 s16 s16",
+          "hats": "l8 h h h h h h h h | l8 h h h h h h h h",
+          "shaker": "l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h",
+          "ohat": "r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8",
+          "crash": "t1 | r1",
+          "lead": "o4 d8. d8. d8 a8 g8 f8 e-8 | o4 e-4. d8 e-4 g4",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8",
+          "stab1": "o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16",
+          "stab2": "o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16",
+          "stab3": "o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16",
+          "sub": "o1 d4 o1 d4 o1 d4 o1 d4 | o1 e-4 o1 e-4 o1 e-4 o1 e-4"
+        },
+        "hits": {
+          "kick": "k4 r4 r2 | k4 r4 r2",
+          "crash": "t1 | t1",
+          "bass": "o2 d4 r4 r2 | o1 a4 r4 r2",
+          "sub": "o1 d1 | o1 a1",
+          "stab1": "o4 d4 r4 r2 | o4 c+4 r4 r2",
+          "stab2": "o4 f4 r4 r2 | o4 e4 r4 r2",
+          "stab3": "o4 a4 r4 r2 | o4 a4 r4 r2"
+        },
+        "grow": {
+          "kick": "k4 k4 k4 k4 | k4 k4 k4 k4 | k4 r8 k8 k4 r4 | l8 k k k k k k k k",
+          "hats": "r1 | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h",
+          "snare": "r1 | r1 | r4 s4 r4 s4 | l16 s s s s s s s s s s s s s s s s",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o1 b-8 b-8 >b-8< b-8 b-8 b-8 >b-8< b-8 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8",
+          "stab1": "r1 | r1 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16",
+          "stab2": "r1 | r1 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16",
+          "stab3": "r1 | r1 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16",
+          "arp": "r1 | r1 | r1 | o3 a16 o4 c+16 e16 a16 o5 c+16 e16 a16 o6 c+16 o5 a2"
+        },
+        "tune": {
+          "kick": "k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4",
+          "snare": "r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s4 | r4 s4 r4 s8 s16 s16",
+          "hats": "l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h",
+          "shaker": "l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h",
+          "ohat": "r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8",
+          "crash": "t1 | r1 | r1 | r1 | r1 | r1 | r1 | r1",
+          "lead": "o4 d8. d8. d8 a8 g8 f8 e-8 | o4 e-4. d8 e-4 g4 | o4 f4. e-8 d4 o3 a4 | o4 g4. f8 e4 c4 | o4 d8. d8. d8 f8 g8 a8 b-8 | o5 d4. o4 b-8 g4 b-4 | o4 a4. b-8 a4 e4 | o4 c+2 r4 e8 f8",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8 | o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 c8 c8 >c8< c8 c8 c8 >c8< c8 | o1 b-8 b-8 >b-8< b-8 b-8 b-8 >b-8< b-8 | o1 g8 g8 >g8< g8 g8 g8 >g8< g8 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8",
+          "stab1": "o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 c16 r16 r16 o4 c16 r16 r16 o4 c16 r16 o4 c16 r16 r16 o4 c16 r16 r16 o4 c16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 | o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16",
+          "stab2": "o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16",
+          "stab3": "o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16",
+          "arp": "r1 | r1 | r1 | r1 | o3 b-16 o4 f16 o4 d16 o4 f16 o3 b-16 o4 f16 o4 d16 o4 f16 o3 b-16 o4 f16 o4 d16 o4 f16 o3 b-16 o4 f16 o4 d16 o4 f16 | o3 g16 o4 d16 o3 b-16 o4 d16 o3 g16 o4 d16 o3 b-16 o4 d16 o3 g16 o4 d16 o3 b-16 o4 d16 o3 g16 o4 d16 o3 b-16 o4 d16 | o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16 | o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16 o3 a16 o4 e16 o4 c+16 o4 e16"
+        },
+        "drop": {
+          "kick": "k2 r2 | k2 r2 | k2 r2 | k4 k4 k4 k4",
+          "snare": "r2 s2 | r2 s2 | r2 s2 | l16 s s s s s s s s s s s s s s s s",
+          "hats": "l4 h h h h | l4 h h h h | l4 h h h h | l8 h h h h h h h h",
+          "crash": "r1 | r1 | r1 | t1",
+          "bass": "o1 b-1 | o1 g1 | o2 e-1 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8",
+          "stab1": "@fmpad o4 d1 | o4 d1 | o4 e-1 | @fmstab o4 c+4 r4 r2",
+          "stab2": "@fmpad o4 f1 | o4 g1 | o4 g1 | @fmstab o4 e4 r4 r2",
+          "stab3": "@fmpad o4 b-1 | o4 b-1 | o4 b-1 | @fmstab o4 a4 r4 r2",
+          "sub": "r1 | r1 | r1 | o1 a1"
+        },
+        "band": {
+          "kick": "k4 r8 k8 k4 r4 | k4 r8 k8 k4 r4",
+          "snare": "r4 s4 r4 s4 | l16 s s s s s s s s s s s s s s s s",
+          "hats": "l8 h h h h h h h h | l8 h h h h h h h h",
+          "shaker": "l16 h h h h h h h h h h h h h h h h | l16 h h h h h h h h h h h h h h h h",
+          "ohat": "r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8",
+          "stab1": "o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16",
+          "stab2": "o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16",
+          "stab3": "o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16",
+          "arp": "o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 | o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16"
+        },
+        "riff": {
+          "hkick": "k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16 | k16 r16 r16 k16 r16 r16 k16 r16 k16 r16 r16 k16 r16 r16 k16 r16",
+          "hsnare": "r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 r16 r16 | r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 r16 r16 | r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 r16 r16 | r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 s16 r16 | r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 r16 r16 | r16 r16 r16 r16 s16 r16 r16 r16 r16 r16 r16 r16 s16 r16 r16 r16 | r16 r16 r16 r16 s16 r16 s16 r16 s16 r16 s16 r16 s16 s16 s16 s16",
+          "hats": "l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h",
+          "ohat": "r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8 | r8 H8 r8 H8 r8 H8 r8 H8",
+          "crash": "t1 | r1 | r1 | r1 | t1 | r1 | r1",
+          "lead": "o4 d8. d8. d8 a8 g8 f8 e-8 | o4 d8. d8. d8 f8 e-8 d8 o3 a8 | o4 e-8. e-8. e-8 b-8 a-8 g8 f8 | o4 e-8. e-8. e-8 g8 f8 e-8 d8 | o4 d8. d8. d8 a8 g8 f8 e-8 | o4 f4 e-4 d4 o3 a4 | o4 a8. a8. a8 o5 c+8 o4 b-8 a8 g8",
+          "lead_low": "o3 d8. o3 d8. o3 d8 o3 a8 o3 g8 o3 f8 o3 e-8 | o3 d8. o3 d8. o3 d8 o3 f8 o3 e-8 o3 d8 o2 a8 | o3 e-8. o3 e-8. o3 e-8 o3 b-8 o3 a-8 o3 g8 o3 f8 | o3 e-8. o3 e-8. o3 e-8 o3 g8 o3 f8 o3 e-8 o3 d8 | o3 d8. o3 d8. o3 d8 o3 a8 o3 g8 o3 f8 o3 e-8 | o3 f4 o3 e-4 o3 d4 o2 a4 | o3 a8. o3 a8. o3 a8 o4 d-8 o3 b-8 o3 a8 o3 g8",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8 | o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8",
+          "sub": "o1 d4 o1 d4 o1 d4 o1 d4 | o1 d4 o1 d4 o1 d4 o1 d4 | o1 e-4 o1 e-4 o1 e-4 o1 e-4 | o1 e-4 o1 e-4 o1 e-4 o1 e-4 | o1 d4 o1 d4 o1 d4 o1 d4 | o1 d4 o1 d4 o1 d4 o1 d4 | o1 a4 o1 a4 o1 a4 o1 a4",
+          "stab1": "o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16",
+          "stab2": "o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16",
+          "stab3": "o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16",
+          "stamp": "r16 o4 d16 o4 a16 r16 r16 r16 r16 r16 r16 o4 d16 o4 a16 r16 r16 r16 r16 o4 a16 | r16 o4 d16 o4 a16 r16 r16 r16 r16 r16 r16 o4 d16 o4 a16 r16 r16 r16 r16 o4 a16 | r16 o4 e-16 o4 b-16 r16 r16 r16 r16 r16 r16 o4 e-16 o4 b-16 r16 r16 r16 r16 o4 b-16 | r16 o4 e-16 o4 b-16 r16 r16 r16 r16 r16 r16 o4 e-16 o4 b-16 r16 r16 r16 r16 o4 b-16 | r16 o4 d16 o4 a16 r16 r16 r16 r16 r16 r16 o4 d16 o4 a16 r16 r16 r16 r16 o4 a16 | r16 o4 d16 o4 a16 r16 r16 r16 r16 r16 r16 o4 d16 o4 a16 r16 r16 r16 r16 o4 a16 | r16 o3 a16 o4 e16 r16 r16 r16 r16 r16 r16 o3 a16 o4 e16 r16 r16 r16 r16 o4 e16"
+        },
+        "end": {
+          "kick": "k4 r4 r2",
+          "crash": "t1",
+          "lead": "o4 d1",
+          "lead_low": "o3 d1",
+          "bass": "o2 d4 r4 r2",
+          "sub": "o1 d1",
+          "stab1": "o4 d4 r4 r2",
+          "stab2": "o4 f4 r4 r2",
+          "stab3": "o4 a4 r4 r2"
+        },
+        "rise": {
+          "kick": "k4 k4 k4 k4 | k4 k4 k4 k4 | l8 k k k k k k k k",
+          "hats": "l8 h h h h h h h h | l8 h h h h h h h h | l8 h h h h h h h h",
+          "snare": "r4 s4 r4 s4 | r4 s4 l16 s s s s s s s s | l16 s s s s s s s s s s s s s s s s",
+          "crash": "t1 | r1 | r1",
+          "bass": "o2 d8 d8 >d8< d8 d8 d8 >d8< d8 | o2 e-8 e-8 >e-8< e-8 e-8 e-8 >e-8< e-8 | o1 a8 a8 >a8< a8 a8 a8 >a8< a8",
+          "arp": "o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 o4 d16 o4 a16 o4 f16 o4 a16 | o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16 o4 e-16 o4 b-16 o4 g16 o4 b-16 | o3 a16 o4 c+16 e16 a16 o5 c+16 e16 a16 o6 c+16 o5 a2",
+          "stab1": "o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 o4 d16 r16 r16 o4 d16 r16 r16 o4 d16 r16 | o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 o4 e-16 r16 r16 o4 e-16 r16 r16 o4 e-16 r16 | o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16 o4 c+16 r16 r16 o4 c+16 r16 r16 o4 c+16 r16",
+          "stab2": "o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 o4 f16 r16 r16 o4 f16 r16 r16 o4 f16 r16 | o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 o4 g16 r16 r16 o4 g16 r16 r16 o4 g16 r16 | o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16 o4 e16 r16 r16 o4 e16 r16 r16 o4 e16 r16",
+          "stab3": "o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 | o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 o4 b-16 r16 r16 o4 b-16 r16 r16 o4 b-16 r16 | o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16 o4 a16 r16 r16 o4 a16 r16 r16 o4 a16 r16"
+        }
+      },
+      "order": ["cold", "hits", "grow", "tune", "rise", "drop", "band", "riff", "end"]
+    }
+  }
+}

@@ -70,3 +70,21 @@ class Arcade(unittest.TestCase):
         self.assertEqual(len(written), 8)
         self.assertIn("music.json", written)
         self.assertEqual(entry["bar_samples"] * 8, entry["loop_samples"])
+
+
+class Piece(unittest.TestCase):
+    def setUp(self) -> None:
+        self.project = Project.load(EXAMPLES / "piece.json")
+
+    def test_it_is_one_song_of_nine_patterns_played_by_eighteen_channels(self) -> None:
+        self.assertEqual(list(self.project.songs), ["piece"])
+        piece = self.project.songs["piece"]
+        self.assertEqual(piece["order"], ["cold", "hits", "grow", "tune", "rise", "drop", "band", "riff", "end"])
+        self.assertEqual(len(piece["channels"]), 18)
+
+    def test_it_plays_for_thirty_three_bars_and_stays_under_full_scale(self) -> None:
+        played = render_song(self.project.song("piece"), rate=8000)
+        self.assertEqual((played["rows"], played["seconds"]), (33 * 16, 52.8))
+        loudest = max(float(np.abs(played[side]).max()) for side in ("left", "right"))
+        self.assertGreater(loudest, 0.5)
+        self.assertLess(loudest, 1.0)
