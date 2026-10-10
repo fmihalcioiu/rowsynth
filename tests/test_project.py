@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 INSTRUMENTS = {
     "reed": {
@@ -845,19 +849,63 @@ class Files(ProjectCase):
         loaded = Project.load(self.folder / "project.json")
         self.assertEqual(loaded, project)
         self.assertEqual(json.dumps(loaded.to_dict()), json.dumps(PROJECT))
+        self.assertEqual(json.loads((self.folder / "project.json").read_text(encoding="utf-8")), project.to_dict())
 
-    def test_save_writes_an_indent_of_2_with_lf_ends_and_a_final_newline(self) -> None:
+    def test_save_writes_the_layout_with_lf_ends_and_a_final_newline(self) -> None:
         Project.from_dict({"instruments": {"deep": {"wave": "tri", "vol": [15, 9]}}}).save(self.folder / "p.json")
-        expected = (
-            '{\n  "instruments": {\n    "deep": {\n      "wave": "tri",\n      "vol": [\n        15,\n        9\n'
-            "      ]\n    }\n  }\n}\n"
-        )
+        expected = '{\n  "instruments": {\n    "deep": {"wave": "tri", "vol": [15, 9]}\n  }\n}\n'
         self.assertEqual((self.folder / "p.json").read_bytes(), expected.encode("utf-8"))
+
+    def test_each_example_saved_again_is_the_file_byte_for_byte(self) -> None:
+        for path in sorted(EXAMPLES.glob("*.json")):
+            with self.subTest(example=path.name):
+                Project.load(path).save(self.folder / path.name)
+                self.assertEqual((self.folder / path.name).read_bytes(), path.read_bytes())
+
+    def test_changing_one_channel_of_one_pattern_changes_one_line_of_the_saved_file(self) -> None:
+        project = Project.load(EXAMPLES / "piece.json")
+        project.songs["piece"]["patterns"]["grow"]["arp"] = "r1 | r1 | r1 | o3 a16 o4 c+16 e16 a16 o5 e2."
+        project.save(self.folder / "piece.json")
+        kept = (EXAMPLES / "piece.json").read_text(encoding="utf-8").splitlines()
+        saved = (self.folder / "piece.json").read_text(encoding="utf-8").splitlines()
+        self.assertEqual(len(saved), len(kept))
+        changed = [new for old, new in zip(kept, saved) if old != new]
+        self.assertEqual(changed, ['          "arp": "r1 | r1 | r1 | o3 a16 o4 c+16 e16 a16 o5 e2."'])
 
     def test_save_makes_the_folders_above_the_file(self) -> None:
         path = self.folder / "songs" / "drafts" / "project.json"
         Project.from_dict(PROJECT).save(str(path))
         self.assertEqual(Project.load(str(path)), Project.from_dict(PROJECT))
+        self.assertEqual(list(path.parent.iterdir()), [path])
+
+    def test_save_moves_the_whole_text_into_place_from_a_file_beside_it(self) -> None:
+        path = self.folder / "p.json"
+        Project.from_dict({"instruments": {"deep": {}}}).save(path)
+        old = path.read_bytes()
+        replace = os.replace
+        moves = []
+
+        def move(source: str, target: Path) -> None:
+            """What the move finds: where the new text waits, where it goes, and both files in full."""
+            moves.append((Path(source).parent, target, Path(source).read_bytes(), path.read_bytes()))
+            replace(source, target)
+
+        with mock.patch("os.replace", side_effect=move):
+            Project.from_dict(PROJECT).save(path)
+        self.assertEqual(moves, [(self.folder, path, path.read_bytes(), old)])
+        self.assertNotEqual(path.read_bytes(), old)
+        self.assertEqual(list(self.folder.iterdir()), [path])
+
+    def test_a_save_that_fails_leaves_the_old_file_as_it_was_and_no_temporary_file(self) -> None:
+        path = self.folder / "p.json"
+        Project.from_dict({"instruments": {"deep": {}}}).save(path)
+        old = path.read_bytes()
+        with mock.patch("os.replace", side_effect=OSError("held by another program")):
+            with self.assertRaises(OSError) as caught:
+                Project.from_dict(PROJECT).save(path)
+        self.assertEqual(str(caught.exception), "held by another program")
+        self.assertEqual(path.read_bytes(), old)
+        self.assertEqual(list(self.folder.iterdir()), [path])
 
     def test_load_reads_utf8_with_or_without_a_byte_order_mark(self) -> None:
         text = json.dumps({"instruments": {"fl\xfbte": {"wave": "tri"}}}, ensure_ascii=False).encode("utf-8")

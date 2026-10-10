@@ -44,12 +44,7 @@
     },
     "pluck": {"wave": "pulse", "duty": 1, "vol": [12, 10, 8, 6, 5, 4, 3], "release": 2},
     "bass": {"wave": "tri", "vol": [15, 15, 14, 13, 12], "release": 2, "gate": 0.8},
-    "kick": {
-      "wave": "tri",
-      "vol": [15, 14, 12, 9, 6, 3],
-      "pitch": [0, -6, -5, -4, -3, -2],
-      "release": 1
-    },
+    "kick": {"wave": "tri", "vol": [15, 14, 12, 9, 6, 3], "pitch": [0, -6, -5, -4, -3, -2], "release": 1},
     "snare": {"wave": "noise", "vol": [14, 11, 8, 6, 4, 2, 1], "release": 2, "lp": 7000},
     "hat": {"wave": "noise", "vol": [8, 4, 1], "release": 1}
   },
@@ -118,10 +113,7 @@
         }
       },
       "order": ["a", "b"],
-      "chords": {
-        "a": ["Am", "F", "C", "G"],
-        "b": ["F", "G", "Am", "Am"]
-      },
+      "chords": {"a": ["Am", "F", "C", "G"], "b": ["F", "G", "Am", "Am"]},
       "layers": {
         "groups": {"rhythm": ["kit"], "low": ["bass"], "middle": ["arp"], "top": ["lead"]},
         "versions": {

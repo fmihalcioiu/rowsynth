@@ -1,13 +1,7 @@
 {
   "instruments": {
     "hat": {"wave": "noise", "vol": [4, 2, 1], "release": 0, "gate": 1, "lp": 4500},
-    "ohat": {
-      "wave": "noise",
-      "vol": [4, 4, 3, 3, 2, 2, 1, 1],
-      "release": 2,
-      "gate": 1,
-      "lp": 4500
-    },
+    "ohat": {"wave": "noise", "vol": [4, 4, 3, 3, 2, 2, 1, 1], "release": 2, "gate": 1, "lp": 4500},
     "punch": {
       "wave": "tri",
       "vol": [15, 15, 13, 10, 7, 4, 2],
@@ -15,13 +9,7 @@
       "release": 1,
       "gate": 1
     },
-    "snare": {
-      "wave": "noise",
-      "vol": [15, 12, 9, 7, 5, 4, 3, 2, 1],
-      "release": 2,
-      "gate": 1,
-      "lp": 4000
-    },
+    "snare": {"wave": "noise", "vol": [15, 12, 9, 7, 5, 4, 3, 2, 1], "release": 2, "gate": 1, "lp": 4000},
     "fmpad": {
       "wave": "fm",
       "alg": 5,

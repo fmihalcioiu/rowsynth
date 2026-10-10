@@ -4,11 +4,14 @@ from __future__ import annotations
 
 import copy
 import json
+import os
 import re
+import tempfile
 from pathlib import Path
 from typing import NoReturn
 
 from .errors import RowSynthError
+from .layout import dumps
 from .notes import midi
 
 _TABLES = ("instruments", "chords", "sounds", "songs")
@@ -80,11 +83,23 @@ class Project:
         return cls.from_dict(data)
 
     def save(self, path: str | Path) -> None:
-        """Write the project as JSON, making the folders above the file when they are missing."""
+        """Write the project as JSON in the layout of `layout.dumps`, making the folders above the file.
+
+        The text goes to a temporary file beside the real one and takes its place in one move, so a program
+        that reads the file meanwhile gets the old text or the new, never half of one. When the write fails,
+        the old file stands as it was and the temporary one is gone.
+        """
         path = Path(path)
+        text = dumps(self.to_dict())
         path.parent.mkdir(parents=True, exist_ok=True)
-        text = json.dumps(self.to_dict(), indent=2, ensure_ascii=False) + "\n"
-        path.write_text(text, encoding="utf-8", newline="\n")
+        handle, temporary = tempfile.mkstemp(dir=path.parent, prefix=path.name + ".", suffix=".tmp")
+        try:
+            with open(handle, "w", encoding="utf-8", newline="\n") as file:
+                file.write(text)
+            os.replace(temporary, path)
+        except BaseException:
+            os.unlink(temporary)
+            raise
 
 
 def _fail(where: str, what: str) -> NoReturn:
