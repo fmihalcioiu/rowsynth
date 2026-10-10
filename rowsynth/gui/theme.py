@@ -53,3 +53,22 @@ MIN_ART = (960, 480)
 # The window is centred on the desktop, so half of it is left free above and half below, and each half must
 # clear a task bar of 48.
 DESKTOP_TAKEN_H = 96
+
+# A list that scrolls, in art pixels. A row is this high, and a heading that is not the first thing in the list
+# has this much air above it.
+LIST_ROW_H = 12
+LIST_GAP = 8
+# Along a row: from a side of the list to what the row shows, the side of the square before a row (the mark before
+# a heading has the same room), from that to the text and from the text to the tag, and one step of indent.
+LIST_PAD = 6
+LIST_SQUARE = 6
+LIST_SPACE = 5
+LIST_INDENT = 8
+# The mark before a heading is an arrowhead this long. The picked row has a strip this wide down its left side.
+LIST_MARK = 5
+LIST_STRIP = 2
+# The bar at the right of a list whose rows do not fit: how wide it is, and the least length of its thumb.
+LIST_BAR_W = 4
+LIST_THUMB_MIN = 8
+# How many rows one step of the wheel scrolls.
+LIST_WHEEL = 3
