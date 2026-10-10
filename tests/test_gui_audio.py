@@ -1,0 +1,258 @@
+"""Tests for rowsynth.gui.audio."""
+from __future__ import annotations
+
+import os
+import tempfile
+import unittest
+from pathlib import Path
+from unittest import mock
+
+import numpy as np
+
+from rowsynth.errors import RowSynthError
+from rowsynth.wav import save_wav
+
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+try:
+    import pygame
+    from rowsynth.gui import audio
+except ImportError:
+    pygame = None
+
+RATE = 44100
+START = 100.0
+
+
+class Clock:
+    """A clock the test moves by hand."""
+
+    def __init__(self) -> None:
+        self.now = START
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def ramp(seconds: float = 1.0, top: float = 1.0) -> np.ndarray:
+    """A line rising to `top` over that many seconds, so that no two stretches of it are alike."""
+    return np.linspace(-top, top, int(seconds * RATE), dtype=np.float32)
+
+
+def turned(sides: list[np.ndarray], at: int) -> bytes:
+    """The frames of `sides` from frame `at` to the end, and then from the start up to it."""
+    frames = audio.to_pcm(sides)
+    return np.concatenate([frames[at:], frames[:at]]).tobytes()
+
+
+def sounding() -> list[bytes]:
+    """The frames of each sound the mixer is playing."""
+    channels = [pygame.mixer.Channel(number) for number in range(pygame.mixer.get_num_channels())]
+    return [channel.get_sound().get_raw() for channel in channels if channel.get_busy()]
+
+
+@unittest.skipUnless(pygame, "pygame is not installed")
+class ToPcmTest(unittest.TestCase):
+    def test_frames_are_the_16_bit_values_save_wav_writes(self) -> None:
+        halves = [(k + 0.5) / 32767 for k in (0, 1, 2, -1, -2, -3)]
+        left = np.concatenate([np.linspace(-1.2, 1.2, 97), halves, [np.nan, np.inf, -np.inf]])
+        right = left[::-1].astype(np.float32)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "same.wav"
+            save_wav(path, [left, right], RATE)
+            written = path.read_bytes()[44:]
+        self.assertEqual(audio.to_pcm([left, right]).astype("<i2").tobytes(), written)
+
+    def test_one_side_goes_to_both(self) -> None:
+        side = ramp(0.01)
+        frames = audio.to_pcm([side])
+        self.assertEqual(frames.shape, (441, 2))
+        self.assertEqual(frames.tobytes(), audio.to_pcm([side, side]).tobytes())
+
+    def test_samples_past_full_scale_are_clamped(self) -> None:
+        frames = audio.to_pcm([np.array([1.5, -1.5, 1.0, -1.0], dtype=np.float32)])
+        self.assertEqual(frames.dtype, np.int16)
+        self.assertEqual(frames[:, 0].tolist(), [32767, -32767, 32767, -32767])
+
+    def test_sides_that_cannot_be_played_are_refused(self) -> None:
+        row = np.zeros(4, dtype=np.float32)
+        refused = {
+            "the two sides differ in length, 4 and 5 samples": [row, np.zeros(5, dtype=np.float32)],
+            "one side or two, left and right, got 3": [row, row, row],
+            "one side or two, left and right, got 0": [],
+            "no samples to play": [np.zeros(0, dtype=np.float32)],
+            "one row of numbers, got shape (2, 2)": [np.zeros((2, 2))],
+            "one row of numbers, got shape ()": row,
+            "must be rows of numbers": [["a", "b"]],
+        }
+        for reason, sides in refused.items():
+            with self.subTest(reason=reason):
+                with self.assertRaises(RowSynthError) as caught:
+                    audio.to_pcm(sides)
+                self.assertIn(reason, str(caught.exception))
+
+
+@unittest.skipUnless(pygame, "pygame is not installed")
+class PlayerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.clock = Clock()
+        self.player = audio.Player(RATE, self.clock)
+        self.addCleanup(self.player.close)
+
+    def at(self, seconds: float) -> None:
+        """Moves the clock to that long after the test began."""
+        self.clock.now = START + seconds
+
+    def test_it_opens_the_mixer_at_its_rate_in_16_bit_with_two_channels(self) -> None:
+        self.assertEqual(pygame.mixer.get_init(), (RATE, -16, 2))
+        other = audio.Player(22050)
+        self.addCleanup(other.close)
+        self.assertEqual(pygame.mixer.get_init(), (22050, -16, 2))
+
+    def test_a_rate_that_cannot_be_opened_is_refused(self) -> None:
+        for rate in (0, -44100, 44100.5, "44100", True):
+            with self.subTest(rate=rate):
+                with self.assertRaises(RowSynthError) as caught:
+                    audio.Player(rate)
+                self.assertIn("the rate must be an integer of 1 or more", str(caught.exception))
+        with mock.patch.object(pygame.mixer, "init", side_effect=pygame.error("no such device")):
+            with self.assertRaises(RowSynthError) as caught:
+                audio.Player(48000)
+        self.assertIn("cannot be opened at 48000 Hz: no such device", str(caught.exception))
+        with self.assertRaises(RowSynthError) as caught:
+            audio.Player(2 ** 40)
+        self.assertIn("cannot be opened at 1099511627776 Hz", str(caught.exception))
+
+    def test_nothing_plays_until_a_sound_is_played(self) -> None:
+        self.assertFalse(self.player.playing)
+        self.assertEqual(self.player.position(), 0.0)
+        self.assertEqual(self.player.level(), (0.0, 0.0))
+        self.assertEqual(sounding(), [])
+
+    def test_play_hands_the_mixer_the_frames_in_place_of_what_was_playing(self) -> None:
+        sides = [ramp(0.5), ramp(0.5, 0.25)]
+        self.player.play([ramp()], loop=True)
+        self.at(0.25)
+        self.player.play(sides)
+        self.assertEqual(sounding(), [audio.to_pcm(sides).tobytes()])
+        self.assertEqual(self.player.position(), 0.0)
+
+    def test_a_sound_played_once_plays_for_its_length(self) -> None:
+        self.player.play([ramp(0.5)])
+        for seconds, playing, place in ((0.0, True, 0.0), (0.25, True, 0.25), (0.5, False, 0.5), (3.0, False, 0.5)):
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertEqual(self.player.playing, playing)
+                self.assertEqual(self.player.position(), place)
+
+    def test_a_loop_wraps_at_its_length_and_plays_until_stopped(self) -> None:
+        self.player.play([ramp(0.5)], loop=True)
+        for seconds, place in ((0.0, 0.0), (0.25, 0.25), (0.5, 0.0), (0.625, 0.125), (7.75, 0.25)):
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertTrue(self.player.playing)
+                self.assertEqual(self.player.position(), place)
+        self.assertEqual(sounding(), [audio.to_pcm([ramp(0.5)]).tobytes()])
+
+    def test_stop_ends_the_sound_and_puts_the_position_back_to_0(self) -> None:
+        self.player.play([np.ones(RATE, dtype=np.float32)], loop=True)
+        self.at(0.25)
+        self.assertEqual(self.player.level(), (1.0, 1.0))
+        self.player.stop()
+        self.assertFalse(self.player.playing)
+        self.assertEqual(self.player.position(), 0.0)
+        self.assertEqual(self.player.level(), (0.0, 0.0))
+        self.assertEqual(sounding(), [])
+
+    def test_swap_goes_on_from_the_same_place(self) -> None:
+        new = [ramp(1.0, 0.5), ramp(1.0, 0.25)]
+        self.player.play([ramp()], loop=True)
+        self.at(1.25)
+        self.player.swap(new)
+        self.assertEqual(self.player.position(), 0.25)
+        self.assertEqual(sounding(), [turned(new, RATE // 4)])
+        self.at(1.5)
+        self.assertEqual(self.player.position(), 0.5)
+        self.at(2.125)
+        self.assertEqual(self.player.position(), 0.125)
+        self.assertTrue(self.player.playing)
+
+    def test_swap_carries_the_place_as_a_share_of_another_length(self) -> None:
+        new = [ramp(2.0)]
+        self.player.play([ramp()], loop=True)
+        self.at(1.25)
+        self.player.swap(new)
+        self.assertEqual(self.player.position(), 0.5)
+        self.assertEqual(sounding(), [turned(new, RATE // 2)])
+        self.at(2.25)
+        self.assertEqual(self.player.position(), 1.5)
+        self.at(3.0)
+        self.assertEqual(self.player.position(), 0.25)
+
+    def test_swap_does_nothing_when_no_loop_is_playing(self) -> None:
+        once = [ramp(0.5)]
+        self.player.swap([ramp()])
+        self.assertFalse(self.player.playing)
+        self.assertEqual(sounding(), [])
+        self.player.play(once)
+        self.at(0.25)
+        self.player.swap([ramp()])
+        self.assertEqual(self.player.position(), 0.25)
+        self.assertEqual(sounding(), [audio.to_pcm(once).tobytes()])
+        self.player.stop()
+        self.player.swap([ramp()])
+        self.assertEqual(sounding(), [])
+
+    def test_level_reads_the_stretch_behind_the_position_on_each_side(self) -> None:
+        left = np.zeros(RATE, dtype=np.float32)
+        right = np.zeros(RATE, dtype=np.float32)
+        left[RATE // 4] = 0.5
+        left[RATE // 4 - 100] = 0.25
+        right[RATE // 2] = -1.0
+        self.player.play([left, right])
+        half = 16384 / 32767
+        levels = ((0.0, (0.0, 0.0)), (0.24, (0.0, 0.0)), (0.25, (half, 0.0)), (0.27, (half, 0.0)),
+                  (0.29, (0.0, 0.0)), (0.5, (0.0, 1.0)), (0.52, (0.0, 1.0)), (0.54, (0.0, 0.0)))
+        for seconds, level in levels:
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertEqual(self.player.level(), level)
+
+    def test_level_of_a_loop_reads_back_round_the_end_once_it_has_gone_round(self) -> None:
+        side = np.zeros(RATE, dtype=np.float32)
+        side[-1] = 1.0
+        self.player.play([side], loop=True)
+        for seconds, level in ((0.01, (0.0, 0.0)), (1.01, (1.0, 1.0)), (1.04, (0.0, 0.0))):
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertEqual(self.player.level(), level)
+
+    def test_level_is_0_when_a_sound_played_once_has_ended(self) -> None:
+        self.player.play([np.ones(RATE // 2, dtype=np.float32)])
+        self.at(0.25)
+        self.assertEqual(self.player.level(), (1.0, 1.0))
+        self.at(0.5)
+        self.assertEqual(self.player.level(), (0.0, 0.0))
+
+    def test_close_shuts_the_mixer_down(self) -> None:
+        self.player.play([ramp()], loop=True)
+        self.player.close()
+        self.assertIsNone(pygame.mixer.get_init())
+        self.assertFalse(self.player.playing)
+        self.assertEqual(self.player.position(), 0.0)
+        self.player.close()
+
+    def test_sides_that_are_refused_leave_the_loop_playing(self) -> None:
+        self.player.play([ramp()], loop=True)
+        self.at(0.25)
+        for call in (self.player.play, self.player.swap):
+            with self.assertRaises(RowSynthError):
+                call([])
+        self.assertTrue(self.player.playing)
+        self.assertEqual(self.player.position(), 0.25)
+        self.assertEqual(sounding(), [audio.to_pcm([ramp()]).tobytes()])
+
+
+if __name__ == "__main__":
+    unittest.main()
