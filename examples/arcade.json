@@ -113,7 +113,7 @@
         "b": {
           "lead": "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a1",
           "arp": "o4 l16 f a>c<a f a>c<a f a>c<a f a>c<a | g b>d<b g b>d<b g b>d<b g b>d<b | a>c e c< a>c e c< a>c e c< a>c e c< | a>c e c< a>c e c< a>c e c< a>c e c<",
-          "bass": "o2 l8 f f >f< f f f >f< f | g g >g< g g g >g< g | a a >a< a a a >a< a | a a >a< a a a >a< a",
+          "bass": "o2 l8 f f >f< f f f >f< f | g g >g< g g g >g< g | a a >a< a a a >a< a | a a >a< a a a >a< a16 r16",
           "kit": "l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k s l16 s s s s"
         }
       },
