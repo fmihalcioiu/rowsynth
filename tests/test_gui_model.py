@@ -7,6 +7,7 @@ import os
 import tempfile
 import threading
 import unittest
+from collections.abc import Callable
 from pathlib import Path
 from unittest import mock
 
@@ -58,6 +59,27 @@ PROJECT = {
 # A song the engine refuses to loop.
 NO_ROWS = {"songs": {"still": {"row_ticks": 3, "channels": {}, "patterns": {}, "order": []}}}
 NO_ROWS_SAID = "the song has no rows, so there is nothing to loop"
+
+# One fault in a song, where "air" comes round, and one in a sound, the peak of the second variant of "zaps". The
+# sound "zap" has no fault, and the name of the one that has begins with its name.
+FAULTS = {
+    "instruments": PROJECT["instruments"],
+    "sounds": {"zap": {"def": sound("a4")},
+               "zaps": {"defs": [sound("c5"), {"voices": [{"inst": {"gain": 8}, "notes": [[0, "a4", 4]]}]}]}},
+    "songs": {"tune": song("l4 c e g > c"), "air": song("l2 e g")},
+}
+
+# A project that loads and that the checks refuse: its song has text they cannot read.
+UNREAD = {"instruments": PROJECT["instruments"], "songs": {"odd": song("l4 c e x9")}}
+UNREAD_SAID = "songs.odd: pattern 'a', channel 'tune': cannot read \"x9\" in a channel"
+
+# The checks themselves, for a test that has put something else in their place.
+RUN = checks.run
+
+
+def found_in(data: dict) -> list[checks.Finding]:
+    """What the checks find in a project."""
+    return RUN(Project.from_dict(data), RATE)
 
 
 def changed(**tables: dict) -> dict:
@@ -218,14 +240,54 @@ class RenderTest(ModelCase):
         model.pick("song", "tune")
         self.assertGreater(model.numbers()["centroid_hz"], 0)
 
+
+class FindingsTest(ModelCase):
     def test_the_findings_are_those_of_the_checks_at_the_model_s_rate_and_are_made_once(self):
         model = self.opened()
         with mock.patch.object(checks, "run", wraps=checks.run) as run:
             found = model.findings()
             self.assertIs(model.findings(), found)
         self.assertEqual(run.call_count, 1)
-        self.assertEqual(found, checks.run(Project.from_dict(PROJECT), RATE))
+        self.assertEqual(found, found_in(PROJECT))
         self.assertEqual([finding.target for finding in found], ["songs.air", "sounds.drone.start", "sounds.drone.end"])
+
+    def test_a_project_the_checks_refuse_is_tried_once_and_refused_each_time_its_findings_are_asked_for(self):
+        model = self.opened(UNREAD)
+        with mock.patch.object(checks, "run", wraps=checks.run) as run:
+            for _ in range(2):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.findings()
+                self.assertEqual(str(refused.exception), UNREAD_SAID)
+        self.assertEqual(run.call_count, 1)
+        self.assertTrue(model.findings_ready())
+        self.assertIsNone(model.counts())
+        self.assertEqual(model.findings_for("song", "odd"), [])
+
+    def test_the_counts_are_every_finding_as_a_fault_and_no_warning_once_the_findings_are_ready(self):
+        for data, counts in ((PROJECT, (3, 0)), (FAULTS, (2, 0)), ({"instruments": PROJECT["instruments"]}, (0, 0))):
+            with self.subTest(counts=counts):
+                model = self.opened(data)
+                self.assertIsNone(model.counts())
+                model.findings()
+                self.assertEqual(model.counts(), counts)
+
+    def test_the_findings_of_one_thing_are_those_whose_place_is_that_thing_or_lies_in_it(self):
+        model = self.opened(FAULTS)
+        self.assertEqual(model.findings_for("song", "air"), [])
+        join, peak = model.findings()
+        self.assertEqual([join.target, peak.target], ["songs.air", "sounds.zaps[1]"])
+        for kind, name, found in (("song", "air", [join]), ("sound", "zaps", [peak]), ("song", "tune", []),
+                                  ("sound", "zap", []), ("instrument", "hum", []), ("sound", "gone", [])):
+            with self.subTest(kind=kind, name=name):
+                self.assertEqual(model.findings_for(kind, name), found)
+        with self.assertRaises(RowSynthError) as refused:
+            model.findings_for("sounds", "zaps")
+        self.assertEqual(str(refused.exception),
+                         "a thing of a project is a song, a sound or an instrument, not 'sounds'")
+        # The parts of a held sound are places in it.
+        model = self.opened()
+        _, start, end = model.findings()
+        self.assertEqual(model.findings_for("sound", "drone"), [start, end])
 
 
 class PollTest(ModelCase):
@@ -301,29 +363,41 @@ class PollTest(ModelCase):
 
 
 class WorkerTest(ModelCase):
-    """A render on its own thread. The engine is held back by an event, so each test says when the render ends."""
+    """A render and the checks on threads of their own. An event holds them back, so each test says when they end."""
 
     def held(self, error: Exception | None = None) -> threading.Event:
-        """Has the engine wait before it renders a loop, or raises `error`. Gives the event that lets it go on."""
+        """Has the engine wait before it renders a loop, and the checks before they run. Gives what lets them go on.
+
+        With `error`, each raises it once it is let go, and does nothing else.
+        """
         go = threading.Event()
 
-        def wait(song: dict, rate: int) -> dict:
-            go.wait(60)
-            if error is not None:
-                raise error
-            return render_loop(song, rate)
+        def waiting(real: Callable) -> Callable:
+            def wait(*args: object) -> object:
+                go.wait(60)
+                if error is not None:
+                    raise error
+                return real(*args)
+            return wait
 
-        patch = mock.patch.object(gui_model, "render_loop", side_effect=wait)
-        self.engine = patch.start()
-        self.addCleanup(patch.stop)
-        # A test that fails before it lets the engine go leaves no thread waiting.
+        for owner, name, kept_as in ((gui_model, "render_loop", "engine"), (checks, "run", "checker")):
+            patch = mock.patch.object(owner, name, side_effect=waiting(getattr(owner, name)))
+            setattr(self, kept_as, patch.start())
+            self.addCleanup(patch.stop)
+        # A test that fails before it lets them go leaves no thread waiting.
         self.addCleanup(go.set)
         return go
 
     def started(self, model: Model) -> threading.Thread:
         """The thread that a render of the picked thing is begun on."""
         model.start_render()
-        (worker,) = model._workers.values()
+        (worker,) = model._rendered._workers.values()
+        return worker
+
+    def checking(self, model: Model) -> threading.Thread:
+        """The thread that the checks are begun on."""
+        model.start_findings()
+        (worker,) = model._found._workers.values()
         return worker
 
     def test_a_render_begun_on_its_own_thread_is_ready_when_the_thread_is_through(self):
@@ -331,15 +405,15 @@ class WorkerTest(ModelCase):
         go = self.held()
         worker = self.started(model)
         model.start_render()
-        self.assertEqual(list(model._workers.values()), [worker])
+        self.assertEqual(list(model._rendered._workers.values()), [worker])
         self.assertFalse(model.render_ready())
         go.set()
         worker.join()
         self.assertTrue(model.render_ready())
-        self.assertEqual(model._workers, {})
+        self.assertEqual(model._rendered._workers, {})
         self.assert_loop(model.render(), PROJECT, "tune")
         model.start_render()
-        self.assertEqual(model._workers, {})
+        self.assertEqual(model._rendered._workers, {})
         self.assertEqual(self.engine.call_count, 1)
 
     def test_a_pick_made_while_a_render_runs_is_not_given_that_render(self):
@@ -387,10 +461,63 @@ class WorkerTest(ModelCase):
             worker.join()
         self.assertEqual(told.call_count, 1)
         self.assertFalse(model.render_ready())
-        self.assertEqual(model._workers, {})
+        self.assertEqual(model._rendered._workers, {})
         with self.assertRaises(ZeroDivisionError):
             model.render()
         self.assertEqual(self.engine.call_count, 2)
+
+    def test_findings_begun_on_their_own_thread_are_ready_when_the_thread_is_through(self):
+        model = self.opened()
+        go = self.held()
+        worker = self.checking(model)
+        model.start_findings()
+        self.assertEqual(list(model._found._workers.values()), [worker])
+        self.assertEqual([model.findings_ready(), model.counts(), model.findings_for("song", "air")],
+                         [False, None, []])
+        go.set()
+        worker.join()
+        self.assertTrue(model.findings_ready())
+        self.assertEqual(model._found._workers, {})
+        self.assertEqual(model.counts(), (3, 0))
+        self.assertEqual(model.findings(), found_in(PROJECT))
+        self.assertEqual(self.checker.call_count, 1)
+
+    def test_a_pick_made_while_the_checks_run_does_not_lose_their_findings(self):
+        model = self.opened()
+        go = self.held()
+        worker = self.checking(model)
+        model.pick("sound", "ping")
+        go.set()
+        worker.join()
+        self.assertTrue(model.findings_ready())
+        self.assertEqual(model.findings(), found_in(PROJECT))
+
+    def test_a_load_made_while_the_checks_run_is_not_given_their_findings(self):
+        model = self.opened()
+        go = self.held()
+        worker = self.checking(model)
+        after = changed(songs={"air": None})
+        self.write(after)
+        model.poll()
+        go.set()
+        worker.join()
+        self.assertEqual([model.findings_ready(), model.counts()], [False, None])
+        self.assertEqual(model.findings(), found_in(after))
+        self.assertEqual(model.counts(), (2, 0))
+
+    def test_a_render_and_the_checks_run_at_the_same_time_and_both_come_out_right(self):
+        model = self.opened()
+        go = self.held()
+        workers = [self.started(model), self.checking(model)]
+        self.assertEqual([worker.is_alive() for worker in workers], [True, True])
+        self.assertEqual([model.render_ready(), model.findings_ready()], [False, False])
+        go.set()
+        for worker in workers:
+            worker.join()
+        self.assertEqual([model.render_ready(), model.findings_ready()], [True, True])
+        self.assert_loop(model.render(), PROJECT, "tune")
+        self.assertEqual(model.findings(), found_in(PROJECT))
+        self.assertEqual([self.engine.call_count, self.checker.call_count], [1, 1])
 
 
 if __name__ == "__main__":

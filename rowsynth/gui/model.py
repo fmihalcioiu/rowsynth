@@ -1,9 +1,10 @@
-"""What the window knows, with no window in it: the project that is open, what is picked and what that renders to."""
+"""What the window knows, with no window in it: the open project, what is picked, its render and the findings."""
 from __future__ import annotations
 
 import copy
 import os
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 from .. import checks
@@ -26,12 +27,17 @@ TEST_TICKS = 12
 NUMBERS = ("seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz")
 
 
-def _table(project: Project, kind: str) -> dict:
-    """The table of a project that holds the things of one kind. A kind that is none of the three is refused."""
+def _section(kind: str) -> str:
+    """The section that holds the things of one kind. A kind that is none of the three is refused."""
     for section, held in KINDS.items():
         if held == kind:
-            return getattr(project, section)
+            return section
     raise RowSynthError(f"a thing of a project is a song, a sound or an instrument, not {kind!r}")
+
+
+def _table(project: Project, kind: str) -> dict:
+    """The table of a project that holds the things of one kind."""
+    return getattr(project, _section(kind))
 
 
 def _tag(entry: dict) -> str:
@@ -86,11 +92,105 @@ def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
             "numbers": {key: told[key] for key in NUMBERS}}
 
 
-class Model:
-    """A project file that is open: what it holds, the one thing of it that is picked, and what that renders to.
+def _check(project: Project, rate: int) -> list[checks.Finding]:
+    """What the checks find in a project, rendered at `rate`."""
+    return checks.run(project, rate)
 
-    One thread owns a model and calls it. Only `start_render` puts work on another thread, and what that thread
-    makes is kept only if the thing it was made of is still the picked one, in the project as it was loaded then.
+
+def _within(target: str, place: str) -> bool:
+    """Whether the target of a finding is a place in a project or lies in it, as "sounds.coin[1]" in "sounds.coin"."""
+    return target == place or target.startswith((f"{place}.", f"{place}["))
+
+
+class _Kept:
+    """One thing a model makes and keeps: the result, what it was made for, the thread it is made on, its refusal.
+
+    `job` gives what a result made now would be for, its key, and what `make` is to make it from. It is called
+    with `lock` held, and what is kept is read and changed with that lock held and at no other time. A result
+    is kept only while its key is still the key of now. One that comes too late is dropped, so it is never taken
+    for the result of another key.
+    """
+
+    def __init__(self, name: str, lock: threading.Lock, make: Callable[..., object],
+                 job: Callable[[], tuple[tuple, tuple]]) -> None:
+        """`name` is what the threads are called. `make` is called with what `job` gives beside the key."""
+        self._name = name
+        self._lock = lock
+        self._make = make
+        self._job = job
+        # The last result that was made: (its key, the result, the refusal). One of the last two is None.
+        self._kept: tuple | None = None
+        self._workers: dict[tuple, threading.Thread] = {}
+
+    def start(self) -> None:
+        """Begins the making on a thread of its own, unless the result is kept or already on its way."""
+        with self._lock:
+            key, parts = self._job()
+            if key in self._workers or self._has(key):
+                return
+            worker = threading.Thread(target=self._work, args=(key, parts), name=self._name, daemon=True)
+            worker.start()
+            self._workers[key] = worker
+
+    def ready(self) -> bool:
+        """Whether `take` would now answer at once, with the result or with its refusal."""
+        with self._lock:
+            return self._has(self._job()[0])
+
+    def peek(self) -> object | None:
+        """The result if it is kept. None while it is not, and for one that was refused. Never waits."""
+        with self._lock:
+            return self._kept[1] if self._has(self._job()[0]) else None
+
+    def take(self) -> object:
+        """The result. Unless it is kept, it is waited for when it is on its way, and made now when it is not.
+
+        What was refused with a RowSynthError is refused again, each time it is asked for.
+        """
+        with self._lock:
+            key, parts = self._job()
+            worker = self._workers.get(key)
+        if worker is not None:
+            worker.join()
+        if not self.ready():
+            self._work(key, parts)
+        _, made, refusal = self._kept
+        if refusal is not None:
+            raise RowSynthError(refusal)
+        return made
+
+    def drop(self) -> None:
+        """Lets go of what is kept. The lock is held by whoever calls this."""
+        self._kept = None
+
+    def _has(self, key: tuple) -> bool:
+        """Whether what is kept is the result of `key`."""
+        return self._kept is not None and self._kept[0] == key
+
+    def _work(self, key: tuple, parts: tuple) -> None:
+        """Makes the result of `key`, and keeps it if that is still the key of now.
+
+        A RowSynthError is kept as the refusal it is. Anything else that goes wrong is kept nowhere, and is left
+        to whoever asks for the result next.
+        """
+        kept = None
+        try:
+            kept = (key, self._make(*parts), None)
+        except RowSynthError as error:
+            kept = (key, None, str(error))
+        finally:
+            with self._lock:
+                self._workers.pop(key, None)
+                if kept is not None and key == self._job()[0]:
+                    self._kept = kept
+
+
+class Model:
+    """A project file that is open: what it holds, what is picked, what that renders to and what the checks find.
+
+    One thread owns a model and calls it. Only `start_render` and `start_findings` put work on other threads. A
+    render made there is kept only if the thing it was made of is still the picked one, and findings only if
+    they are of the project as it is loaded now.
     """
 
     def __init__(self, path: str | Path, rate: int = DEFAULT_RATE) -> None:
@@ -104,15 +204,12 @@ class Model:
         self._seen = _look(self.path)
         self._project = Project.load(self.path)
         self._picked = _first(self._project)
-        # How many times the file has been loaded again. With the picked thing, it says what a render is of.
+        # How many times the file has been loaded again.
         self._loads = 0
-        # Held wherever the picked thing, the project, the kept render or the threads at work are read or changed.
+        # Held wherever the picked thing, the project or anything kept of them is read or changed.
         self._lock = threading.Lock()
-        # The last render that was made: (what it is of, the render and its numbers, the refusal). One of the
-        # last two is None.
-        self._kept: tuple | None = None
-        self._workers: dict[tuple, threading.Thread] = {}
-        self._findings: list[checks.Finding] | None = None
+        self._rendered = _Kept("rowsynth-render", self._lock, _make, self._render_job)
+        self._found = _Kept("rowsynth-checks", self._lock, _check, self._findings_job)
 
     @property
     def picked(self) -> tuple[str, str] | None:
@@ -146,7 +243,7 @@ class Model:
         is not loaded again, so asking twice costs one render. One that is on its way is waited for. With nothing
         picked there is nothing to render, which is refused.
         """
-        return self._made()["render"]
+        return self._rendered.take()["render"]
 
     def numbers(self) -> dict:
         """The numbers of the picked thing's render, measured on the mean of its sides.
@@ -154,13 +251,50 @@ class Model:
         {"seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz"}, as
         `measure` and `brightness` give them. They are made with the render and kept with it.
         """
-        return self._made()["numbers"]
+        return self._rendered.take()["numbers"]
+
+    def start_render(self) -> None:
+        """Begins the render of the picked thing on a thread of its own, unless it is kept or already on its way."""
+        self._rendered.start()
+
+    def render_ready(self) -> bool:
+        """Whether `render` and `numbers` would now answer at once, with the render or with its refusal."""
+        return self._rendered.ready()
 
     def findings(self) -> list[checks.Finding]:
-        """What the checks find in the project, rendered at the model's rate. Kept until the file is loaded again."""
-        if self._findings is None:
-            self._findings = checks.run(self._project, self.rate)
-        return self._findings
+        """What the checks find in the project, rendered at the model's rate, in the order the checks give it.
+
+        The findings are kept until the file is loaded again, whatever is picked. Those that are on their way are
+        waited for. A project the checks refuse is refused again each time its findings are asked for.
+        """
+        return self._found.take()
+
+    def start_findings(self) -> None:
+        """Begins the checks on a thread of their own, unless the findings are kept or already on their way."""
+        self._found.start()
+
+    def findings_ready(self) -> bool:
+        """Whether `findings` would now answer at once, with the findings or with the refusal of the checks."""
+        return self._found.ready()
+
+    def counts(self) -> tuple[int, int] | None:
+        """How many findings there are, as (faults, warnings), or None while they are not ready. Never waits.
+
+        The checks give their findings one level and no more: each is a breach of a rule. So every finding is a
+        fault and there are no warnings. A project the checks refuse has no counts.
+        """
+        found = self._found.peek()
+        return None if found is None else (len(found), 0)
+
+    def findings_for(self, kind: str, name: str) -> list[checks.Finding]:
+        """The findings that are in one song, sound or instrument, in the order the checks give them. Never waits.
+
+        A finding says where it is with its target: "sounds.coin" is in the sound coin, and so are
+        "sounds.coin[1]" and "sounds.coin.parts[0]". While the findings are not ready the list is empty, as it is
+        for a project the checks refuse.
+        """
+        place = f"{_section(kind)}.{name}"
+        return [finding for finding in self._found.peek() or [] if _within(finding.target, place)]
 
     def poll(self) -> set[tuple[str, str]]:
         """Looks at the file, loads it again when its time or its size has changed, and gives what differs.
@@ -187,63 +321,16 @@ class Model:
             self._loads += 1
             if self._picked is not None and self._picked[1] not in _table(project, self._picked[0]):
                 self._picked = None
-            self._kept = None
+            self._rendered.drop()
+            self._found.drop()
         self._seen = seen
-        self._findings = None
         self.problem = None
         return found
 
-    def start_render(self) -> None:
-        """Begins the render of the picked thing on a thread of its own, unless it is kept or already on its way."""
-        with self._lock:
-            key = self._key()
-            if key in self._workers or self._is_kept(key):
-                return
-            worker = threading.Thread(target=self._work, args=(key, self._project, self._picked),
-                                      name="rowsynth-render", daemon=True)
-            worker.start()
-            self._workers[key] = worker
+    def _render_job(self) -> tuple[tuple, tuple]:
+        """What a render made now would be of, the load of the file and the picked thing, and what it is made from."""
+        return (self._loads, self._picked), (self._project, self._picked, self.rate)
 
-    def render_ready(self) -> bool:
-        """Whether `render` and `numbers` would now answer at once, with the render or with its refusal."""
-        with self._lock:
-            return self._is_kept(self._key())
-
-    def _key(self) -> tuple:
-        """What a render made now would be of: the load of the file it is made from, and the picked thing."""
-        return self._loads, self._picked
-
-    def _is_kept(self, key: tuple) -> bool:
-        """Whether the kept render is the one of `key`."""
-        return self._kept is not None and self._kept[0] == key
-
-    def _work(self, key: tuple, project: Project, picked: tuple[str, str] | None) -> None:
-        """Renders what was picked as this was asked for, and keeps the render if that is still what is picked.
-
-        A render the engine refuses is kept as its refusal, to be refused again each time it is asked for.
-        Anything else that goes wrong is kept nowhere, and is left to whoever asks for the render next.
-        """
-        kept = None
-        try:
-            kept = (key, _make(project, picked, self.rate), None)
-        except RowSynthError as error:
-            kept = (key, None, str(error))
-        finally:
-            with self._lock:
-                self._workers.pop(key, None)
-                if kept is not None and key == self._key():
-                    self._kept = kept
-
-    def _made(self) -> dict:
-        """What the picked thing came to: its render and its numbers. Unless kept, they are waited for or made now."""
-        with self._lock:
-            key, project, picked = self._key(), self._project, self._picked
-            worker = self._workers.get(key)
-        if worker is not None:
-            worker.join()
-        if not self.render_ready():
-            self._work(key, project, picked)
-        _, made, refusal = self._kept
-        if refusal is not None:
-            raise RowSynthError(refusal)
-        return made
+    def _findings_job(self) -> tuple[tuple, tuple]:
+        """What findings made now would be of, the load of the file, and what they are made from."""
+        return (self._loads,), (self._project, self.rate)
