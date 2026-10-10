@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rowsynth import layers
 from rowsynth.errors import RowSynthError
-from rowsynth.gui.songview import Block, DrumRow, Note, bar_rows, blocks, drum_rows, on_grid, pattern, span
+from rowsynth.gui.songview import Block, DrumRow, Note, bar_rows, blocks, drum_rows, on_grid, pattern, span, text
 from rowsynth.project import Project
 from rowsynth.song import lay
 
@@ -142,9 +142,18 @@ class Grid(unittest.TestCase):
         self.assertTrue(on_grid(found))
 
     def test_a_triplet_length_or_half_a_row_is_off_the_grid(self) -> None:
-        for text in ("c12 d12 e12", "c4 r12 d6", "c32 r32", "r32 c32"):
-            with self.subTest(text=text):
-                self.assertFalse(on_grid(pattern(song({"a": {"low": "c1", "tune": text}}), "a")))
+        for line in ("c12 d12 e12", "c4 r12 d6", "c32 r32", "r32 c32"):
+            with self.subTest(line=line):
+                self.assertFalse(on_grid(pattern(song({"a": {"low": "c1", "tune": line}}), "a")))
+
+    def test_a_hit_its_letter_ends_off_a_row_is_on_the_grid_where_it_starts_on_one(self) -> None:
+        short = {"t": {"inst": "thud", "note": "c2", "rows": 0.5}}
+        found = pattern(song({"a": {"beat": "t4 t8 t8"}}, drums=short), "a")
+        self.assertEqual([(note.row, note.rows) for note in found.channels[2].notes], [(0, 0.5), (4, 0.5), (6, 0.5)])
+        self.assertTrue(on_grid(found))
+        # A hit that starts off a row is off the grid, and so is a note in a drum channel that ends off one.
+        self.assertFalse(on_grid(pattern(song({"a": {"beat": "r32 t"}}, drums=short), "a")))
+        self.assertFalse(on_grid(pattern(song({"a": {"beat": "c32 r32"}}, drums=short), "a")))
 
 
 class Span(unittest.TestCase):
@@ -180,6 +189,34 @@ class Refusals(unittest.TestCase):
                 self.assertEqual(refusal(self, pattern, made, "a"), said)
                 self.assertEqual(refusal(self, blocks, made), said)
                 self.assertEqual(refusal(self, lay, made), said)
+
+
+class Text(unittest.TestCase):
+    def written(self, made: dict, name: str, channel: str) -> str:
+        """The text of one channel of one pattern, once it is seen to read into the notes it was written from."""
+        held = next(held for held in pattern(made, name).channels if held.name == channel)
+        line = text(held.notes, held.rows, channel, made)
+        again = {**made, "patterns": {**made["patterns"], name: {**made["patterns"][name], channel: line}}}
+        self.assertEqual(next(back for back in pattern(again, name).channels if back.name == channel), held)
+        return line
+
+    def test_a_tuned_channel_is_written_as_text_that_reads_into_the_same_notes(self) -> None:
+        made = Project.load(EXAMPLES / "arcade.json").song("tune")
+        self.assertEqual(self.written(made, "b", "lead"), "o5 l4 a > c f c | < b > d g d | e2 c < a | a1")
+        self.assertEqual(self.written(made, "a", "bass"),
+                         "o2 l8 a a > a < a a a > a < a | f f > f < f f f > f < f | c c > c < c c c > c < c | "
+                         "g g > g < g g g > g < g")
+        with self.assertRaises(RowSynthError) as caught:
+            text((), 16, "nobody", made)
+        self.assertEqual(str(caught.exception), "no channel called 'nobody'")
+
+    def test_a_drum_channel_is_written_as_text_that_reads_into_the_same_hits(self) -> None:
+        made = Project.load(EXAMPLES / "arcade.json").song("tune")
+        self.assertEqual(self.written(made, "a", "kit"),
+                         "l8 k h s h k k s h | k h s h k k s h | k h s h k k s h | k h s h k k s h")
+        # The level a letter has of its own stays in the song, and the text has the level that was written.
+        own = song({"a": {"tune": "c1", "beat": "v6 k h8 s v11 h c"}})
+        self.assertEqual(self.written(own, "a", "beat"), "o4 l16 v6 k h8 s v11 h c")
 
 
 class Examples(unittest.TestCase):

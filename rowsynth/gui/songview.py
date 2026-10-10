@@ -5,7 +5,7 @@ import math
 from collections.abc import Iterable
 from dataclasses import dataclass
 
-from .. import layers
+from .. import layers, songtext
 from ..checks import _whole_rows
 from ..errors import RowSynthError
 from ..notes import midi
@@ -78,6 +78,12 @@ class DrumRow:
     pitch: float
 
 
+def _letters(song: dict) -> dict:
+    """The drum letters of a song without the level each has of its own, which leaves a hit the level of its text."""
+    return {letter: {key: value for key, value in hit.items() if key != "vel"}
+            for letter, hit in (song.get("drums") or {}).items()}
+
+
 def pattern(song: dict, name: str) -> Pattern:
     """One pattern of a song, read as `lay` reads it. The song is as `Project.song` gives it, its instruments with it.
 
@@ -90,13 +96,11 @@ def pattern(song: dict, name: str) -> Pattern:
         raise RowSynthError(f"no pattern called {name!r}")
     rows_per_beat = song.get("rows_per_beat", 4)
     instruments = song.get("instruments", {})
-    # A letter's own level is kept from `parse`, so that a hit comes back at the level its text wrote.
-    letters = {letter: {key: value for key, value in hit.items() if key != "vel"}
-               for letter, hit in (song.get("drums") or {}).items()}
+    letters = _letters(song)
     read: dict[str, tuple[tuple[Note, ...], float]] = {}
-    for channel, settings, text in _channels(song, name):
+    for channel, settings, line in _channels(song, name):
         with _within(name, channel):
-            events, rows = parse(text, settings["inst"], rows_per_beat, letters if settings.get("drums") else None)
+            events, rows = parse(line, settings["inst"], rows_per_beat, letters if settings.get("drums") else None)
             for found in events:
                 if found["inst"] not in instruments:
                     raise RowSynthError(f"no instrument called {found['inst']!r}")
@@ -135,9 +139,28 @@ def _whole(rows: float) -> bool:
 
 
 def on_grid(pattern: Pattern) -> bool:
-    """Whether every note of a pattern starts on a whole row and ends on one."""
-    return all(_whole(note.row) and _whole(note.row + note.rows)
+    """Whether every note of a pattern starts on a whole row and ends on one. A drum hit has only to start on one.
+
+    Where a hit ends is its letter's doing, and only where it starts can be placed.
+    """
+    return all(_whole(note.row) and (bool(note.drum) or _whole(note.row + note.rows))
                for channel in pattern.channels for note in channel.notes)
+
+
+def text(notes: Iterable[Note], rows: float, channel: str, song: dict) -> str:
+    """The notes of one channel of one pattern as the text the song holds for them, filling `rows` rows.
+
+    It is `songtext.write` that writes it, so the text is tidy, and `pattern` reads it back into the same notes.
+    The level of a hit is written as it is, and the level its letter has of its own stays in the song. A channel
+    the song does not have is refused, and so is whatever `songtext.write` refuses.
+    """
+    if channel not in song["channels"]:
+        raise RowSynthError(f"no channel called {channel!r}")
+    settings = song["channels"][channel]
+    events = [{"row": note.row, "rows": note.rows, "note": note.pitch, "inst": note.inst, "vel": note.level / 15,
+               **({"drum": note.drum} if note.drum else {})} for note in notes]
+    return songtext.write(events, rows, settings["inst"], song.get("rows_per_beat", 4),
+                          _letters(song) if settings.get("drums") else None)
 
 
 def span(notes: Iterable[Note], least: int = 12) -> tuple[int, int]:
