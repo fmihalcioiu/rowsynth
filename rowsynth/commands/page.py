@@ -7,7 +7,8 @@ from ..page import PAGE_RATE, write_page
 from . import emit, load_project
 
 NAME = "page"
-HELP = "write the listen page of a project file into a folder: one page with a player for each of its sounds"
+HELP = ("write the listen page of a project file into a folder: one page with a player for each of its sounds "
+        "and its songs")
 
 
 def configure(parser: argparse.ArgumentParser) -> None:
@@ -23,7 +24,8 @@ def run(args: argparse.Namespace) -> int:
     """Write the listen page of the project in the file, print what was written, and return 0."""
     project = load_project(args.file)
     written = write_page(project, args.out, args.rate)
-    # Every sound of the project is on its page: there is none whose buffers are all empty.
+    # Every sound and every song of the project is on its page: no sound has buffers that are all empty, and a
+    # song is at the least its loop.
     emit({"page": written["page"], "folder": args.out, "rate": args.rate, "sounds": len(project.sounds),
-          "files": len(written["files"])})
+          "songs": len(project.songs), "files": len(written["files"])})
     return 0

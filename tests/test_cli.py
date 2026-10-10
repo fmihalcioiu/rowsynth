@@ -542,6 +542,10 @@ class Page(CommandLineCase):
     # and the start, the loop and the end of a held sound.
     FILES = ["tap.wav", "drip-0.wav", "drip-1.wav", "drip-2.wav", "knock.wav",
              "drone-start.wav", "drone-loop.wav", "drone-end.wav"]
+    # Those of its songs, in a folder of their own inside that of the sounds: the loop of each, and each
+    # version of the layered one in each of its keys.
+    SONG_FILES = ["round.wav", "round.whole.0.wav", "round.whole.3.wav", "round.bare.0.wav", "round.bare.3.wav",
+                  "sting.wav"]
 
     def page(self, out: str | Path, *flags: str, data: dict = PROJECT) -> int:
         """What main returns for writing the listen page of a project file holding `data` into the folder `out`."""
@@ -552,17 +556,18 @@ class Page(CommandLineCase):
         typed = f"{self.folder / 'site'}{os.sep}"
         self.assertEqual(self.page(typed), 0)
         told = {"page": str(self.folder / "site" / "index.html"), "folder": typed, "rate": 48000, "sounds": 4,
-                "files": len(self.FILES)}
+                "songs": 2, "files": len(self.FILES) + len(self.SONG_FILES)}
         self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
 
     def test_the_page_and_its_audio_files_are_in_a_folder_the_command_makes(self) -> None:
         out = self.folder / "made" / "site"
         self.assertEqual(self.page(out, "--rate", "8000"), 0)
         self.assertEqual(sorted(found.name for found in out.iterdir()), ["audio", "index.html"])
-        self.assertEqual(sorted(found.name for found in (out / "audio").iterdir()), sorted(self.FILES))
+        self.assertEqual(sorted(found.name for found in (out / "audio").iterdir()), sorted([*self.FILES, "songs"]))
+        self.assertEqual(sorted(found.name for found in (out / "audio" / "songs").iterdir()), sorted(self.SONG_FILES))
         told = json.loads(self.out.getvalue())
         self.assertEqual(Path(told["page"]), out / "index.html")
-        self.assertEqual(told["files"], len(self.FILES))
+        self.assertEqual(told["files"], len(self.FILES) + len(self.SONG_FILES))
 
     def test_rate_is_the_samples_a_second_the_audio_files_are_rendered_at(self) -> None:
         out = self.folder / "site"
@@ -576,7 +581,8 @@ class Page(CommandLineCase):
     def test_a_project_with_no_sounds_gets_a_page_and_no_audio_files(self) -> None:
         out = self.folder / "site"
         self.assertEqual(self.page(out, data={}), 0)
-        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 48000, "sounds": 0, "files": 0}
+        told = {"page": str(out / "index.html"), "folder": str(out), "rate": 48000, "sounds": 0, "songs": 0,
+                "files": 0}
         self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
         self.assertEqual([found.name for found in out.iterdir()], ["index.html"])
 
