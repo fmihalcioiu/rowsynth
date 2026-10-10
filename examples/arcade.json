@@ -121,6 +121,16 @@
       "chords": {
         "a": ["Am", "F", "C", "G"],
         "b": ["F", "G", "Am", "Am"]
+      },
+      "layers": {
+        "groups": {"rhythm": ["kit"], "low": ["bass"], "middle": ["arp"], "top": ["lead"]},
+        "versions": {
+          "beat": ["rhythm"],
+          "thin": ["rhythm", "low"],
+          "most": ["rhythm", "low", "middle"],
+          "full": ["rhythm", "low", "middle", "top"]
+        },
+        "keys": [0, 2]
       }
     }
   }

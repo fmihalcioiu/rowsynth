@@ -1,12 +1,14 @@
 """Tests for the example projects: each one loads, passes every check and renders."""
 from __future__ import annotations
 
+import tempfile
 import unittest
 from pathlib import Path
 
 import numpy as np
 
 from rowsynth.bank import PEAK_DB, render_bank
+from rowsynth.build import build
 from rowsynth.checks import run
 from rowsynth.project import Project
 from rowsynth.song import render_song
@@ -53,3 +55,18 @@ class Arcade(unittest.TestCase):
         loudest = max(float(np.abs(played[side]).max()) for side in ("left", "right"))
         self.assertGreater(loudest, 0.25)
         self.assertLess(loudest, 1.0)
+
+    def test_its_tune_is_layered_and_builds_as_one_file_a_group_and_key(self) -> None:
+        layers = self.project.songs["tune"]["layers"]
+        self.assertEqual(list(layers["groups"]), ["rhythm", "low", "middle", "top"])
+        self.assertEqual(list(layers["versions"]), ["beat", "thin", "most", "full"])
+        self.assertEqual(layers["keys"], [0, 2])
+        with tempfile.TemporaryDirectory() as folder:
+            entry = build(self.project, folder, rate=8000)["songs"]["tune"]
+            written = sorted(found.name for found in Path(folder).iterdir())
+        # The drums are the same in both keys, so they are one file. The other three groups are two each.
+        self.assertEqual(entry["groups"]["rhythm"], {"file": "tune-rhythm.wav"})
+        self.assertEqual(entry["groups"]["top"], {"files": {"0": "tune-top-0.wav", "2": "tune-top-2.wav"}})
+        self.assertEqual(len(written), 8)
+        self.assertIn("music.json", written)
+        self.assertEqual(entry["bar_samples"] * 8, entry["loop_samples"])
