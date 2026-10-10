@@ -10,7 +10,7 @@ from unittest import mock
 
 import numpy as np
 
-from rowsynth.build import build, build_song, source_hash, stale
+from rowsynth.build import build, build_song, manifest_path, source_hash, stale
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
 from rowsynth.song import render_loop
@@ -226,6 +226,13 @@ class BuildTest(BuildCase):
                          '{\n  "rate": 48000,\n  "songs": {\n    "hush": {\n      "loop_samples": 9600,\n'
                          f'      "gain": 1.0,\n      "source": "{source}",\n      "file": "hush.wav"\n'
                          '    }\n  }\n}\n')
+
+    def test_manifest_path_is_where_a_build_into_the_folder_writes_its_manifest(self):
+        for folder in (self.out, str(self.out)):
+            self.assertEqual(manifest_path(folder), self.out / "music.json")
+        self.assertFalse(manifest_path(self.out).exists())
+        manifest = build(self.project, self.out, RATE, songs=["hush"])
+        self.assertEqual(json.loads(manifest_path(self.out).read_text(encoding="utf-8")), manifest)
 
     def test_songs_names_the_songs_to_build_in_the_order_they_are_named_in(self):
         manifest = build(self.project, self.out, RATE, songs=["hush", "tune"])

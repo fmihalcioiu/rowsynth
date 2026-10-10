@@ -15,6 +15,9 @@ from .project import Project
 from .song import render_loop
 from .wav import save_wav
 
+# The samples a second a build is rendered at, when no rate is asked for.
+BUILD_RATE = 48000
+
 # Where the loudest sample of a song's file is brought to, in decibels against full scale.
 _PEAK_DB = -1.0
 
@@ -72,13 +75,18 @@ def build_song(project: Project, name: str, out_dir: str | Path, rate: int = 480
             "source": source_hash(project, name, rate), "file": file}
 
 
-def build(project: Project, out_dir: str | Path, rate: int = 48000, songs: list[str] | None = None) -> dict:
+def manifest_path(out_dir: str | Path) -> Path:
+    """Where a build into a folder writes its manifest: music.json, beside the files it names."""
+    return Path(out_dir, _MANIFEST)
+
+
+def build(project: Project, out_dir: str | Path, rate: int = BUILD_RATE, songs: list[str] | None = None) -> dict:
     """Writes the songs of a project into a folder with their manifest, and gives the manifest.
 
     `songs` names the songs to build, and left out it is every song of the project, in the project's order.
     The folder is made when it is missing. Each song is written as `build_song` writes it. The manifest is
-    {"rate": rate, "songs": {name: entry}}, and it is written to music.json in the folder once every song is
-    there. Whatever else the folder holds is left alone.
+    {"rate": rate, "songs": {name: entry}}, and it is written to the folder's `manifest_path` once every song
+    is there. Whatever else the folder holds is left alone.
     """
     rate = _rate(rate)
     out_dir = Path(out_dir)
@@ -86,7 +94,7 @@ def build(project: Project, out_dir: str | Path, rate: int = 48000, songs: list[
     names = project.songs if songs is None else songs
     manifest = {"rate": rate, "songs": {name: build_song(project, name, out_dir, rate) for name in names}}
     text = json.dumps(manifest, indent=2, ensure_ascii=False) + "\n"
-    (out_dir / _MANIFEST).write_text(text, encoding="utf-8", newline="\n")
+    manifest_path(out_dir).write_text(text, encoding="utf-8", newline="\n")
     return manifest
 
 

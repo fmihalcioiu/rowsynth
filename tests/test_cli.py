@@ -18,6 +18,7 @@ import numpy as np
 import rowsynth
 from rowsynth import checks
 from rowsynth.bank import render_entry
+from rowsynth.build import build
 from rowsynth.cli import main
 from rowsynth.commands import emit, load_file, load_project, mono
 from rowsynth.errors import RowSynthError
@@ -101,6 +102,21 @@ INFO = {
     "chords": ["Dm", "A7"],
 }
 
+# A project of two songs that are one loop each, and not in name order. The first is the half second it is in
+# PROJECT. The second is 4 rows at 3 ticks a row, a fifth of a second.
+LOOPS = {
+    "instruments": PROJECT["instruments"],
+    "songs": {
+        "sting": PROJECT["songs"]["sting"],
+        "hum": {
+            "row_ticks": 3,
+            "channels": {"low": {"inst": "pipe"}},
+            "patterns": {"p": {"low": "o2 l4 d"}},
+            "order": ["p"],
+        },
+    },
+}
+
 
 def tone(hz: float, level: float, rate: int) -> np.ndarray:
     """Half a second of a sine that starts at zero."""
@@ -168,6 +184,92 @@ class Shared(CommandLineCase):
         self.assertEqual(mean.tolist(), ((left.astype(np.float64) + right) / 2).tolist())
         # Worked out in single precision, the first of them comes out a little off.
         self.assertNotEqual(mean[0], (left[0] + right[0]) / np.float32(2))
+
+
+class Build(CommandLineCase):
+    def build(self, out: str | Path, *typed: str, data: dict = LOOPS) -> int:
+        """What main returns for building a project file holding `data` into the folder `out`.
+
+        `typed` goes straight after the file: the names of songs, and then flags.
+        """
+        return self.run_main("build", str(self.saved(data)), *typed, "--out", str(out))
+
+    def test_build_prints_the_folder_as_it_was_typed_the_manifest_the_rate_and_every_song_of_the_project(self) -> None:
+        # The folder is typed with a separator after it, which the path of the manifest inside it has no use for.
+        typed = f"{self.folder / 'built'}{os.sep}"
+        self.assertEqual(self.build(typed), 0)
+        manifest = build(Project.from_dict(LOOPS), self.folder / "apart")
+        told = {"folder": typed, "manifest": str(self.folder / "built" / "music.json"), **manifest}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        self.assertEqual(list(told), ["folder", "manifest", "rate", "songs"])
+        # With no rate typed it is 48000. With no name typed it is every song, in the order of the project.
+        self.assertEqual(told["rate"], 48000)
+        self.assertEqual([(name, entry["loop_samples"], entry["file"]) for name, entry in told["songs"].items()],
+                         [("sting", 24000, "sting.wav"), ("hum", 9600, "hum.wav")])
+
+    def test_the_files_are_in_a_folder_the_command_makes_with_a_manifest_that_holds_what_was_printed(self) -> None:
+        out = self.folder / "made" / "built"
+        self.assertEqual(self.build(out, "--rate", "8000"), 0)
+        self.assertEqual(sorted(found.name for found in out.iterdir()), ["hum.wav", "music.json", "sting.wav"])
+        told = json.loads(self.out.getvalue())
+        self.assertEqual(Path(told["manifest"]), out / "music.json")
+        self.assertEqual(json.loads(Path(told["manifest"]).read_text(encoding="utf-8")),
+                         {"rate": told["rate"], "songs": told["songs"]})
+        self.assertEqual([entry["file"] for entry in told["songs"].values()], ["sting.wav", "hum.wav"])
+
+    def test_names_after_the_file_are_the_only_songs_built_in_the_order_they_are_named_in(self) -> None:
+        one, both = self.folder / "one", self.folder / "both"
+        self.assertEqual(self.build(one, "hum", "--rate", "8000"), 0)
+        self.assertEqual(sorted(found.name for found in one.iterdir()), ["hum.wav", "music.json"])
+        self.assertEqual(list(json.loads(self.out.getvalue())["songs"]), ["hum"])
+        self.assertEqual(list(json.loads((one / "music.json").read_text(encoding="utf-8"))["songs"]), ["hum"])
+        # Each document is read on its own.
+        self.out = io.StringIO()
+        self.assertEqual(self.build(both, "hum", "sting", "--rate", "8000"), 0)
+        self.assertEqual(list(json.loads(self.out.getvalue())["songs"]), ["hum", "sting"])
+
+    def test_rate_is_the_samples_a_second_the_songs_are_built_at(self) -> None:
+        out, apart = self.folder / "built", self.folder / "apart"
+        self.assertEqual(self.build(out, "--rate", "8000"), 0)
+        told = json.loads(self.out.getvalue())
+        self.assertEqual((told["rate"], told["songs"]), (8000, build(Project.from_dict(LOOPS), apart, 8000)["songs"]))
+        # Half a second and a fifth of one, at 8000 samples a second.
+        self.assertEqual([entry["loop_samples"] for entry in told["songs"].values()], [4000, 1600])
+        for name, entry in told["songs"].items():
+            sides, rate = load_wav(out / entry["file"])
+            self.assertEqual((rate, [len(side) for side in sides]), (8000, [entry["loop_samples"]] * 2), name)
+            self.assertEqual((out / entry["file"]).read_bytes(), (apart / entry["file"]).read_bytes(), name)
+
+    def test_build_of_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
+        path, out = self.folder / "nowhere.json", self.folder / "built"
+        self.assertEqual(self.run_main("build", str(path), "--out", str(out)), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: no such file\n"))
+        self.assertFalse(out.exists())
+
+    def test_a_name_that_is_no_song_of_the_project_is_refused_with_code_2_and_no_manifest_is_written(self) -> None:
+        out = self.folder / "built"
+        self.assertEqual(self.build(out, "march"), 2)
+        self.assertEqual(self.printed(), ("", "error: no song named 'march'\n"))
+        self.assertFalse((out / "music.json").exists())
+
+    def test_a_song_that_cannot_be_built_is_refused_by_its_name_with_code_2_and_no_manifest_is_written(self) -> None:
+        spoilt = json.loads(json.dumps(LOOPS))
+        spoilt["songs"]["hum"]["patterns"]["p"]["low"] = "o2 l4 ? d"
+        out = self.folder / "built"
+        self.assertEqual(self.build(out, "--rate", "8000", data=spoilt), 2)
+        printed, err = self.printed()
+        self.assertEqual(printed, "")
+        self.assertTrue(err.startswith("error: songs.hum: pattern 'p', channel 'low': "), err)
+        # The song before it in the project was written, and is all there is.
+        self.assertEqual([found.name for found in out.iterdir()], ["sting.wav"])
+
+    def test_build_without_out_is_refused_with_code_2(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.run_main("build", str(self.saved(LOOPS)))
+        self.assertEqual(left.exception.code, 2)
+        out, err = self.printed()
+        self.assertEqual(out, "")
+        self.assertIn("the following arguments are required: --out", err)
 
 
 class Check(CommandLineCase):
@@ -712,7 +814,7 @@ class Refusals(CommandLineCase):
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
         self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()),
-                         ["check", "info", "measure", "page", "render"])
+                         ["build", "check", "info", "measure", "page", "render"])
 
 
 class Process(CommandLineCase):
