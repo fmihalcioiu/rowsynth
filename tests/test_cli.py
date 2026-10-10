@@ -850,6 +850,124 @@ class Render(CommandLineCase):
         self.assertEqual(self.refusal("tap", "--stems"), "error: --stems is for a song, and 'tap' is a sound\n")
 
 
+class Set(CommandLineCase):
+    def set(self, *typed: str) -> int:
+        """What main returns for a set on a project file holding PROJECT. `typed` goes straight after the file."""
+        return self.run_main("set", str(self.saved(PROJECT)), *typed)
+
+    def held(self) -> dict:
+        """What the project file holds now. Only its data is looked at, never how its text is laid out."""
+        return json.loads((self.folder / "project.json").read_text(encoding="utf-8"))
+
+    def refusal(self, *typed: str) -> str:
+        """The errors printed so far, after a set that is refused with code 2 and leaves the file as it was."""
+        path = self.saved(PROJECT)
+        written = path.read_bytes()
+        self.assertEqual(self.run_main("set", str(path), *typed), 2)
+        self.assertEqual(self.out.getvalue(), "")
+        self.assertEqual(path.read_bytes(), written)
+        return self.err.getvalue()
+
+    def test_a_value_that_is_json_is_set_as_what_it_reads_as_and_the_change_is_printed(self) -> None:
+        self.assertEqual(self.set("instruments.pipe.vol", "[12, 9, 5]"), 0)
+        told = {"file": str(self.folder / "project.json"), "where": "instruments.pipe.vol", "was": 12,
+                "now": [12, 9, 5]}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        self.assertEqual(self.held()["instruments"]["pipe"], {"wave": "tri", "vol": [12, 9, 5]})
+        # A number below zero is a value, and is not taken for a flag.
+        self.assertEqual(self.set("instruments.pipe.key_scale", "-1.5"), 0)
+        self.assertEqual(self.held()["instruments"]["pipe"], {"wave": "tri", "vol": 12, "key_scale": -1.5})
+
+    def test_a_value_that_is_not_json_is_set_as_the_text_it_is_and_the_rest_of_the_file_is_kept(self) -> None:
+        where, text = "songs.sting.patterns.x.one", "l8 g e c4."
+        self.assertEqual(self.set(where, text), 0)
+        told = {"file": str(self.folder / "project.json"), "where": where, "was": "l8 c e g4.", "now": text}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        expected = json.loads(json.dumps(PROJECT))
+        expected["songs"]["sting"]["patterns"]["x"]["one"] = text
+        self.assertEqual(json.dumps(self.held()), json.dumps(expected))
+        # Python alone reads NaN as a number. JSON has no such number, so it is text.
+        self.assertEqual(self.set(where, "NaN"), 0)
+        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["one"], "NaN")
+
+    def test_text_takes_a_value_as_text_whatever_it_looks_like(self) -> None:
+        where = "songs.sting.patterns.x.one"
+        # Read as JSON, 16 is a number, which the text of a channel cannot be.
+        self.assertEqual(self.refusal(where, "16"), f"error: {where}: must be a string\n")
+        self.assertEqual(self.set(where, "16", "--text"), 0)
+        self.assertEqual(json.loads(self.out.getvalue())["now"], "16")
+        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["one"], "16")
+
+    def test_from_reads_the_value_from_a_file_as_json_or_as_text_without_the_line_ends_it_closes_with(self) -> None:
+        source = self.folder / "value.txt"
+        source.write_text('{"inst": "pipe", "pan": 0.25}\n', encoding="utf-8")
+        self.assertEqual(self.set("songs.sting.channels.under", "--from", str(source)), 0)
+        self.assertEqual(self.held()["songs"]["sting"]["channels"]["under"], {"inst": "pipe", "pan": 0.25})
+        # Text that a shell would take to pieces, in a file that starts with a byte order mark.
+        source.write_bytes("o2 l2 c > c8 < | &\r\n\r\n".encode("utf-8-sig"))
+        self.assertEqual(self.set("songs.sting.patterns.x.under", "--from", str(source)), 0)
+        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["under"], "o2 l2 c > c8 < | &")
+        # With --text, what a file holds is text even when it is JSON.
+        source.write_text("8\n", encoding="utf-8")
+        self.assertEqual(self.set("songs.sting.patterns.x.under", "--from", str(source), "--text"), 0)
+        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["under"], "8")
+
+    def test_from_a_dash_reads_the_value_from_standard_input_as_utf_8_whatever_the_stream_is_set_to(self) -> None:
+        with mock.patch("sys.stdin", io.StringIO('["turn", "verse"]\n')):
+            self.assertEqual(self.set("songs.round.order", "--from", "-"), 0)
+        self.assertEqual(self.held()["songs"]["round"]["order"], ["turn", "verse"])
+        # The stream of a process is read as UTF-8 even where Python would read it as something else.
+        piped = io.TextIOWrapper(io.BytesIO('{"by": "kő"}\n'.encode("utf-8")), encoding="ascii")
+        with mock.patch("sys.stdin", piped):
+            self.assertEqual(self.set("sounds.tap.meta", "--from", "-"), 0)
+        self.assertEqual(self.held()["sounds"]["tap"]["meta"], {"by": "kő"})
+
+    def test_delete_removes_what_is_at_the_place_and_prints_what_it_was(self) -> None:
+        self.assertEqual(self.set("sounds.drip", "--delete"), 0)
+        told = {"file": str(self.folder / "project.json"), "where": "sounds.drip", "was": PROJECT["sounds"]["drip"]}
+        self.assertEqual(self.printed(), (json.dumps(told, indent=2, ensure_ascii=False) + "\n", ""))
+        expected = json.loads(json.dumps(PROJECT))
+        del expected["sounds"]["drip"]
+        self.assertEqual(json.dumps(self.held()), json.dumps(expected))
+
+    def test_none_of_a_value_from_and_delete_is_refused_with_code_2_and_so_are_two_of_them(self) -> None:
+        source = self.folder / "value.txt"
+        source.write_text("9\n", encoding="utf-8")
+        for typed in ((), ("9", "--delete"), ("9", "--from", str(source)), ("--from", str(source), "--delete")):
+            self.refusal("instruments.pipe.vol", *typed)
+        self.assertEqual(self.err.getvalue(), "error: set takes one of VALUE, --from and --delete, and only one\n" * 4)
+
+    def test_text_with_delete_is_refused_with_code_2_as_there_is_no_value_to_take_as_text(self) -> None:
+        self.assertEqual(self.refusal("sounds.drip", "--delete", "--text"),
+                         "error: --text is for a value, and --delete has none\n")
+
+    def test_set_of_a_missing_file_is_an_error_naming_it_with_code_2_and_no_file_is_made(self) -> None:
+        path = self.folder / "nowhere.json"
+        self.assertEqual(self.run_main("set", str(path), "instruments.pipe.vol", "9"), 2)
+        self.assertEqual(self.printed(), ("", f"error: {path}: no such file\n"))
+        self.assertFalse(path.exists())
+
+    def test_a_file_to_read_the_value_from_that_is_missing_or_is_not_utf_8_is_refused_by_its_path(self) -> None:
+        source = self.folder / "value.txt"
+        self.refusal("instruments.pipe.vol", "--from", str(source))
+        # A file as some programs write text: two bytes a letter.
+        source.write_bytes("9\n".encode("utf-16"))
+        self.assertEqual(self.refusal("instruments.pipe.vol", "--from", str(source)),
+                         f"error: {source}: no such file\nerror: {source}: not UTF-8 text\n")
+
+    def test_the_help_of_set_says_what_it_is_for_and_ends_with_an_example(self) -> None:
+        with self.assertRaises(SystemExit) as left:
+            self.run_main("set", "--help")
+        self.assertEqual(left.exception.code, 0)
+        out, err = self.printed()
+        self.assertEqual(err, "")
+        # The help is laid out to the width of the console, so its words are read without its line ends.
+        words = " ".join(out.split())
+        self.assertIn(" change one thing in a project file and keep the rest as it is: ", words)
+        self.assertTrue(words.endswith(
+            'example: rowsynth set tune.json songs.tune.patterns.a.lead "o4 l8 c e g e"'), words)
+
+
 class Refusals(CommandLineCase):
     def test_a_missing_file_is_an_error_naming_it_with_code_2(self) -> None:
         path = self.folder / "nowhere.json"
@@ -918,7 +1036,7 @@ class Refusals(CommandLineCase):
         self.run_main()
         # A command's line starts four spaces in. Where its help runs on to a second line, that one starts further in.
         self.assertEqual(re.findall(r"(?m)^ {4}(\w+) ", self.err.getvalue()),
-                         ["build", "check", "gui", "info", "measure", "page", "render"])
+                         ["build", "check", "gui", "info", "measure", "page", "render", "set"])
 
 
 class Process(CommandLineCase):
