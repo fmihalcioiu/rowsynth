@@ -260,16 +260,16 @@ class FindingsTest(ModelCase):
                 self.assertEqual(str(refused.exception), UNREAD_SAID)
         self.assertEqual(run.call_count, 1)
         self.assertTrue(model.findings_ready())
-        self.assertIsNone(model.counts())
+        self.assertIsNone(model.count())
         self.assertEqual(model.findings_for("song", "odd"), [])
 
-    def test_the_counts_are_every_finding_as_a_fault_and_no_warning_once_the_findings_are_ready(self):
-        for data, counts in ((PROJECT, (3, 0)), (FAULTS, (2, 0)), ({"instruments": PROJECT["instruments"]}, (0, 0))):
-            with self.subTest(counts=counts):
+    def test_the_count_is_how_many_findings_there_are_once_they_are_ready(self):
+        for data, count in ((PROJECT, 3), (FAULTS, 2), ({"instruments": PROJECT["instruments"]}, 0)):
+            with self.subTest(count=count):
                 model = self.opened(data)
-                self.assertIsNone(model.counts())
+                self.assertIsNone(model.count())
                 model.findings()
-                self.assertEqual(model.counts(), counts)
+                self.assertEqual(model.count(), count)
 
     def test_the_findings_of_one_thing_are_those_whose_place_is_that_thing_or_lies_in_it(self):
         model = self.opened(FAULTS)
@@ -472,13 +472,13 @@ class WorkerTest(ModelCase):
         worker = self.checking(model)
         model.start_findings()
         self.assertEqual(list(model._found._workers.values()), [worker])
-        self.assertEqual([model.findings_ready(), model.counts(), model.findings_for("song", "air")],
+        self.assertEqual([model.findings_ready(), model.count(), model.findings_for("song", "air")],
                          [False, None, []])
         go.set()
         worker.join()
         self.assertTrue(model.findings_ready())
         self.assertEqual(model._found._workers, {})
-        self.assertEqual(model.counts(), (3, 0))
+        self.assertEqual(model.count(), 3)
         self.assertEqual(model.findings(), found_in(PROJECT))
         self.assertEqual(self.checker.call_count, 1)
 
@@ -501,9 +501,9 @@ class WorkerTest(ModelCase):
         model.poll()
         go.set()
         worker.join()
-        self.assertEqual([model.findings_ready(), model.counts()], [False, None])
+        self.assertEqual([model.findings_ready(), model.count()], [False, None])
         self.assertEqual(model.findings(), found_in(after))
-        self.assertEqual(model.counts(), (2, 0))
+        self.assertEqual(model.count(), 2)
 
     def test_a_render_and_the_checks_run_at_the_same_time_and_both_come_out_right(self):
         model = self.opened()

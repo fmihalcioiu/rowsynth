@@ -277,14 +277,14 @@ class Model:
         """Whether `findings` would now answer at once, with the findings or with the refusal of the checks."""
         return self._found.ready()
 
-    def counts(self) -> tuple[int, int] | None:
-        """How many findings there are, as (faults, warnings), or None while they are not ready. Never waits.
+    def count(self) -> int | None:
+        """How many findings there are, or None while they are not ready. Never waits.
 
-        The checks give their findings one level and no more: each is a breach of a rule. So every finding is a
-        fault and there are no warnings. A project the checks refuse has no counts.
+        The checks give their findings no levels: each is a breach of a rule, so there is the one count. A
+        project the checks refuse has none.
         """
         found = self._found.peek()
-        return None if found is None else (len(found), 0)
+        return None if found is None else len(found)
 
     def findings_for(self, kind: str, name: str) -> list[checks.Finding]:
         """The findings that are in one song, sound or instrument, in the order the checks give them. Never waits.
