@@ -12,6 +12,7 @@ import numpy as np
 
 from rowsynth.build import build, build_song, manifest_path, source_hash, stale
 from rowsynth.errors import RowSynthError
+from rowsynth.layers import group_mix, mix_version, render_groups, shared_scale
 from rowsynth.project import Project
 from rowsynth.song import render_loop
 from rowsynth.wav import load_wav
@@ -78,10 +79,35 @@ LOUD = {
 
 PLAIN = {"tune": TUNE, "drone": DRONE, "hush": HUSH}
 
+# The tune with a second voice over it and a second channel of drums, cut into three groups, the drums alone in
+# one. It is heard as written and two semitones up, in two versions, and the fuller of them is mixed ahead in
+# the higher key.
+MARCH = {
+    **TUNE,
+    "channels": {**TUNE["channels"], "alto": {"inst": "pipe", "gain": 0.6, "pan": 0.3},
+                 "hat": {"inst": "tsk", "drums": True, "pan": 0.4}},
+    "patterns": {"a": {**TUNE["patterns"]["a"], "alto": "o4 b4 g4", "hat": "l8 r h r h"},
+                 "b": {**TUNE["patterns"]["b"], "alto": "o4 e2", "hat": "l16 h h h h r4"}},
+    "layers": {"groups": {"top": ["lead", "alto"], "low": ["bass"], "beat": ["kit", "hat"]},
+               "versions": {"full": ["top", "low", "beat"], "thin": ["beat", "low"]},
+               "keys": [0, 2],
+               "premix": [{"version": "full", "key": 2}]},
+}
+
+# The files of the march's groups, and the one of its version that is mixed ahead.
+GROUP_FILES = ["march-beat.wav", "march-low-0.wav", "march-low-2.wav", "march-top-0.wav", "march-top-2.wav"]
+AHEAD = "march.full.2.wav"
+
 
 def project_of(**songs: dict) -> Project:
     """A project of those songs, in that order, with the instruments above."""
     return Project.from_dict({"instruments": INSTRUMENTS, "songs": songs})
+
+
+def march(*left_out: str, **layers: object) -> dict:
+    """The march with other layers: its own without the keys named first, and with those given by name over them."""
+    kept = {key: value for key, value in MARCH["layers"].items() if key not in left_out}
+    return {**MARCH, "layers": {**kept, **layers}}
 
 
 def loudest(sides: list) -> float:
@@ -184,13 +210,12 @@ class BuildSongTest(BuildCase):
                          build_song(self.project, "hush", self.out / "again", 8000))
         self.assertEqual(load_wav(self.out / "hush.wav")[1], 8000)
 
-    def test_refuses_a_song_with_layers_or_an_intro(self):
-        layers = {"groups": {"all": ["lead", "bass", "kit"]}, "versions": {"full": ["all"]}}
+    def test_refuses_a_song_with_an_intro_whether_or_not_it_has_layers(self):
         intro = {"order": ["a"]}
-        for more in ({"layers": layers}, {"intro": intro}, {"layers": layers, "intro": intro}):
-            project = project_of(hush=HUSH, march={**TUNE, **more})
+        for song in (TUNE, MARCH):
+            project = project_of(hush=HUSH, march={**song, "intro": intro})
             self.assertEqual(self.refused(build_song, project, "march", self.out, RATE),
-                             "songs.march: a song with layers or an intro cannot be built", list(more))
+                             "songs.march: a song with an intro cannot be built", "layers" in song)
         self.assertFalse(self.out.exists())
 
     def test_song_that_cannot_be_rendered_is_refused_with_its_name_in_front(self):
@@ -201,6 +226,227 @@ class BuildSongTest(BuildCase):
             self.assertEqual(self.refused(build_song, project_of(march=song), "march", self.out, RATE),
                              f"songs.march: {said}")
         self.assertFalse(self.out.exists())
+
+
+class BuildLayeredSongTest(BuildCase):
+    def built(self, song: dict = MARCH, rate: int = RATE, folder: Path | None = None) -> dict:
+        """The entry of a song built under the name of the march, into the folder of the test when none is given."""
+        return build_song(project_of(march=song), "march", folder or self.out, rate)
+
+    def read(self, file: str) -> list[np.ndarray]:
+        """The two sides of a built file, once it is known to be in stereo, a loop long, at the rate of the tests."""
+        sides, rate = load_wav(self.out / file)
+        self.assertEqual(([len(side) for side in sides], rate), ([6400, 6400], RATE), file)
+        return sides
+
+    def rendering(self) -> tuple[dict, dict, float]:
+        """The march as the project gives it, its groups rendered, and the one scale that is shared by their files."""
+        song = project_of(march=MARCH).song("march")
+        rendered = render_groups(song, RATE)
+        return song, rendered, shared_scale(rendered)
+
+    def test_layered_song_is_one_file_a_group_and_key_and_one_in_all_for_a_group_of_drums_alone(self):
+        self.built()
+        self.assertEqual(self.files(), [*GROUP_FILES, AHEAD])
+        for file in self.files():
+            self.assertTrue(all(side.any() for side in self.read(file)), file)
+
+    def test_files_of_the_groups_are_their_mixes_all_multiplied_by_the_one_shared_scale(self):
+        entry = self.built()
+        _, rendered, scale = self.rendering()
+        peaks = {}
+        for group, named in entry["groups"].items():
+            for key in entry["keys"]:
+                file = named["file"] if "file" in named else named["files"][str(key)]
+                sides = self.read(file)
+                for side, wanted in zip(sides, group_mix(rendered["groups"][group], key)):
+                    np.testing.assert_allclose(side, wanted.astype(np.float64) * scale, rtol=0, atol=0.51 * STEP)
+                peaks[file] = loudest(sides)
+        self.assertEqual(sorted(peaks), GROUP_FILES)
+        # Only the loudest of them is 1 dB under full scale. The others keep their level beside it.
+        self.assertAlmostEqual(peaks.pop("march-top-2.wav"), PEAK, delta=STEP)
+        self.assertLess(max(peaks.values()), 0.85 * PEAK)
+        self.assertLess(min(peaks.values()), 0.3 * PEAK)
+
+    def test_files_of_the_groups_of_a_version_add_up_to_the_version_at_the_shared_scale(self):
+        self.built()
+        song, rendered, scale = self.rendering()
+        for version, key, files in (("full", 0, ("march-top-0.wav", "march-low-0.wav", "march-beat.wav")),
+                                    ("thin", 2, ("march-beat.wav", "march-low-2.wav"))):
+            added = [sum(side.astype(np.float64) for side in pair) for pair in zip(*map(self.read, files))]
+            for side, wanted in zip(added, mix_version(rendered, song, version, key)):
+                # A file is within half a step of 16 bits of its samples, and a sum is within that for each file.
+                np.testing.assert_allclose(side, wanted.astype(np.float64) * scale, rtol=0,
+                                           atol=0.51 * STEP * len(files), err_msg=version)
+
+    def test_entry_names_the_file_of_each_group_and_key_and_gives_the_keys_and_versions_of_the_song(self):
+        entry = self.built()
+        self.assertEqual(list(entry), ["loop_samples", "bar_samples", "gain", "source", "keys", "groups", "versions",
+                                       "premixed"])
+        # The 16 rows of the march are one bar.
+        self.assertEqual((entry["loop_samples"], entry["bar_samples"]), (6400, 6400))
+        self.assertEqual(entry["source"], source_hash(project_of(march=MARCH), "march", RATE))
+        self.assertEqual(entry["keys"], [0, 2])
+        # Where a key names a file it is a string, which is what it is once the manifest has been through JSON.
+        self.assertEqual(entry["groups"], {"top": {"files": {"0": "march-top-0.wav", "2": "march-top-2.wav"}},
+                                           "low": {"files": {"0": "march-low-0.wav", "2": "march-low-2.wav"}},
+                                           "beat": {"file": "march-beat.wav"}})
+        self.assertEqual(list(entry["groups"]), ["top", "low", "beat"])
+        self.assertEqual(entry["versions"], MARCH["layers"]["versions"])
+        self.assertEqual(json.loads(json.dumps(entry)), entry)
+
+    def test_gain_has_six_decimal_places_and_brings_a_file_back_to_the_level_of_the_song(self):
+        entry = self.built()
+        self.assertEqual(entry["gain"], 1.016429)
+        _, rendered, _ = self.rendering()
+        for file, group, key in (("march-top-2.wav", "top", 2), ("march-low-0.wav", "low", 0),
+                                 ("march-beat.wav", "beat", 2)):
+            for side, wanted in zip(self.read(file), group_mix(rendered["groups"][group], key)):
+                np.testing.assert_allclose(side.astype(np.float64) * entry["gain"], wanted, rtol=0, atol=STEP)
+
+    def test_version_mixed_ahead_is_at_a_scale_of_its_own_and_its_scale_brings_it_to_the_level_of_the_groups(self):
+        entry = self.built()
+        self.assertEqual(entry["premixed"], [{"id": "full/2", "file": AHEAD, "scale": 1.041125}])
+        ahead = self.read(AHEAD)
+        # The groups added up are louder than the loudest of them, and the file is 1 dB under full scale all the same.
+        self.assertAlmostEqual(loudest(ahead), PEAK, delta=STEP)
+        song, rendered, scale = self.rendering()
+        for side, wanted in zip(ahead, mix_version(rendered, song, "full", 2)):
+            np.testing.assert_allclose(side.astype(np.float64) * 1.041125, wanted.astype(np.float64) * scale,
+                                       rtol=0, atol=STEP)
+
+    def test_song_that_asks_for_no_premix_has_none_in_its_entry_and_the_same_files_for_its_groups(self):
+        with_one = self.built()
+        bare = self.out.parent / "bare"
+        entry = self.built(march("premix"), folder=bare)
+        self.assertEqual(list(entry), list(with_one)[:-1])
+        self.assertEqual(self.files(bare), GROUP_FILES)
+        for key in ("loop_samples", "bar_samples", "gain", "keys", "groups", "versions"):
+            self.assertEqual(entry[key], with_one[key], key)
+        for file in GROUP_FILES:
+            self.assertEqual((bare / file).read_bytes(), (self.out / file).read_bytes(), file)
+        # A list of none is written as it is.
+        self.assertEqual(self.built(march(premix=[]), folder=bare)["premixed"], [])
+
+    def test_files_are_named_by_the_keys_of_the_song_and_keys_left_out_are_the_key_it_is_written_in(self):
+        entry = self.built(march(keys=[5, -3], premix=[{"version": "thin", "key": -3}]))
+        self.assertEqual(entry["keys"], [5, -3])
+        self.assertEqual(entry["groups"]["low"], {"files": {"5": "march-low-5.wav", "-3": "march-low--3.wav"}})
+        self.assertEqual(entry["premixed"][0]["id"], "thin/-3")
+        self.assertEqual(self.files(), ["march-beat.wav", "march-low--3.wav", "march-low-5.wav", "march-top--3.wav",
+                                        "march-top-5.wav", "march.thin.-3.wav"])
+        written = self.out.parent / "written"
+        entry = self.built(march("keys", "premix"), folder=written)
+        self.assertEqual(entry["keys"], [0])
+        self.assertEqual(entry["groups"], {"top": {"files": {"0": "march-top-0.wav"}},
+                                           "low": {"files": {"0": "march-low-0.wav"}},
+                                           "beat": {"file": "march-beat.wav"}})
+        self.assertEqual(self.files(written), ["march-beat.wav", "march-low-0.wav", "march-top-0.wav"])
+
+    def test_bar_samples_are_the_share_a_bar_has_of_the_loop_with_a_half_rounded_up(self):
+        # 32 rows are two bars. At 8003 Hz they are 12805 samples, and half of them is 6402 and a half.
+        entry = self.built({**MARCH, "order": ["a", "b", "a", "b"]}, 8003)
+        self.assertEqual((entry["loop_samples"], entry["bar_samples"]), (12805, 6403))
+        # 48 rows are three bars: a third of 19202 samples is 6400 and two thirds.
+        entry = self.built({**MARCH, "order": ["a", "b"] * 3}, 8001)
+        self.assertEqual((entry["loop_samples"], entry["bar_samples"]), (19202, 6401))
+
+    def test_known_16_bit_values_of_a_layered_song_at_44100_and_48000_hz(self):
+        # For each rate: the loop, the bar, the gain and the scale of the version mixed ahead; where the samples
+        # below are taken; the left and the right there of a group in the higher key, of the drums and of the
+        # version mixed ahead; and the loudest sample of each file.
+        cases = ((44100, (35280, 35280, 1.048494, 1.110007), (0, 1, 500, 17640, 35279),
+                  {"march-top-2.wav": [(-1308, -889, 11935, -3424, -1397), (-286, -45, 238, -793, -335)],
+                   "march-beat.wav": [(5, 109, 1555, 84, -101), (5, 109, 1555, 88, -101)],
+                   AHEAD: [(-1091, -622, 9880, -2427, -1459), (2, 306, -5381, 1156, -728)]},
+                  [9711, 8544, 8148, 25345, 29204, 29204]),
+                 (48000, (38400, 38400, 1.05075, 1.111993), (0, 1, 500, 19200, 38399),
+                  {"march-top-2.wav": [(-1309, -925, -7268, -3421, -1391), (-288, -68, -3960, -795, -334)],
+                   "march-beat.wav": [(-4, 92, 1833, 76, -101), (-4, 92, 1833, 79, -101)],
+                   AHEAD: [(-1098, -668, -3520, -2429, -1450), (-9, 271, 2295, 1140, -725)]},
+                  [9589, 8527, 8133, 25381, 29204, 29204]))
+        for rate, numbers, spots, held, peaks in cases:
+            folder = self.out / str(rate)
+            entry = self.built(rate=rate, folder=folder)
+            self.assertEqual((entry["loop_samples"], entry["bar_samples"], entry["gain"],
+                              entry["premixed"][0]["scale"]), numbers, rate)
+            values = {}
+            for file in (*GROUP_FILES, AHEAD):
+                sides, read_rate = load_wav(folder / file)
+                self.assertEqual(read_rate, rate, file)
+                values[file] = [np.rint(side.astype(np.float64) * 32767).astype(int) for side in sides]
+                self.assertEqual([len(side) for side in values[file]], [numbers[0]] * 2, (rate, file))
+            for file, wanted in held.items():
+                self.assertEqual([tuple(side[list(spots)].tolist()) for side in values[file]], wanted, (rate, file))
+            # 29204 steps of 32767 are 1 dB under full scale. One file of the groups is there, and the version
+            # mixed ahead is there by a scale of its own.
+            self.assertEqual([max(int(np.abs(side).max()) for side in sides) for sides in values.values()], peaks,
+                             rate)
+
+    def test_silent_layered_song_is_written_as_it_is_with_a_gain_and_a_scale_of_1(self):
+        layers = {"groups": {"one": ["lead"], "two": ["bass"]}, "versions": {"both": ["one", "two"]},
+                  "premix": [{"version": "both", "key": 0}]}
+        entry = self.built({**HUSH, "layers": layers})
+        self.assertEqual((entry["loop_samples"], entry["gain"]), (1600, 1.0))
+        self.assertEqual(entry["premixed"], [{"id": "both/0", "file": "march.both.0.wav", "scale": 1.0}])
+        self.assertEqual(self.files(), ["march-one-0.wav", "march-two-0.wav", "march.both.0.wav"])
+        for file in self.files():
+            sides, _ = load_wav(self.out / file)
+            self.assertEqual([len(side) for side in sides], [1600, 1600], file)
+            self.assertFalse(sides[0].any() or sides[1].any(), file)
+
+    def test_refuses_a_channel_that_is_in_no_group_or_is_in_a_group_twice(self):
+        groups = MARCH["layers"]["groups"]
+        for changed, said in (({**groups, "top": ["lead"]}, "channel 'alto' is in no group"),
+                              ({**groups, "low": ["bass", "alto"]}, "channel 'alto' is in 'top' and again in 'low'"),
+                              ({**groups, "low": ["bass", "bass"]}, "channel 'bass' is in 'low' and again in 'low'")):
+            self.assertEqual(self.refused(self.built, march(groups=changed)),
+                             f"songs.march: layers.groups: {said}, so the files would not add up to the song")
+        self.assertFalse(self.out.exists())
+
+    def test_refuses_a_premix_of_a_version_or_in_a_key_the_song_does_not_have(self):
+        premix = [{"version": "thin", "key": 0}, {"version": "full", "key": 1}]
+        self.assertEqual(self.refused(self.built, march(premix=premix)),
+                         "songs.march: layers.premix[1]: key 1 is not one of the song's keys, [0, 2]")
+        self.assertEqual(self.refused(self.built, march("keys")),
+                         "songs.march: layers.premix[0]: key 2 is not one of the song's keys, [0]")
+        # A project is not loaded with a premix of a version it does not have, so this one is put in after.
+        project = project_of(march=MARCH)
+        project.songs["march"]["layers"]["premix"] = [{"version": "loud", "key": 0}]
+        self.assertEqual(self.refused(build_song, project, "march", self.out, RATE),
+                         "songs.march: layers.premix[0]: no version named 'loud'")
+        self.assertFalse(self.out.exists())
+
+    def test_refuses_two_files_that_would_have_one_name_once_case_is_left_out_of_it(self):
+        cased = {"groups": {"Top": ["lead"], "top": ["alto"], "low": ["bass"], "beat": ["kit", "hat"]},
+                 "versions": {"full": ["Top", "top", "low", "beat"]}}
+        # A group of drums alone has no key in the name of its file, and this one has a name that ends as one does.
+        keyed = {"groups": {"top": ["lead", "alto", "bass"], "top-2": ["kit", "hat"]},
+                 "versions": {"full": ["top", "top-2"]}}
+        asked = {"version": "full", "key": 2}
+        twice = {"premix": [asked, {"version": "thin", "key": 0}, asked]}
+        for layers, first, second in ((cased, "march-Top-0.wav", "march-top-0.wav"),
+                                      (keyed, "march-top-2.wav", "march-top-2.wav"),
+                                      (twice, AHEAD, AHEAD)):
+            self.assertEqual(self.refused(self.built, march(**layers)),
+                             f"songs.march: two files would be called {first!r} and {second!r}, which is one name "
+                             "where case does not count")
+        self.assertFalse(self.out.exists())
+
+    def test_what_the_groups_or_a_version_cannot_be_mixed_for_is_refused_with_the_name_of_the_song_in_front(self):
+        patterns = copy.deepcopy(MARCH["patterns"])
+        del patterns["a"]["alto"]
+        self.assertEqual(self.refused(self.built, {**MARCH, "patterns": patterns, "order": ["a"]}),
+                         "songs.march: group 'top': channel 'alto' plays in no pattern of the order, "
+                         "so it has no stem")
+        self.assertFalse(self.out.exists())
+        # A project is not loaded with a version of a group it does not have, so this one is put in after. It is
+        # found once the groups are rendered and the version is to be mixed.
+        project = project_of(march=MARCH)
+        project.songs["march"]["layers"]["versions"]["full"].append("gone")
+        with self.assertRaises(RowSynthError) as caught:
+            build_song(project, "march", self.out, RATE)
+        self.assertEqual(str(caught.exception), "songs.march: version 'full': group 'gone' was not rendered")
 
 
 class BuildTest(BuildCase):
@@ -215,6 +461,15 @@ class BuildTest(BuildCase):
         for name, entry in manifest["songs"].items():
             self.assertEqual(entry, build_song(self.project, name, apart, RATE), name)
             self.assertEqual((self.out / entry["file"]).read_bytes(), (apart / entry["file"]).read_bytes(), name)
+
+    def test_layered_song_is_built_beside_a_plain_one_and_its_entry_reads_back_from_the_manifest_as_it_was(self):
+        project = project_of(hush=HUSH, march=MARCH)
+        manifest = build(project, self.out, RATE)
+        self.assertEqual(self.files(), ["hush.wav", *GROUP_FILES, AHEAD, "music.json"])
+        self.assertEqual(manifest["songs"]["march"], build_song(project, "march", self.out.parent / "apart", RATE))
+        # The keys that name the files of a group are strings before the manifest is written, as they are after.
+        self.assertEqual(json.loads((self.out / "music.json").read_text(encoding="utf-8")), manifest)
+        self.assertEqual(stale(project, manifest), [])
 
     def test_manifest_is_written_beside_the_files_as_json_with_an_indent_of_2_and_a_final_newline(self):
         # The rate left out is 48000, at which four rows of three ticks are 9600 samples.
