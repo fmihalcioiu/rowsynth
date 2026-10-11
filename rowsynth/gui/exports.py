@@ -12,7 +12,7 @@ from typing import TYPE_CHECKING
 
 from ..bank import held_spans
 from ..build import BUILD_FORMATS, BUILD_RATE, _file as build_file, _layer_files, build, manifest_path
-from ..commands import PARTS, Pick, render_sides
+from ..commands import PARTS, Pick, pick, render_sides
 from ..commands.render import _file as write_file, _stems as write_stems, stem_file
 from ..encode import FORMATS, unwritable
 from ..errors import RowSynthError
@@ -40,6 +40,10 @@ TAB_WORDS = ("THIS", "BUILD", "PAGE")
 RATES = (8000, 11025, 12000, 16000, 22050, 24000, 32000, 44100, 48000)
 #: The first option of the songs a build builds, before the names of the songs.
 EVERY = "every song"
+#: The first option of the variants of a sound, before their numbers: the one the render command writes untold.
+DEFAULT = "default"
+#: What the project is called where the render command would name its file, which is not known here.
+PROJECT = "this project"
 #: The folder the files go to as the window opens, beside the project file.
 OUT = "out"
 #: The folder inside the folder of a page that its audio goes in, and the page itself.
@@ -57,6 +61,8 @@ CLOSE = "CLOSE"
 CHANGE = "CHANGE"
 FOLDER = "FOLDER"
 STEMS = "ONE LOOP PER CHANNEL"
+VARIANT = "VARIANT"
+PART = "PART"
 NOTHING = "NOTHING"
 WORDS = {"render": ("PICKED", "", ""), "build": ("FORMAT", "RATE", "SONGS"), "page": ("FORMAT", "", "")}
 #: Why the first tab can write nothing while no sound and no song is picked.
@@ -66,6 +72,8 @@ NO_PICK = "pick a sound or a song in the list at the left: THIS writes the picke
 HELP = {
     "tabs": "what to write: the picked sound or song, the whole project for a program to play, or the listen page",
     "stems": "write the song as one mono loop a channel, each CHANNEL.wav, in place of the one stereo file",
+    "variant": "the variant of the sound to write: the first as NAME.wav, or one by its number, counted from 0",
+    "part": "the part of the held sound to write: its start, its loop or its end",
     "build_format": "the format of the files: wav, or opus, which is made by ffmpeg",
     "rate": "the samples a second the songs are rendered at",
     "songs": "the songs to build: every song of the project, or one of them",
@@ -116,7 +124,9 @@ class Plan:
     `tab` is the command it stands for, one of `TABS`, and `rate` and `fmt` are what the files are rendered at
     and written as. `picked` is the (kind, name) that "render" writes, and `stems` whether that is one loop a
     channel. `songs` names the songs "build" builds, None for every one. `files` are what will be written
-    into `folder`, and `refusal` is why nothing can be, None when nothing is known against it.
+    into `folder`, and `refusal` is why nothing can be, None when nothing is known against it. `variant` is
+    the variant of a sound that "render" writes and `part` the part of a held sound, each None for the one
+    the render command writes when it is not told.
     """
 
     tab: str
@@ -128,6 +138,8 @@ class Plan:
     songs: tuple[str, ...] | None = None
     files: tuple[File, ...] = ()
     refusal: str | None = None
+    variant: int | None = None
+    part: str | None = None
 
 
 def wav_size(samples: int, sides: int) -> int:
@@ -170,15 +182,39 @@ def _loop(song: dict, rate: int) -> int:
     return math.floor(rows * song["row_ticks"] * rate / TICK_HZ + 0.5)
 
 
-def render_files(project: Project, kind: str, name: str, rate: int, stems: bool = False) -> list[File]:
+def _picked(project: Project, kind: str, name: str, variant: int | None, part: str | None) -> Pick:
+    """What the first tab writes of a sound or a song, picked as the render command picks it with its two flags.
+
+    `variant` and `part` are what --variant and --part would be given, each None for a flag left out. With
+    neither, the thing is the one that was picked in the list: a song, the first variant of a sound, or the
+    start of a held one. With either, the command's own `pick` finds it, and what does not fit is refused in
+    the command's words: a variant the sound does not have, a part of a sound that is not held, a variant of
+    one that is, and either of a song.
+    """
+    if variant is None and part is None:
+        # A held sound is written as its start, which is the part the command takes when it is told none.
+        held = kind == "sound" and "held" in project.sounds.get(name, {})
+        return Pick(name, kind, 0, PARTS[0] if held else None)
+    if part is not None and part not in PARTS:
+        raise RowSynthError(f"a held sound has the parts {', '.join(PARTS)}, and no part {part!r}")
+    return pick(project, PROJECT, name, variant=variant, part=part)
+
+
+def render_files(project: Project, kind: str, name: str, rate: int, stems: bool = False,
+                 variant: int | None = None, part: str | None = None) -> list[File]:
     """The files the first tab writes of a sound or a song, as the render command writes them.
 
     It is one file, NAME.wav: a sound in mono, whose size is not known before it is rendered, or a song in
     stereo, half a second longer than its rows. With `stems` a song is one mono loop for each channel that
     plays, named as the command names them.
+
+    `variant` is one variant of a sound and `part` one part of a held sound, as --variant and --part of the
+    command are. The file of one that is asked for has the name the listen page gives it: NAME-1.wav,
+    NAME-loop.wav. What the command refuses of the two is refused here.
     """
+    _picked(project, kind, name, variant, part)
     if kind != "song":
-        return [File(f"{name}.wav")]
+        return [File(page_file(name, variant if part is None else part, "wav"))]
     song = project.song(name)
     laid, rows = lay(song)
     if stems:
@@ -282,7 +318,7 @@ def no_folder(folder: Path) -> str | None:
 
 def plan(project: Project, tab: str, folder: str | Path, rate: int, fmt: str = "wav",
          picked: tuple[str, str] | None = None, stems: bool = False,
-         songs: Sequence[str] | None = None) -> Plan:
+         songs: Sequence[str] | None = None, variant: int | None = None, part: str | None = None) -> Plan:
     """The plan of one press of WRITE: the files it makes in the folder, or why it can make none.
 
     The files are named as the command of the tab names them, and nothing is rendered for it. What is known
@@ -290,12 +326,16 @@ def plan(project: Project, tab: str, folder: str | Path, rate: int, fmt: str = "
     write, a project the package refuses to name the files of, a format that cannot be written, and a folder
     that cannot be written in. Where only the format or the folder is in the way the files are listed all
     the same. A tab that is none of `TABS` is refused.
+
+    `variant` and `part` are of the first tab: the variant of the picked sound, or the part of a held one, as
+    `render_files` takes them. One that the picked thing does not have is why nothing can be written.
     """
     if tab not in TABS:
         raise RowSynthError(f"files are written by one of {', '.join(TABS)}, not by {tab!r}")
     folder = Path(folder)
     stems = stems and picked is not None and picked[0] == "song"
-    made = Plan(tab, folder, rate, fmt, picked, stems, None if songs is None else tuple(songs))
+    made = Plan(tab, folder, rate, fmt, picked, stems, None if songs is None else tuple(songs),
+                variant=variant, part=part)
     try:
         if tab == "build":
             files = build_files(project, rate, fmt, songs)
@@ -304,7 +344,7 @@ def plan(project: Project, tab: str, folder: str | Path, rate: int, fmt: str = "
         elif picked is None or picked[0] not in ("song", "sound"):
             raise RowSynthError(NO_PICK)
         else:
-            files = render_files(project, *picked, rate, stems)
+            files = render_files(project, *picked, rate, stems, variant, part)
     except RowSynthError as error:
         return replace(made, refusal=str(error))
     return replace(made, files=tuple(marked(files, folder)), refusal=no_format(fmt, rate) or no_folder(folder))
@@ -315,7 +355,8 @@ def write(project: Project, made: Plan) -> int:
 
     The answer is how many files the plan names. What the package refuses is refused in its words, and
     nothing is made here but what the package makes: no folder ahead of it, and no file of this module's own.
-    A plan that says why it can write nothing is refused with that.
+    A plan that says why it can write nothing is refused with that. The variant and the part of the plan are
+    handed to the render command's own pick of what to write.
     """
     if made.refusal is not None:
         raise RowSynthError(made.refusal)
@@ -327,10 +368,7 @@ def write(project: Project, made: Plan) -> int:
     elif made.stems:
         write_stems(project.song(made.picked[1]), folder, made.rate)
     else:
-        kind, name = made.picked
-        # A held sound is written as its start, which is the part the command takes when it is told none.
-        held = kind == "sound" and "held" in project.sounds.get(name, {})
-        picked = Pick(name, kind, 0, PARTS[0] if held else None)
+        picked = _picked(project, *made.picked, made.variant, made.part)
         write_file(str(made.folder / made.files[0].name), picked, render_sides(project, picked, made.rate), made.rate)
     return len(made.files)
 
@@ -397,8 +435,13 @@ class Export(Widget):
     enabled while that runs or while the plan says why nothing can be written. CLOSE and escape close the
     window. Closed while it writes, the write goes on to its end, and the session then says how it ended.
 
-    Its parts are `tabs`, the settings `stems`, `build_format`, `rate`, `songs` and `page_format`, the
-    button `change` of the folder, the list `files`, and the buttons `write` and `shut`.
+    The second row of the first tab is for what the picked thing has a use for. A song has the switch
+    `stems`. A sound of more than one variant has `variant`, which steps from the one the render command
+    writes untold to each by its number, counted from 0 as the command counts. A held sound has `part`, one
+    of its three parts. Any other sound has nothing there.
+
+    Its parts are `tabs`, the settings `stems`, `variant`, `part`, `build_format`, `rate`, `songs` and
+    `page_format`, the button `change` of the folder, the list `files`, and the buttons `write` and `shut`.
     """
 
     def __init__(self, ui: Ui, session: Session, start: str = "render") -> None:
@@ -424,6 +467,8 @@ class Export(Widget):
         nowhere = (0, 0, 0, 0)
         self.tabs = Choice(nowhere, TAB_WORDS, TABS.index(start), self._changed, HELP["tabs"])
         self.stems = Toggle(nowhere, STEMS, changed=self._changed, help=HELP["stems"])
+        self.variant = Stepper(nowhere, (DEFAULT,), 0, self._changed, HELP["variant"])
+        self.part = Choice(nowhere, [part.upper() for part in PARTS], 0, self._changed, HELP["part"])
         self.build_format = Choice(nowhere, [fmt.upper() for fmt in BUILD_FORMATS], 0, self._changed,
                                    HELP["build_format"])
         self.rate = Stepper(nowhere, RATES, RATES.index(BUILD_RATE), self._changed, HELP["rate"])
@@ -433,9 +478,9 @@ class Export(Widget):
         self.files = List(nowhere, help=HELP["files"])
         self.write = Button(nowhere, WRITE, action=self.begin, help=HELP["write"])
         self.shut = Button(nowhere, CLOSE, action=self.close, help=HELP["close"])
-        for part in (self.tabs, self.stems, self.build_format, self.rate, self.songs, self.page_format,
-                     self.change, self.files, self.write, self.shut):
-            self.inner.add(part)
+        for widget in (self.tabs, self.stems, self.variant, self.part, self.build_format, self.rate, self.songs,
+                       self.page_format, self.change, self.files, self.write, self.shut):
+            self.inner.add(widget)
         self.keep_in(theme.DESIGN)
         self.refresh()
 
@@ -459,7 +504,9 @@ class Export(Widget):
         at = self._at = parts(size)
         self.rect = at["box"]
         x, y, w, h = at["list"]
-        placed = {self.tabs: at["tabs"], self.stems: at["row1"], self.build_format: at["row0"],
+        # A song has no variants and a sound no channels, so the three of the first tab share the one row.
+        placed = {self.tabs: at["tabs"], self.stems: at["row1"], self.variant: at["row1"], self.part: at["row1"],
+                  self.build_format: at["row0"],
                   self.rate: at["row1"], self.songs: at["row2"], self.page_format: at["row0"],
                   self.change: at["change"], self.files: (x + 1, y + 1, max(0, w - 2), max(0, h - 2)),
                   self.write: at["write"], self.shut: at["close"]}
@@ -474,7 +521,13 @@ class Export(Widget):
         tab = TABS[self.tabs.picked]
         if self.songs.options[1:] != tuple(project.songs):
             self.songs.options, self.songs.picked = (EVERY, *project.songs), 0
+        # The picked sound as the project has it, and the numbers of its variants: none for one that has no list.
+        entry = project.sounds.get(picked[1], {}) if picked is not None and picked[0] == "sound" else {}
+        numbers = tuple(range(len(entry.get("defs", ()))))
+        if self.variant.options[1:] != numbers:
+            self.variant.options, self.variant.picked = (DEFAULT, *numbers), 0
         shown = {self.stems: tab == "render" and picked is not None and picked[0] == "song",
+                 self.variant: tab == "render" and len(numbers) > 1, self.part: tab == "render" and "held" in entry,
                  self.build_format: tab == "build", self.rate: tab == "build", self.songs: tab == "build",
                  self.page_format: tab == "page"}
         for widget, here in shown.items():
@@ -487,12 +540,28 @@ class Export(Widget):
         elif tab == "page":
             self.plan = plan(project, tab, self.folder, PAGE_RATE, FORMATS[self.page_format.picked])
         else:
-            self.plan = plan(project, tab, self.folder, model.rate, picked=picked, stems=self.stems.is_on)
+            # The first option of the variants is the one the command writes when it is told none, and each
+            # one after it is a variant by its number.
+            numbered = self.variant.visible and self.variant.picked > 0
+            variant = self.variant.options[self.variant.picked] if numbered else None
+            part = PARTS[self.part.picked] if self.part.visible else None
+            self.plan = plan(project, tab, self.folder, model.rate, picked=picked, stems=self.stems.is_on,
+                             variant=variant, part=part)
         self.files.rows = [Row(index, file.name, tag=tag(file), square=theme.MUSTARD if file.replaces else theme.LINE)
                            for index, file in enumerate(self.plan.files)]
         self.write.enabled = not self.busy and self.plan.refusal is None
         # A button that does nothing says why, where the mouse rests on it.
         self.write.help = self.plan.refusal or HELP["write"]
+
+    def words(self) -> tuple[str, ...]:
+        """The words before the rows of the tab that is shown.
+
+        The second row of the first tab is named by what stands in it: the variant, the part, or nothing.
+        """
+        tab = TABS[self.tabs.picked]
+        if tab != "render":
+            return WORDS[tab]
+        return WORDS[tab][0], VARIANT if self.variant.visible else PART if self.part.visible else "", ""
 
     def said(self) -> tuple[str, Colour]:
         """The one line of the window, and the colour it is in.
@@ -549,7 +618,7 @@ class Export(Widget):
         canvas.box(at["box"], theme.PANEL)
         canvas.frame(at["box"], theme.LINE)
         canvas.text_in(WRITE, at["title"], theme.DIM)
-        for row, word in enumerate(WORDS[tab]):
+        for row, word in enumerate(self.words()):
             canvas.text_in(word, at[f"word{row}"], theme.DIM)
         if tab == "render":
             kind, name = self._seen[1] or (NOTHING, "")

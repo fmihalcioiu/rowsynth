@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import os
+import string
 import sys
 import time
 from collections.abc import Callable, Hashable, Sequence
@@ -46,6 +47,9 @@ CREATE = "CREATE"
 SAVE = "SAVE"
 #: What a chooser says of a name that is no name.
 NO_NAME = "type a name, or press a file"
+#: What the folder line of a chooser reads while its list is of the drives, and what it says of a name typed there.
+DRIVES = "drives"
+NO_DRIVE = "go into a drive first, or type a whole path"
 #: The line of help of a chooser.
 CHOOSER_HELP = "a double press goes into a folder and takes a file: enter takes the name, escape closes"
 
@@ -138,6 +142,19 @@ def free_name(folder: str | Path, name: str) -> str:
     return free
 
 
+def drives() -> list[str]:
+    """The drives of a Windows system, each as its root, as in "C:\\". None on any other system.
+
+    They are what `os.listdrives` gives where Python has it, and if not the letters A to Z whose root is there.
+    """
+    if sys.platform != "win32":
+        return []
+    listed = getattr(os, "listdrives", None)
+    if listed is not None:
+        return list(listed())
+    return [root for root in (f"{letter}:\\" for letter in string.ascii_uppercase) if os.path.exists(root)]
+
+
 def tail(text: str, width: int) -> str:
     """`text` as it is shown in `width` pixels with its end kept: whole when it fits, and if not starting in '..'."""
     room = max(0, (width + 1) // ADVANCE)
@@ -223,15 +240,21 @@ def brief(path: str | Path) -> str:
     return f"{path.parent.name}{os.sep}{path.name}" if path.parent.name else path.name
 
 
-def menu(recent: Sequence[str]) -> list[Item | None]:
+def gone(path: str | Path) -> str:
+    """What is said of a file opened before that is pressed while it is listed as gone."""
+    return f"{path} is no longer there"
+
+
+def menu(recent: Sequence[str], there: Callable[[str], bool] = os.path.isfile) -> list[Item | None]:
     """The things of the FILE menu: those of `MENU`, a line, the files opened last, a line, and `CLOSE`.
 
     The value of an item is what the app is asked for: a word, and after it what goes with the word. A file
-    opened before is ("recent", path). With no such files there is one line and not two.
+    opened before is ("recent", path), and one that `there` says is gone is not enabled: it is dim, and cannot
+    be chosen. With no such files there is one line and not two.
     """
     items: list[Item | None] = [Item(text, (what,)) for text, what in MENU]
     if recent:
-        items += [None, *(Item(brief(name), ("recent", name)) for name in recent)]
+        items += [None, *(Item(brief(name), ("recent", name), enabled=there(name)) for name in recent)]
     return [*items, None, Item(CLOSE[0], (CLOSE[1],))]
 
 
@@ -292,6 +315,11 @@ class Chooser(Widget):
     and its project files: the row `..` is the folder it is in. At its foot is `box`, where a name is typed,
     and two buttons. `words` is the one line it has to say: why a folder could not be read, or a name not taken.
 
+    `drives` gives the drives of the system, and where it gives any the root of a drive has the row `..` too.
+    It leads to the list of the drives, each a folder row: `at_drives` is set while that is shown. That list
+    has no row `..`, the folder line reads `DRIVES`, and a drive that is gone into shows its root. A name typed
+    there is refused in `words`, since it is in no folder, and a whole path is gone to as anywhere else.
+
     A press on a file puts its name in the box. A double press on a folder goes into it, and on a file takes
     it. Enter takes what is typed, and so does the second button, which reads as `word`. A name that is a
     folder goes into it, and with no name typed the picked folder is gone into. Up and down move the pick.
@@ -306,7 +334,8 @@ class Chooser(Widget):
 
     def __init__(self, folder: str | Path, taken: Callable[[Path], object], new: bool = False, title: str = "",
                  name: str = "", word: str = "", closed: Callable[[], object] | None = None,
-                 clock: Callable[[], float] = time.perf_counter) -> None:
+                 clock: Callable[[], float] = time.perf_counter,
+                 drives: Callable[[], list[str]] = drives) -> None:
         nowhere = (0, 0, 0, 0)
         super().__init__(nowhere, CHOOSER_HELP)
         self.taken = taken
@@ -318,6 +347,9 @@ class Chooser(Widget):
         self.list = List(nowhere, changed=self._picked)
         self.box = TextBox(nowhere, name, most=MOST)
         self._clock = clock
+        self._drives = drives
+        #: Whether the list is of the drives, and not of what `folder` holds.
+        self.at_drives = False
         self._mouse: Pos = NOWHERE
         # The button the left press went down on whose release has not come: "cancel", "take" or None.
         self._down: str | None = None
@@ -335,24 +367,51 @@ class Chooser(Widget):
         self.box.rect = self._places["name"]
 
     def go(self, folder: str | Path) -> None:
-        """Show another folder. One that cannot be read is shown as holding nothing, and `words` says why."""
+        """Show another folder. One that cannot be read is shown as holding nothing, and `words` says why.
+
+        The root of a drive has the row that goes up as well, where the system has drives to list.
+        """
         self.folder = Path(os.path.abspath(folder))
+        self.at_drives = False
         held = holds(self.folder)
-        self.list.rows = rows_of(held, self.folder.parent != self.folder)
+        self._show(rows_of(held, self.folder.parent != self.folder or bool(self._drives())), held.problem)
+
+    def show_drives(self) -> None:
+        """Show the drives in place of a folder, each as a folder row by its root. No row goes up from there."""
+        self.at_drives = True
+        self._show(rows_of(Held(tuple(self._drives())), False))
+
+    def _show(self, rows: list[Row], words: str = "") -> None:
+        """Put other rows in the list, from their top and with none picked, and say what there is to say of them."""
+        self.list.rows = rows
         self.list.picked = None
         self.list.scroll.to(0)
-        self.words = held.problem
+        self.words = words
         self._last = None
 
+    def where(self) -> str:
+        """What the folder line reads: the folder that is shown, or `DRIVES` while the list is of the drives."""
+        return DRIVES if self.at_drives else str(self.folder)
+
     def enter(self, name: str) -> None:
-        """Go into a sub-folder of the folder shown, by its name, or up with the name of the row that goes up."""
-        self.go(self.folder.parent if name == UP else self.folder / name)
+        """Go into a sub-folder of the folder shown, by its name, or up with the name of the row that goes up.
+
+        Up from the root of a drive is the list of the drives, and from that list a drive is gone into by its root.
+        """
+        if self.at_drives:
+            self.go(name)
+        elif name != UP:
+            self.go(self.folder / name)
+        elif self.folder.parent != self.folder:
+            self.go(self.folder.parent)
+        else:
+            self.show_drives()
 
     def take(self, ui: Ui) -> None:
         """Take the name that is typed: go into the folder it names, or close with the file it means.
 
         A name that is refused is said in `words`, and the chooser stays open. With no name typed, the picked
-        folder is gone into.
+        folder is gone into. While the list is of the drives, a name that is no whole path is refused.
         """
         typed = self.box.text.strip()
         picked = self.list.picked
@@ -361,6 +420,9 @@ class Chooser(Widget):
                 self.enter(picked[1])
             else:
                 self.words = NO_NAME
+            return
+        if self.at_drives and not Path(typed).is_absolute():
+            self.words = NO_DRIVE
             return
         if (self.folder / typed).is_dir():
             self.go(self.folder / typed)
@@ -457,7 +519,7 @@ class Chooser(Widget):
             canvas.box(self.rect, theme.RAISED)
             canvas.frame(self.rect, theme.LINE)
             canvas.text_in(self.title, places["title"], theme.TEXT)
-            canvas.text_in(tail(str(self.folder), places["folder"][2]), places["folder"], theme.DIM)
+            canvas.text_in(tail(self.where(), places["folder"][2]), places["folder"], theme.DIM)
             canvas.frame(places["list"], theme.LINE)
             self.list.hot = inside(self.list.rect, self._mouse)
             self.list.draw(canvas)
@@ -497,27 +559,43 @@ class First:
 
     It has the program's name, the button `new` for a new project and `open` for a file, and `list`: the
     examples under one heading and the files opened last under another, the gone ones dim. A press on a row
-    calls `pressed` with the key of the row: ("example", path) or ("recent", path).
+    calls `pressed` with the key of the row: ("example", path) or ("recent", path). A press on a dim row opens
+    nothing: `say` is called with the words of `gone` for its file, and the row is not picked.
+
+    `there` says whether a file opened before is still on the disk, as the list is made.
     """
 
     def __init__(self, ui: Ui, new: Callable[[], object], open: Callable[[], object],
                  pressed: Callable[[Hashable], object], found: Sequence[str | Path] = (),
-                 recent: Sequence[str] = ()) -> None:
+                 recent: Sequence[str] = (), say: Callable[[str], object] | None = None,
+                 there: Callable[[str], bool] = os.path.isfile) -> None:
         nowhere = (0, 0, 0, 0)
         self.ui = ui
+        self.pressed = pressed
+        self.say = say
+        self.there = there
         self.rect: Rect = nowhere
         self.new = ui.add(Button(nowhere, NEW_PROJECT, action=new,
                                  help="a new project in a file of its own: one instrument, one sound, one song"))
         self.open = ui.add(Button(nowhere, OPEN_FILE, action=open, help="open a project file"))
-        self.list = ui.add(List(nowhere, changed=pressed,
+        self.list = ui.add(List(nowhere, changed=self._pressed,
                                 help="an example is opened as a copy of your own, and a file opened before as it is"))
         self._places = first_places(nowhere)
         self.show(found, recent)
 
     def show(self, found: Sequence[str | Path], recent: Sequence[str]) -> None:
         """Take the examples and the files opened last, and list them anew with none of them picked."""
-        self.list.rows = first_rows(found, recent)
+        self.list.rows = first_rows(found, recent, self.there)
         self.list.picked = None
+
+    def _pressed(self, key: Hashable) -> None:
+        """Take a row that was pressed: one of a file that is gone is only said to be, and any other is told on."""
+        if any(row.dim for row in self.list.rows if row.key == key):
+            self.list.picked = None
+            if self.say is not None:
+                self.say(gone(key[1]))
+        else:
+            self.pressed(key)
 
     def place(self, rect: Rect) -> None:
         """Take the rectangle of the screen, and lay the buttons and the list out in it."""

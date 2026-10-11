@@ -220,6 +220,94 @@ class Choosing(InAFolder):
         self.assertEqual((taken, ui.modal), ([self.folder / "fresh.json"], None))
 
 
+class Drives(InAFolder):
+    def test_the_drives_are_those_of_windows_and_there_are_none_on_any_other_system(self) -> None:
+        with mock.patch.object(files.sys, "platform", "linux"):
+            self.assertEqual(files.drives(), [])
+        with mock.patch.object(files.sys, "platform", "win32"):
+            with mock.patch.object(os, "listdrives", lambda: ["C:\\", "E:\\"], create=True):
+                self.assertEqual(files.drives(), ["C:\\", "E:\\"])
+            # A Python that cannot list them is asked for each letter whose root is there.
+            with mock.patch.object(os, "listdrives", None, create=True), \
+                    mock.patch.object(os.path, "exists", lambda root: root in ("C:\\", "Q:\\")):
+                self.assertEqual(files.drives(), ["C:\\", "Q:\\"])
+
+    def test_up_from_the_root_of_a_drive_is_the_list_of_the_drives_and_one_gone_into_shows_its_root(self) -> None:
+        # Where the system has no drives to list, a root has no row that goes up.
+        _, box, _ = self.chooser(drives=lambda: [])
+        box.go(self.folder.anchor)
+        self.assertNotIn((files.FOLDER, files.UP), [row.key for row in box.list.rows])
+        # Two folders of the test stand in for two drives.
+        made_up = [str(self.folder / "sub"), str(self.folder / "Beta")]
+        ui, box, _ = self.chooser(drives=lambda: made_up)
+        box.go(self.folder.anchor)
+        self.assertEqual((box.list.rows[0].key, box.at_drives, box.where()),
+                         ((files.FOLDER, files.UP), False, self.folder.anchor))
+        up = spot(box.list, (files.FOLDER, files.UP))
+        click(ui, up)
+        click(ui, up)
+        # The list of the drives has no row that goes up, and the folder line says what it is.
+        self.assertEqual((box.at_drives, box.where(), [row.key for row in box.list.rows], box.words),
+                         (True, "drives", [(files.FOLDER, name) for name in made_up], ""))
+        drive = spot(box.list, (files.FOLDER, made_up[0]))
+        click(ui, drive)
+        click(ui, drive)
+        self.assertEqual((box.at_drives, box.folder, box.where(), [row.text for row in box.list.rows]),
+                         (False, self.folder / "sub", made_up[0], ["..", "deep.json"]))
+
+    def test_in_the_list_of_the_drives_a_name_is_refused_and_a_whole_path_is_gone_to(self) -> None:
+        ui, box, taken = self.chooser(drives=lambda: [str(self.folder)])
+        box.show_drives()
+        write(ui, "a")
+        press(ui, "return")
+        self.assertEqual((taken, ui.modal, box.words, box.at_drives), ([], box, files.NO_DRIVE, True))
+        # A whole path is gone to as anywhere else: a folder is shown, and a file is taken.
+        press(ui, "a", CTRL)
+        write(ui, str(self.folder / "sub"))
+        press(ui, "return")
+        self.assertEqual((box.at_drives, box.folder, box.words, box.box.text), (False, self.folder / "sub", "", ""))
+        box.show_drives()
+        write(ui, str(self.folder / "a.json"))
+        press(ui, "return")
+        self.assertEqual((taken, ui.modal), ([self.folder / "a.json"], None))
+
+
+class Gone(unittest.TestCase):
+    """Two files opened before, of which the second is gone: what says so is handed in, and no disk is asked."""
+
+    recent = [os.path.join("music", "kept.json"), os.path.join("music", "gone.json")]
+
+    @staticmethod
+    def there(name: str) -> bool:
+        """Whether a file is there: the one that is called kept is."""
+        return "kept" in name
+
+    def test_a_file_opened_before_that_is_gone_is_not_enabled_in_the_menu_and_cannot_be_chosen(self) -> None:
+        kept, gone = self.recent
+        items = files.menu(self.recent, self.there)
+        self.assertEqual([(item.value, item.enabled) for item in items if item is not None and not item.enabled],
+                         [(("recent", gone), False)])
+        ui, chosen = Ui(), []
+        menu = ui.open(Menu(items, (0, 0), chosen.append))
+        rows = {item.value: row for item, row in zip(menu.items, menu.rows) if item is not None}
+        click(ui, middle(rows["recent", gone]))
+        self.assertEqual((chosen, ui.modal), ([], menu))
+        click(ui, middle(rows["recent", kept]))
+        self.assertEqual((chosen, ui.modal), ([("recent", kept)], None))
+
+    def test_a_press_on_a_dim_row_of_the_first_screen_opens_nothing_and_says_the_file_is_no_longer_there(self) -> None:
+        kept, gone = self.recent
+        ui, pressed, said = Ui(), [], []
+        first = files.First(ui, None, None, pressed.append, (), self.recent, said.append, self.there)
+        first.place((0, 0, *theme.DESIGN))
+        self.assertEqual([(row.text, row.dim) for row in first.list.rows],
+                         [("RECENT", False), ("kept.json", False), ("gone.json", True)])
+        click(ui, spot(first.list, ("recent", gone)))
+        self.assertEqual((pressed, said, first.list.picked), ([], [f"{gone} is no longer there"], None))
+        click(ui, spot(first.list, ("recent", kept)))
+        self.assertEqual((pressed, len(said)), ([("recent", kept)], 1))
+
+
 @unittest.skipUnless(pygame, NEEDS)
 class InTheWindow(unittest.TestCase):
     def setUp(self) -> None:
@@ -364,18 +452,25 @@ class InTheWindow(unittest.TestCase):
         self.assertEqual((Project.load(copy), app.model.path, app.session.message, app.recent),
                          (app.model.project, one, f"a copy is kept in {copy}", [str(one)]))
 
-    def test_a_file_opened_before_that_is_gone_is_dropped_when_it_is_pressed_and_one_that_is_there_opens(self) -> None:
-        kept, gone = self.saved("kept.json"), self.folder / "gone.json"
-        files.write_recent(self.settings, [str(gone), str(kept)])
+    def test_a_dim_file_opened_before_only_says_it_is_gone_and_one_that_goes_later_is_dropped(self) -> None:
+        kept, late, gone = self.saved("kept.json"), self.saved("late.json"), self.folder / "gone.json"
+        files.write_recent(self.settings, [str(gone), str(late), str(kept)])
         app = self.first()
+        # The file that was gone as the list was made has a dim row. A press on it opens nothing and drops nothing.
         click(app.ui, spot(app.first.list, ("recent", str(gone))))
-        self.assertEqual((app.session, app.recent, files.read_recent(self.settings)), (None, [str(kept)], [str(kept)]))
-        self.assertEqual([row.text for row in app.first.list.rows if not row.head][-2:], ["piece", "kept.json"])
-        # The status bar says that it is gone.
+        self.assertEqual((app.session, app.ui.modal, len(app.recent), app.first.list.picked), (None, None, 3, None))
+        # The status bar says that it is no longer there.
         art = app.screen.begin()
         app.update()
         app.draw(art)
         self.assertGreater(ink(art, layout.frame(art.get_size())["status"], theme.TEXT), 0)
+        # One that goes between the listing and the press is found gone as it is opened, and is off the list.
+        late.unlink()
+        click(app.ui, spot(app.first.list, ("recent", str(late))))
+        left = [str(gone), str(kept)]
+        self.assertEqual((app.session, app.recent, files.read_recent(self.settings)), (None, left, left))
+        self.assertEqual([(row.text, row.dim) for row in app.first.list.rows if not row.head][-2:],
+                         [("gone.json", True), ("kept.json", False)])
         click(app.ui, spot(app.first.list, ("recent", str(kept))))
         self.assertEqual((app.first, app.model.path), (None, kept))
 

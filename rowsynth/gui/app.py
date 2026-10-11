@@ -183,7 +183,7 @@ class App:
         self._shut()
         self._fresh()
         self.model = self.session = self.path = None
-        self.first = files.First(self.ui, self.new, self.browse, self.do, files.examples(), self.recent)
+        self.first = files.First(self.ui, self.new, self.browse, self.do, files.examples(), self.recent, self.say)
         self.place(self._size)
 
     def open(self, path: str | Path) -> bool:

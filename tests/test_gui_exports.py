@@ -15,6 +15,7 @@ from unittest import mock
 
 import numpy as np
 
+from rowsynth.bank import render_entry
 from rowsynth.cli import main
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import exports, sprites, theme
@@ -190,6 +191,24 @@ class Named(Case):
                              *(["--stems"] if stems else []))
                 self.assert_written(files, folder)
 
+    def test_a_variant_and_a_part_are_named_as_the_page_names_them_and_written_as_the_command_writes_them(self) -> None:
+        page = names(exports.page_files(self.project, RATE))
+        cases = ((("sound", "trio"), {"variant": 1}, "trio-1.wav"),
+                 (("sound", "drone"), {"part": "loop"}, "drone-loop.wav"))
+        for picked, which, name in cases:
+            with self.subTest(name=name):
+                made = exports.plan(self.project, "render", self.out, RATE, picked=picked, **which)
+                self.assertEqual((names(made.files), made.refusal), ([name], None))
+                self.assertIn(f"audio/{name}", page)
+                self.assertEqual(exports.write(self.project, made), 1)
+                told = self.folder / "told.wav"
+                flag, value = next(iter(which.items()))
+                self.command("render", str(self.path), picked[1], "--out", str(told), "--rate", str(RATE),
+                             f"--{flag}", str(value))
+                self.assertEqual((self.out / name).read_bytes(), told.read_bytes())
+        # Left out, they are the first variant, and the file has the name alone.
+        self.assertEqual(names(exports.render_files(self.project, "sound", "trio", RATE)), ["trio.wav"])
+
     def test_the_files_of_a_build_are_those_the_build_command_writes(self) -> None:
         files = exports.build_files(self.project, RATE)
         folder = self.empty()
@@ -250,7 +269,7 @@ class Refused(Case):
 
     def test_a_refusal_of_the_package_is_shown_and_nothing_is_left_behind(self) -> None:
         ui, window = self.opened(data=BROKEN, picked=("sound", "short"))
-        self.assertEqual((names(window.plan.files), window.plan.refusal), (["short.wav"], None))
+        self.assertEqual((names(window.plan.files), window.plan.refusal), (["short-start.wav"], None))
         click(ui, window.write.rect)
         window.worker.join()
         words, colour = window.said()
@@ -258,6 +277,82 @@ class Refused(Case):
         self.assertEqual((colour, window.write.enabled, self.out.exists()), (theme.FAULT, True, False))
         with self.assertRaisesRegex(RowSynthError, "opens at one of render, build, page, not at 'zip'"):
             open_export(ui, self.session, "zip")
+
+    def test_a_variant_or_a_part_the_picked_thing_does_not_have_is_why_nothing_can_be_written(self) -> None:
+        cases = ((("sound", "trio"), {"variant": 2}, "'trio' has no variant 2: it has 2, counted from 0"),
+                 (("sound", "zap"), {"part": "loop"}, "--part is for a held sound, and 'zap' is not one"),
+                 (("sound", "drone"), {"variant": 0}, "--variant is for a sound that is not held"),
+                 (("sound", "drone"), {"part": "middle"}, "a held sound has the parts start, loop, end, and no part"),
+                 (("song", "tune"), {"variant": 0}, "--variant is for a sound, and 'tune' is a song"),
+                 (("song", "tune"), {"part": "end"}, "--part is for a held sound, and 'tune' is a song"))
+        for picked, which, why in cases:
+            with self.subTest(picked=picked, which=which):
+                made = exports.plan(self.project, "render", self.out, RATE, picked=picked, **which)
+                self.assertEqual((made.files, made.refusal[:len(why)]), ((), why))
+                with self.assertRaises(RowSynthError) as refused:
+                    exports.write(self.project, made)
+                self.assertEqual(str(refused.exception), made.refusal)
+        self.assertFalse(self.out.exists())
+
+
+class Chosen(Case):
+    def test_a_sound_of_several_variants_has_a_stepper_from_the_default_to_each_by_its_number(self) -> None:
+        ui, window = self.opened(picked=("sound", "trio"))
+        row = exports.parts(ui.size)["row1"]
+        self.assertEqual((window.variant.visible, window.part.visible, window.stems.visible), (True, False, False))
+        self.assertEqual((window.variant.options, window.variant.rect, window.words()),
+                         (("default", 0, 1), row, ("PICKED", "VARIANT", "")))
+        self.assertEqual((window.plan.variant, names(window.plan.files)), (None, ["trio.wav"]))
+        # Each press on its right half goes one on, no further than the last, and the list of files follows.
+        x, y, w, h = row
+        seen = []
+        for _ in range(3):
+            click(ui, (x + w // 2, y, w // 2, h))
+            seen.append((window.plan.variant, [line.text for line in window.files.rows]))
+        self.assertEqual(seen, [(0, ["trio-0.wav"]), (1, ["trio-1.wav"]), (1, ["trio-1.wav"])])
+        click(ui, window.write.rect)
+        window.worker.join()
+        self.assertEqual((window.said(), sorted(found(self.out))),
+                         ((f"wrote 1 file to {self.out}", theme.GOOD), ["trio-1.wav"]))
+        np.testing.assert_allclose(load_wav(self.out / "trio-1.wav")[0][0],
+                                   render_entry(self.project.sound("trio"), RATE)[1], atol=1 / 32767)
+
+    def test_a_held_sound_has_a_choice_of_its_three_parts_and_each_is_a_file_of_its_own(self) -> None:
+        ui, window = self.opened(picked=("sound", "drone"))
+        self.assertEqual((window.part.visible, window.variant.visible, window.stems.visible), (True, False, False))
+        self.assertEqual((window.part.options, window.part.rect, window.words()),
+                         (("START", "LOOP", "END"), exports.parts(ui.size)["row1"], ("PICKED", "PART", "")))
+        self.assertEqual((window.plan.part, names(window.plan.files)), ("start", ["drone-start.wav"]))
+        ui.handle(Event("move", centre(window.part.rect)))
+        self.assertEqual(window.help, exports.HELP["part"])
+        click(ui, window.part.cells()[1])
+        self.assertEqual((window.plan.part, [line.text for line in window.files.rows]), ("loop", ["drone-loop.wav"]))
+        click(ui, window.write.rect)
+        window.worker.join()
+        # The loop is three times as long as the start, so it is not the start that was written.
+        _, loop, _ = render_entry(self.project.sound("drone"), RATE)
+        np.testing.assert_allclose(load_wav(self.out / "drone-loop.wav")[0][0], loop, atol=1 / 32767)
+
+    def test_neither_is_shown_for_a_song_or_for_a_sound_that_has_no_use_for_it(self) -> None:
+        _, window = self.opened(picked=("sound", "trio"))
+        window.variant.step(2)
+        self.assertEqual((window.plan.variant, window.variant.help), (1, exports.HELP["variant"]))
+        # The switch of a song, the variants and the parts, as each thing is picked in turn.
+        cases = ((("song", "tune"), (True, False, False), ""), (("sound", "zap"), (False, False, False), ""),
+                 (("sound", "drone"), (False, False, True), "PART"),
+                 (("sound", "trio"), (False, True, False), "VARIANT"))
+        for picked, shown, word in cases:
+            with self.subTest(picked=picked):
+                self.session.model.pick(*picked)
+                window.said()
+                self.assertEqual((window.stems.visible, window.variant.visible, window.part.visible), shown)
+                self.assertEqual((window.words()[1], window.plan.refusal), (word, None))
+        # The variants were other ones in between, so the sound is at its default again.
+        self.assertEqual((window.variant.picked, window.plan.variant, names(window.plan.files)),
+                         (0, None, ["trio.wav"]))
+        window.tabs.pick(1)
+        self.assertEqual((window.variant.visible, window.part.visible, window.words()),
+                         (False, False, exports.WORDS["build"]))
 
 
 class Written(Case):
@@ -372,6 +467,21 @@ class Drawn(Case):
             window.page_format.pick(2)
             ui.draw(canvas)
         self.assertTrue(self.inked(surface, at["said"], theme.FAULT))
+
+    def test_the_second_row_of_a_held_sound_is_drawn_as_its_parts_with_their_word_before_them(self) -> None:
+        surface = pygame.Surface(theme.DESIGN)
+        canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
+        ui, window = self.opened(picked=("sound", "drone"))
+        at = exports.parts(theme.DESIGN)
+        ui.draw(canvas)
+        # The word is dim, and the part that is on has the colour of what is active.
+        self.assertEqual((self.inked(surface, at["word1"], theme.DIM), self.inked(surface, at["row1"], theme.ACTIVE)),
+                         (True, True))
+        # A sound of one def has nothing in that row.
+        self.session.model.pick("sound", "zap")
+        ui.draw(canvas)
+        self.assertEqual([self.inked(surface, at[part], colour) for part, colour in
+                          (("word1", theme.DIM), ("row1", theme.ACTIVE), ("row1", theme.TEXT))], [False] * 3)
 
 
 if __name__ == "__main__":
