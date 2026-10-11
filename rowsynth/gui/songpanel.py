@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
 from ..note import TICK_HZ
-from . import songview, theme
-from .font import Font
+from . import channelbar, songview, theme
+from .channelbar import ChannelBar
 from .layout import Rect
 from .lists import List, Row
 from .panels import Panel, within
@@ -17,7 +17,7 @@ from .songview import Block, Channel, Note, Pattern
 from .steps import Lane, Steps, lanes
 from .strips import SongStrip
 from .theme import Colour
-from .ui import Event, Label, Toggle, Ui
+from .ui import Event, Label, Ui
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -29,18 +29,14 @@ MARGIN = 4
 #: How high the song strip is. Under the names of its blocks that leaves 54 pixels for the lanes of the channels:
 #: 3 for each of 18 channels, the least at which a note has three heights and two drum channels stand apart.
 STRIP_H = 74
-#: How high a small button is: the toggles over the view are such buttons.
-BUTTON_H = 13
 #: How wide the list of the channels is, its frame counted. The view takes what is left beside it.
 CHANNELS_W = 128
 #: From the frame of a part to what stands in it.
 INSET = 3
-#: From the top of the view's part to the roll or the steps: the room the toggles stand in.
-HEAD_H = 20
+#: From the top of the view's part to the roll or the steps: the room the bar of the picked channel stands in.
+HEAD_H = INSET + channelbar.HEIGHT + 2
 
-#: What the two toggles over the view are called, and what the two headings of the list of channels read.
-FOLLOW = "FOLLOW"
-GHOSTS = "GHOSTS"
+#: What the two headings of the list of channels read.
 TUNED = "TUNED"
 DRUMS = "DRUMS"
 #: What is said, after the channel and its pattern, of an edit that ended after the channel was changed outside.
@@ -104,20 +100,19 @@ def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
     "strip" runs along the top, `STRIP_H` high. Under it "channels" stands at the left, `CHANNELS_W` wide, with
-    "list" inside its frame. "view" takes the rest: "follow" and "ghosts" side by side at its top, and under them
-    "body", which is where the roll or the steps go.
+    "list" inside its frame. "view" takes the rest: "bar" along its top, which is where the settings of the
+    picked channel go as `channelbar.arrange` lays them out, and under it "body", which is where the roll or
+    the steps go.
     """
     x, y, w, h = rect
     top, high = y + 2 * MARGIN + STRIP_H, h - 3 * MARGIN - STRIP_H
     left, wide = x + 2 * MARGIN + CHANNELS_W, w - 3 * MARGIN - CHANNELS_W
-    follow, ghosts = (Font.width(text) + 2 * theme.PAD for text in (FOLLOW, GHOSTS))
     placed = {
         "strip": (x + MARGIN, y + MARGIN, w - 2 * MARGIN, STRIP_H),
         "channels": (x + MARGIN, top, CHANNELS_W, high),
         "list": (x + MARGIN + INSET, top + INSET, CHANNELS_W - 2 * INSET, high - 2 * INSET),
         "view": (left, top, wide, high),
-        "follow": (left + INSET, top + INSET, follow, BUTTON_H),
-        "ghosts": (left + INSET + follow + theme.BUTTON_GAP, top + INSET, ghosts, BUTTON_H),
+        "bar": (left + INSET, top + INSET, wide - 2 * INSET, channelbar.HEIGHT),
         "body": (left + INSET, top + HEAD_H, wide - 2 * INSET, high - HEAD_H - INSET),
     }
     return {part: within(place, rect) for part, place in placed.items()}
@@ -129,10 +124,11 @@ class SongPanel(Panel):
     `strip` is the order as blocks. `strip.picked` is the picked place in it, which the panel keeps nowhere else:
     it is None for a song with no order. `channel` is the name of the picked channel. A tuned channel is shown in
     `roll`. With a drum channel picked, `steps` shows the drums of the pattern from all its drum channels
-    together, the picked one's labels lit. One of the two is seen at a time. While a sound, an instrument or
-    nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the refusal's
-    words. The song is read, and the strip shown it, when another thing is picked and when the model has loaded
-    its file again, and at no other time.
+    together, the picked one's labels lit. One of the two is seen at a time. Over them `bar` has the settings
+    of the picked channel, which are changed there, and the toggles FOLLOW and GHOSTS. While a sound, an
+    instrument or nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault`
+    has the refusal's words. The song is read, and the strip shown it, when another thing is picked and when
+    the model has loaded its file again, and at no other time.
 
     What the mouse and the keys make of the notes in the roll or the steps is saved at once: the channel's notes
     are written as its text for the pattern, and that is one change to the file, and one step that can be taken
@@ -151,10 +147,7 @@ class SongPanel(Panel):
         self.strip = self.add(SongStrip(nowhere, changed=lambda place: self._view(),
                                         help="the patterns in the order they play: a click shows one"))
         self.list = self.add(List(nowhere, changed=self._pick))
-        self.follow = self.add(Toggle(nowhere, FOLLOW, on=True,
-                                      help="the pattern that is shown goes along with the playing"))
-        self.ghosts = self.add(Toggle(nowhere, GHOSTS, on=True,
-                                      help="the notes of the other channels are drawn dim behind"))
+        self.bar = ChannelBar(self)
         self.roll = self.add(Roll(nowhere, edited=lambda notes, label: self._save(self.roll.channel, notes, label),
                                   sounded=self._sound, typed=self._key))
         self.steps = self.add(Steps(nowhere, edited=self._save, sounded=self._drum))
@@ -184,21 +177,22 @@ class SongPanel(Panel):
         super().place(rect)
         self._parts = parts = arrange(rect)
         self.strip.rect, self.list.rect = parts["strip"], parts["list"]
-        self.follow.rect, self.ghosts.rect = parts["follow"], parts["ghosts"]
+        self.bar.place(parts["bar"])
         self.roll.rect = self.steps.rect = parts["body"]
         self.fault.rect = rect
 
     def update(self, passed: float = 0.0) -> None:
         """Read the picked thing if it or the project is another than before, and show where the playing is.
 
-        The steps take their frame first, which ends a run of the wheel whose time is up. While a gesture is
-        under way in the roll or the steps nothing is read, so the notes do not change under the hand. `passed`
-        is the seconds since the frame before, which the panel has no use for.
+        The steps and the bar take their frame first, which ends a run of the wheel whose time is up. While a
+        gesture is under way in the roll or the steps nothing is read, so the notes do not change under the
+        hand. `passed` is the seconds since the frame before, which the panel has no use for.
         """
         self.steps.update()
+        self.bar.update()
         if not self._busy():
             self._look()
-        self.roll.ghosts = self.ghosts.is_on
+        self.roll.ghosts = self.bar.ghosts.is_on
         self._play()
 
     def draw(self, canvas: Canvas) -> None:
@@ -315,16 +309,18 @@ class SongPanel(Panel):
         self._view()
 
     def _view(self) -> None:
-        """Show the picked channel of the pattern at the picked place: in the list, and in the roll or the steps.
+        """Show the picked channel of the pattern at the picked place: in the list, the bar, and the roll or the steps.
 
         A tuned channel is the roll's one channel. A drum channel is lit among all the drums of the pattern, which
-        are given the drum table of the song, so that their hits can be changed.
+        are given the drum table of the song, so that their hits can be changed. The bar is shown the channel
+        in its colour, and no channel where the pattern has none of that name.
         """
         channels = self._channels()
         self.list.rows = channel_rows(channels)
         self.list.picked = self.channel
         place = next((place for place, held in enumerate(channels) if held.name == self.channel), None)
         self._drums = None if place is None else channels[place].drums
+        self.bar.show(self._picked[1], None if place is None else self.channel, colour_of(place or 0))
         if place is not None:
             pattern = self._patterns[self._blocks[self.strip.picked].name]
             if self._drums:
@@ -347,7 +343,7 @@ class SongPanel(Panel):
         at = None
         if self._song is not None and self.session.playing:
             at = place_at(self.session.position(), self._song["row_ticks"], self._blocks)
-        if at is not None and self.follow.is_on and at[0] != self.strip.picked and not self._busy():
+        if at is not None and self.bar.follow.is_on and at[0] != self.strip.picked and not self._busy():
             self.strip.picked = at[0]
             self._view()
         shown = at is not None and self._blocks[at[0]].name == self._blocks[self.strip.picked].name
@@ -358,8 +354,8 @@ class SongPanel(Panel):
     def _seen(self) -> None:
         """Have each widget seen or not: by whether the panel is on the window, and by what there is to show."""
         song = self.shown and self._song is not None
-        for widget in (self.strip, self.list, self.follow):
-            widget.visible = song
-        self.roll.visible = self.ghosts.visible = song and self._drums is False
+        self.strip.visible = self.list.visible = song
+        self.bar.seen(song)
+        self.roll.visible = song and self._drums is False
         self.steps.visible = song and self._drums is True
         self.fault.visible = self.shown and bool(self.fault.text)

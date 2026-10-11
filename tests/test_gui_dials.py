@@ -7,8 +7,9 @@ import unittest
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
-from rowsynth.gui.dials import (Knob, Meter, Slider, Stepper, around, bars, core, disc, dragged, handle_at, kept,
-                                knob_parts, lit_marks, meter_height, plain, stretch, value_at, wheeled, zones)
+from rowsynth.gui.dials import (WHEEL_WAIT, Knob, Meter, Slider, Stepper, around, bars, core, disc, dragged,
+                                handle_at, kept, knob_parts, lit_marks, meter_height, plain, stretch, value_at,
+                                wheeled, zones)
 from rowsynth.gui.font import Font
 from rowsynth.gui.ui import Event, Ui
 
@@ -187,6 +188,87 @@ class Handled(unittest.TestCase):
             self.ui.handle(Event("move", (25, y)))
         self.ui.handle(Event("up", (25, 198), button=1))
         self.assertEqual(self.told, [0.6, 0.7])
+
+    def test_settled_is_told_once_when_a_drag_is_let_go_with_the_value_it_was_left_at(self) -> None:
+        settled: list[float] = []
+        knob = self.knob(steps=10, settled=settled.append)
+        self.ui.handle(Event("down", (25, 218), button=1))
+        for y in (208, 198, 188):
+            self.ui.handle(Event("move", (25, y)))
+        self.assertEqual((self.told, settled, knob.busy), ([0.6, 0.7, 0.8], [], True))
+        self.ui.handle(Event("up", (25, 188), button=1))
+        self.assertEqual((settled, knob.busy), ([0.8], False))
+        # A press on the track of a slider moves its handle, so the release of a click there settles it.
+        slider = self.ui.add(Slider((60, 10, 54, 8), 0, 0, 1, settled=settled.append))
+        click(self.ui, (87, 14))
+        self.assertEqual((slider.value, settled), (0.5, [0.8, 0.5]))
+        # A drag that is dropped tells nothing, and what the mouse does up to its release changes nothing.
+        self.ui.handle(Event("down", (25, 218), button=1))
+        self.ui.handle(Event("move", (25, 208)))
+        knob.drop()
+        self.ui.handle(Event("move", (25, 198)))
+        self.ui.handle(Event("up", (25, 198), button=1))
+        self.assertEqual((knob.value, settled, knob.busy), (0.9, [0.8, 0.5], False))
+
+    def test_a_run_of_the_wheel_is_settled_once_when_its_time_is_up_and_each_step_puts_that_off(self) -> None:
+        settled: list[float] = []
+        now = [10.0]
+        knob = self.knob(steps=10, settled=settled.append, clock=lambda: now[0])
+        for _ in range(2):
+            self.ui.handle(Event("wheel", (25, 218), wheel=1))
+            now[0] += WHEEL_WAIT - 0.125
+            knob.update()
+        self.assertEqual((knob.value, settled, knob.busy), (0.7, [], True))
+        now[0] += 0.125
+        for _ in range(2):
+            knob.update()
+        self.assertEqual((settled, knob.busy), ([0.7], False))
+        # A step after that begins another run. The press that begins a drag ends it first.
+        self.ui.handle(Event("wheel", (25, 218), wheel=-1))
+        self.ui.handle(Event("down", (25, 218), button=1))
+        self.assertEqual(settled, [0.7, 0.6])
+        self.ui.handle(Event("move", (25, 198)))
+        self.ui.handle(Event("up", (25, 198), button=1))
+        self.assertEqual((settled, self.told), ([0.7, 0.6, 0.8], [0.6, 0.7, 0.6, 0.8]))
+
+    def test_a_run_of_the_wheel_is_settled_when_the_mouse_has_left_the_dial(self) -> None:
+        settled: list[float] = []
+        knob = self.knob(steps=10, settled=settled.append, clock=lambda: 10.0)
+        self.ui.handle(Event("wheel", (25, 218), wheel=3))
+        self.ui.handle(Event("move", (49, 236)))
+        knob.update()
+        self.assertEqual((settled, knob.busy), ([], True))
+        # The dial is handed nothing that the mouse does off it: its frame finds that the mouse has left.
+        self.ui.handle(Event("move", (50, 236)))
+        self.assertEqual(settled, [])
+        knob.update()
+        self.assertEqual((settled, knob.busy), ([0.8], False))
+
+    def test_a_right_click_that_put_a_dial_back_settles_it_at_once(self) -> None:
+        settled: list[float] = []
+        knob = self.knob(0.9, default=0.25, settled=settled.append, clock=lambda: 10.0)
+        click(self.ui, (25, 218), button=3)
+        self.assertEqual((knob.value, settled, knob.busy), (0.25, [0.25], False))
+        # It ends a run of the wheel with the default, which is told as what the run came to.
+        knob.value = 0.5
+        self.ui.handle(Event("wheel", (25, 218), wheel=5))
+        click(self.ui, (25, 218), button=3)
+        self.assertEqual((knob.value, settled, knob.busy), (0.25, [0.25, 0.25], False))
+
+    def test_nothing_is_settled_when_the_value_ended_where_the_hand_found_it(self) -> None:
+        settled: list[float] = []
+        knob = self.knob(steps=10, default=0.5, settled=settled.append, clock=lambda: 10.0)
+        # A drag there and back, a press let go at once, a right click on a dial that is at its default, and
+        # steps of the wheel that a right click takes back.
+        self.ui.handle(Event("down", (25, 218), button=1))
+        for y in (198, 218):
+            self.ui.handle(Event("move", (25, y)))
+        self.ui.handle(Event("up", (25, 218), button=1))
+        click(self.ui, (25, 218))
+        click(self.ui, (25, 218), button=3)
+        self.ui.handle(Event("wheel", (25, 218), wheel=2))
+        click(self.ui, (25, 218), button=3)
+        self.assertEqual((self.told, settled, knob.busy), ([0.7, 0.5, 0.7, 0.5], [], False))
 
     def test_a_press_on_the_track_of_a_lying_slider_puts_the_handle_there_and_the_drag_goes_on_from_it(self) -> None:
         slider = self.ui.add(Slider((10, 10, 54, 8), 0, 0, 1, changed=self.told.append))

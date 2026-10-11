@@ -14,7 +14,7 @@ from pathlib import Path
 from unittest import mock
 
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, songview, sprites, theme
+from rowsynth.gui import channelbar, dials, layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
@@ -279,9 +279,9 @@ class Shown(unittest.TestCase):
         self.panel.update()
 
     def seen(self) -> list[str]:
-        """Which of the panel's widgets are seen, by what the panel calls them."""
+        """Which of the panel's widgets are seen, by what the panel calls them. The two toggles are its bar's."""
         return [name for name in ("strip", "list", "follow", "ghosts", "roll", "steps", "fault")
-                if getattr(self.panel, name).visible]
+                if getattr(self.panel.bar if name in ("follow", "ghosts") else self.panel, name).visible]
 
     def test_at_the_start_the_first_place_and_the_first_tuned_channel_with_notes_are_picked(self) -> None:
         panel = self.panel
@@ -291,7 +291,7 @@ class Shown(unittest.TestCase):
         self.assertEqual((panel.roll.pattern.name, panel.roll.channel, panel.roll.colour), ("a", "air", theme.SOUND))
         self.assertEqual([note.pitch for note in panel.roll.notes], [60, 64, 67, 64])
         self.assertEqual(panel.list.rows, tuple(channel_rows(panel.roll.pattern.channels)))
-        self.assertEqual((panel.follow.is_on, panel.ghosts.is_on), (True, True))
+        self.assertEqual((panel.bar.follow.is_on, panel.bar.ghosts.is_on), (True, True))
 
     def test_a_click_on_a_block_of_the_strip_picks_that_place_and_the_views_show_the_pattern_there(self) -> None:
         panel = self.panel
@@ -366,7 +366,7 @@ class Shown(unittest.TestCase):
     def test_the_playhead_of_the_strip_is_the_row_of_the_song_and_a_view_has_one_only_while_its_pattern_plays(
             self) -> None:
         panel = self.panel
-        click(self.ui, middle(panel.follow.rect))
+        click(self.ui, middle(panel.bar.follow.rect))
         self.assertEqual((panel.strip.playhead, panel.roll.playhead, panel.steps.playhead), (None, None, None))
         shown = []
         # Half a second in is row 5 of the first pattern. Two seconds in is row 20 of the song, which is row 4 of
@@ -391,18 +391,38 @@ class Shown(unittest.TestCase):
         self.stand.playing, self.stand.at = False, 2.0
         panel.update()
         self.assertEqual((panel.strip.picked, panel.strip.playhead), (2, None))
-        click(self.ui, middle(panel.follow.rect))
-        self.assertFalse(panel.follow.is_on)
+        click(self.ui, middle(panel.bar.follow.rect))
+        self.assertFalse(panel.bar.follow.is_on)
         self.play(2.0)
         self.assertEqual((panel.strip.picked, panel.roll.playhead, panel.strip.playhead), (2, None, 20.0))
+
+    def test_the_bar_shows_the_picked_channel_in_its_colour_and_no_settings_where_no_channel_is_picked(self) -> None:
+        panel, bar = self.panel, self.panel.bar
+        self.assertEqual((bar.song, bar.channel, bar.name.text, bar.name.colour), ("walk", "air", "air", theme.SOUND))
+        self.assertEqual((bar.inst.options[bar.inst.picked], bar.level.visible, bar.word.visible),
+                         ("tone", True, False))
+        click(self.ui, spot(panel.list, "kit"))
+        self.assertEqual((bar.channel, bar.name.colour, bar.inst.options[bar.inst.picked], bar.word.visible),
+                         ("kit", theme.MUSTARD, "thud", True))
+        # The channel is the song's, so another pattern leaves the bar as it is.
+        click(self.ui, block(panel, 1))
+        self.assertEqual((bar.channel, bar.level.visible), ("kit", True))
+        # A song with no channels has no settings to show, and one that is not shown has no bar.
+        self.stand.model.pick("song", "bare")
+        panel.update()
+        self.assertEqual((bar.song, bar.channel, bar.level.visible, bar.inst.visible, bar.follow.visible),
+                         ("bare", None, False, False, True))
+        self.stand.model.pick("sound", "ping")
+        panel.update()
+        self.assertEqual([widget for widget in panel.widgets if widget.visible], [])
 
     def test_the_ghosts_toggle_turns_the_ghosts_of_the_roll_off_and_on(self) -> None:
         panel = self.panel
         self.assertTrue(panel.roll.ghosts)
         for on in (False, True):
-            click(self.ui, middle(panel.ghosts.rect))
+            click(self.ui, middle(panel.bar.ghosts.rect))
             panel.update()
-            self.assertEqual((panel.ghosts.is_on, panel.roll.ghosts), (on, on))
+            self.assertEqual((panel.bar.ghosts.is_on, panel.roll.ghosts), (on, on))
 
     def test_a_sound_or_an_instrument_picked_shows_nothing_and_the_song_picked_again_starts_anew(self) -> None:
         panel, model = self.panel, self.stand.model
@@ -518,13 +538,18 @@ class Shown(unittest.TestCase):
         self.assertEqual((panel.strip.picked, panel.channel), (1, "air"))
 
     def test_placed_at_two_sizes_every_widget_is_inside_the_panel_and_the_strip_is_above_the_rest(self) -> None:
-        panel = self.panel
+        panel, bar = self.panel, self.panel.bar
         self.assertEqual(arrange(RECT), {
             "strip": (128, 26, 654, 74), "channels": (128, 104, 128, 418), "list": (131, 107, 122, 412),
-            "view": (260, 104, 522, 418), "follow": (263, 107, 43, 13), "ghosts": (308, 107, 43, 13),
-            "body": (263, 124, 516, 395)})
-        self.assertEqual(len(panel.widgets), 7)
+            "view": (260, 104, 522, 418), "bar": (263, 107, 516, 37), "body": (263, 146, 516, 373)})
+        # The strip, the list, the eleven widgets of the bar, the roll, the steps and the line of a fault.
+        self.assertEqual(len(panel.widgets), 16)
         self.assertEqual(self.ui.widgets, panel.widgets)
+        # The bar is laid out along the top of the view, the two toggles at its right end, and all of it fits.
+        parts = channelbar.arrange(arrange(RECT)["bar"])
+        self.assertEqual((bar.level.rect, bar.pan.rect, bar.follow.rect, bar.ghosts.rect),
+                         (parts["level"], parts["pan"], (691, 119, 43, 13), (736, 119, 43, 13)))
+        self.assertEqual((bar.level.visible, bar.pan.visible), (True, True))
         for rect in (RECT, SMALL, (0, 0, 30, 5)):
             panel.place(rect)
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in panel.widgets), rect)
@@ -536,10 +561,13 @@ class Shown(unittest.TestCase):
         # In the least panel the strip is as high as in any and the list of the channels as wide, and the view
         # has what is left.
         panel.place(SMALL)
-        self.assertEqual((panel.strip.rect, panel.list.rect, panel.follow.rect, panel.ghosts.rect),
-                         ((128, 26, 492, 74), (131, 107, 122, 208), (263, 107, 43, 13), (308, 107, 43, 13)))
+        self.assertEqual((panel.strip.rect, panel.list.rect), ((128, 26, 492, 74), (131, 107, 122, 208)))
         self.assertEqual((panel.roll.rect, panel.steps.rect, panel.fault.rect),
-                         ((263, 124, 354, 191), (263, 124, 354, 191), SMALL))
+                         ((263, 146, 354, 169), (263, 146, 354, 169), SMALL))
+        # There the bar has no room for the pan, which is not seen. The level stays, and so do the toggles.
+        self.assertEqual(arrange(SMALL)["bar"], (263, 107, 354, 37))
+        self.assertEqual((bar.level.visible, bar.pan.visible, bar.follow.rect, bar.ghosts.rect),
+                         (True, False, (529, 119, 43, 13), (574, 119, 43, 13)))
 
     def test_taken_off_the_window_nothing_is_seen_and_brought_back_only_what_was_shown(self) -> None:
         self.panel.show(False)
@@ -766,22 +794,22 @@ class Saved(Opened):
         # Without the focus the roll is handed no key.
         self.assertEqual((self.key("x"), self.heard()), (False, []))
         # A press on a key of the strip, here that of e2, is heard with the channel's instrument. It picks nothing,
-        # and the roll has the focus. Its keys go down to c1.
+        # and the roll has the focus. The lowest c among its keys is c2.
         self.drag((self.roll.rect[0] + 5, self.at(0, 40)[1]))
         self.assertEqual((self.ui.focus, self.roll.picked, lowest_c(self.roll.map.pitches())),
-                         (self.roll, frozenset(), 24))
+                         (self.roll, frozenset(), 36))
         self.assertEqual(len(self.heard()), 1)
         self.assertIs(self.heard()[0], self.tone("buzz", 40))
         # x is the d of the first octave and q the c of the second. With ctrl held, and on f1, no note is played.
         self.assertEqual([self.key("x"), self.key("q", "shift"), self.key("x", "ctrl"), self.key("f1")],
                          [True, True, False, False])
         self.assertEqual(len(self.heard()), 3)
-        self.assertIs(self.heard()[1], self.tone("buzz", 26))
-        self.assertIs(self.heard()[2], self.tone("buzz", 36))
+        self.assertIs(self.heard()[1], self.tone("buzz", 38))
+        self.assertIs(self.heard()[2], self.tone("buzz", 48))
         # With the keys scrolled up an octave, the piano is an octave higher.
         self.ui.handle(Event("wheel", self.at(0, 36), wheel=6))
         self.assertTrue(self.key("z"))
-        self.assertIs(self.heard()[3], self.tone("buzz", 36))
+        self.assertIs(self.heard()[3], self.tone("buzz", 48))
         self.assertEqual((self.path.read_text(encoding="utf-8"), self.session.can_undo), (before, False))
 
     def test_the_space_bar_and_the_keys_of_undo_and_redo_are_not_used_up_by_the_roll(self) -> None:
@@ -883,8 +911,8 @@ class Saved(Opened):
         self.speaker.playing, self.speaker.at = True, 2.0
         for _ in range(2):
             self.panel.update()
-        self.assertEqual((self.panel.follow.is_on, self.panel.strip.picked, self.roll.pattern.name, self.roll.busy),
-                         (True, 0, "a", True))
+        self.assertEqual((self.panel.bar.follow.is_on, self.panel.strip.picked, self.roll.pattern.name,
+                          self.roll.busy), (True, 0, "a", True))
         self.assertEqual((self.panel.strip.playhead, self.roll.playhead), (20.0, None))
         # The release saves the note in the pattern it was moved in, and the next frame goes along.
         self.mouse("up", self.at(12, 66), 1)
@@ -907,6 +935,35 @@ class Saved(Opened):
         self.panel.update()
         self.assertEqual((self.steps.busy, self.text("a", "kit"), self.session.undo_label),
                          (False, "l4 v12 k v15 h k h", "kit of pattern a: level changed"))
+
+
+    def test_a_setting_changed_in_the_bar_is_one_place_in_the_file_and_the_next_frame_shows_it(self) -> None:
+        bar, before = self.panel.bar, self.data()
+        # The channel plays the first instrument of the project. A click on the right half of the field is the next.
+        x, y, w, _ = bar.inst.rect
+        click(self.ui, (x + w - 3, y + 3))
+        self.assertEqual(differing(before, self.data()), ["songs.walk.channels.air.inst"])
+        self.assertEqual((self.data()["songs"]["walk"]["channels"]["air"]["inst"], self.session.undo_label),
+                         ("thud", "air: instrument thud"))
+        self.assertEqual(len(self.heard()), 1)
+        self.assertIs(self.heard()[0], self.tone("thud", "c4"))
+        # The frame after it, the list and the notes of the roll have the instrument the file has.
+        self.panel.update()
+        self.assertEqual(next(row for row in self.panel.list.rows if row.key == "air").tag, "thud")
+        self.assertEqual({note.inst for note in self.roll.notes}, {"thud"})
+
+    def test_the_panel_gives_the_bar_its_frame_so_a_run_of_the_wheel_on_a_knob_is_saved_when_its_time_is_up(
+            self) -> None:
+        level = self.panel.bar.level
+        level.clock = lambda: self.now
+        for _ in range(3):
+            self.ui.handle(Event("wheel", middle(level.rect), wheel=1))
+        self.panel.update()
+        self.assertEqual((level.busy, level.value, self.session.can_undo), (True, 1.03, False))
+        self.now += dials.WHEEL_WAIT
+        self.panel.update()
+        self.assertEqual((level.busy, self.data()["songs"]["walk"]["channels"]["air"], self.session.undo_label),
+                         (False, {"inst": "tone", "gain": 1.03}, "air: level 1.03"))
 
 
 class Piece(Opened):

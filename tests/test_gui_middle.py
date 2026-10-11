@@ -130,7 +130,7 @@ class Shown(unittest.TestCase):
         other.assert_not_called()
         # A frame of the song panel has the roll go by the toggle over it.
         self.model.pick("song", "walk")
-        self.song.ghosts.is_on = False
+        self.song.bar.ghosts.is_on = False
         with mock.patch.object(self.sound, "update") as other:
             self.middle.update(0.016)
         other.assert_not_called()

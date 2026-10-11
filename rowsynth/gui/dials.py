@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import math
+import time
 from collections.abc import Callable, Sequence
 from functools import lru_cache
 from typing import TYPE_CHECKING
@@ -18,6 +19,8 @@ if TYPE_CHECKING:
 
 #: The most places after the point a number is shown with when its dial is given no way to show it.
 PLACES = 3
+#: How many seconds after the last step of the wheel on a dial its run of steps ends, and the dial has settled.
+WHEEL_WAIT = 0.5
 
 
 def _whole(number: float) -> int:
@@ -168,11 +171,19 @@ class Dial(Widget):
     moves it a step. A right click puts it back to `default`, when it has one. `steps` is how many equal steps
     the range is cut into: the value is then always on one of them. `changed` is called with the new value
     each time the value changes, and not when it stays as it was.
+
+    `settled` is called with the value once the hand has let go of it, when that is another value than the
+    hand found: at the release that ends a drag, at the end of a run of steps of the wheel, and after a right
+    click that put it back. A run of the wheel ends when the mouse leaves the dial, or `WHEEL_WAIT` seconds
+    after its last step by `clock`: for that the owner calls `update` every frame. While a drag or a run is
+    under way `busy` is true.
     """
 
     def __init__(self, rect: Rect, value: float, low: float, high: float,
                  changed: Callable[[float], object] | None = None, default: float | None = None,
-                 steps: int | None = None, colour: Colour = theme.ACTIVE, help: str = "") -> None:
+                 steps: int | None = None, colour: Colour = theme.ACTIVE, help: str = "",
+                 settled: Callable[[float], object] | None = None,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
         super().__init__(rect, help)
         if not low < high:
             raise RowSynthError(f"a dial goes from a low value to a higher one, not from {low:g} to {high:g}")
@@ -185,9 +196,20 @@ class Dial(Widget):
         self.default = default
         self.steps = steps
         self.colour = colour
+        self.settled = settled
+        self.clock = clock
         #: Where the drag that is going on started: the value, the place, and whether it was fine.
         self._drag: tuple[float, int, bool] | None = None
         self._at = 0
+        #: The value the hand found, while a drag or a run of the wheel is under way.
+        self._found: float | None = None
+        #: The run of the wheel that is under way: the Ui it is in, and the time on the clock at which it ends.
+        self._run: tuple[Ui, float] | None = None
+
+    @property
+    def busy(self) -> bool:
+        """Whether the hand is on it: a drag that has not been released, or a run of the wheel not yet ended."""
+        return self._drag is not None or self._run is not None
 
     def set(self, value: float) -> None:
         """Give it a value, kept in its range and on its steps, and tell if that is not the one it had."""
@@ -209,21 +231,51 @@ class Dial(Widget):
         """Take the press that starts a drag, and give the value the drag goes on from."""
         return self.value
 
+    def update(self) -> None:
+        """End a run of the wheel whose time is up or whose mouse has left the dial. The owner calls it every frame."""
+        if self._run is not None and (self.clock() >= self._run[1] or not self.hit(self._run[0].mouse)):
+            self._settle()
+
+    def drop(self) -> None:
+        """Let go of a drag or a run of the wheel that is under way, with nothing told of it."""
+        self._drag = self._run = self._found = None
+
+    def _settle(self) -> None:
+        """End the drag or the run of the wheel under way, and tell if the value is not the one the hand found."""
+        found = self._found
+        self.drop()
+        if found is not None and self.value != found and self.settled is not None:
+            self.settled(self.value)
+
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use the wheel, a press of the left button and the drag after it, and a right click if it has a default."""
+        """Use the wheel, a press of the left button and the drag after it, and a right click if it has a default.
+
+        A step of the wheel begins a run or goes on with one. A right click ends a run with the default, and a
+        press ends it before the drag begins.
+        """
+        self.update()
         if event.kind == "wheel":
+            if self._drag is None:
+                if self._run is None:
+                    self._found = self.value
+                self._run = (ui, self.clock() + WHEEL_WAIT)
             self.set(wheeled(self.value, event.wheel, self.low, self.high, self.steps))
             return True
         if event.kind == "down" and event.button == 3:
             if self.default is not None and self._drag is None:
+                if self._run is None:
+                    self._found = self.value
                 self.set(self.default)
+                self._settle()
             return self.default is not None
         if event.kind == "down" and event.button == 1:
+            self._settle()
+            self._found = self.value
             self._drag = (self.press(event.pos), self.place(event.pos), "shift" in event.mods)
             self._at = self.place(event.pos)
             return True
-        if event.kind == "up" and event.button == 1:
-            self._drag = None
+        if event.kind == "up" and event.button == 1 and self._drag is not None:
+            self._settle()
         elif event.kind == "move" and self._drag is not None:
             start, place, fine = self._drag
             if ("shift" in event.mods) != fine:
@@ -246,8 +298,10 @@ class Knob(Dial):
     def __init__(self, rect: Rect, value: float, low: float, high: float,
                  changed: Callable[[float], object] | None = None, default: float | None = None,
                  steps: int | None = None, colour: Colour = theme.ACTIVE, text: str = "",
-                 show: Callable[[float], str] | None = None, help: str = "") -> None:
-        super().__init__(rect, value, low, high, changed, default, steps, colour, help)
+                 show: Callable[[float], str] | None = None, help: str = "",
+                 settled: Callable[[float], object] | None = None,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
+        super().__init__(rect, value, low, high, changed, default, steps, colour, help, settled, clock)
         self.text = text
         self.show = show
 
