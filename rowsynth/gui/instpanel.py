@@ -22,10 +22,12 @@ from .dials import Knob, Stepper, plain
 from .fmview import FIRST, POINTS, WIRING_H, Envelope, Wiring, settings, wires
 from .font import Font
 from .layout import Rect
+from .model import inst_of, inst_place, own
 from .panels import Panel, within
 from .scope import TEXT_H, Scope, Spectrum
 from .session import piano
 from .tables import StepTable
+from .theme import Colour
 from .ui import NOWHERE, Choice, Event, Label, Pos, Toggle, Ui, Widget, draw_button, inside, share
 
 if TYPE_CHECKING:
@@ -266,7 +268,7 @@ def _voices(entry: dict) -> list[dict]:
     return found
 
 
-def uses(project: Project, name: str) -> dict[str, dict[str, int]]:
+def uses(project: Project, name: str, of: str | None = None) -> dict[str, dict[str, int]]:
     """Where an instrument of a project is used, counted for each kind of use.
 
     "channels" is from a song to how many of its channels have the instrument as their own, and "switches" to
@@ -274,10 +276,14 @@ def uses(project: Project, name: str) -> dict[str, dict[str, int]]:
     its drum letters play it, and "sounds" from a sound to how many of its voices do. Only what uses it is in
     a count. A name that a song gives to an instrument of the project stands for that one, and a name of an
     instrument that is the song's own is none of the project's.
+
+    With `of` the instrument is one of that song's own: only the song uses it, by the name it has there.
     """
     found: dict[str, dict[str, int]] = {"channels": {}, "switches": {}, "drums": {}, "sounds": {}}
     for title, song in project.songs.items():
-        own = song.get("instruments", {})
+        if of not in (None, title):
+            continue
+        own = {} if of else song.get("instruments", {})
 
         def meant(named: str, own: dict = own) -> bool:
             """Whether a name in the song stands for the instrument."""
@@ -290,7 +296,7 @@ def uses(project: Project, name: str) -> dict[str, dict[str, int]]:
         for kind, count in (("channels", len(played)), ("switches", len(switched)), ("drums", drums)):
             if count:
                 found[kind][title] = count
-    for title, entry in project.sounds.items():
+    for title, entry in ({} if of else project.sounds).items():
         count = sum(voice["inst"] == name for voice in _voices(entry))
         if count:
             found["sounds"][title] = count
@@ -316,6 +322,16 @@ def used(found: dict[str, dict[str, int]]) -> str:
     if found["sounds"]:
         parts.append(some(len(found["sounds"]), "sound"))
     return "in " + ", ".join(parts) if parts else NOWHERE_USED
+
+
+def heading(name: str, song: str | None, said: str) -> list[tuple[str, Colour]]:
+    """What the heading reads from the left, each thing with its colour: `INSTRUMENT name` and what is said of it.
+
+    The name is in the colour of an instrument and the rest is dim. An instrument of a song's own has its
+    song after its name, as in `INSTRUMENT lead of tune`.
+    """
+    of = [] if song is None else [(f"of {song}", theme.DIM)]
+    return [(INSTRUMENT, theme.DIM), (name, theme.INSTRUMENT), *of, (said, theme.DIM)]
 
 
 def keyboard(rect: Rect, low: int) -> list[tuple[int, Rect]]:
@@ -548,7 +564,9 @@ class Keys(Widget):
 class InstPanel(Panel):
     """The middle of the window while an instrument is picked: every setting of it to see, to change and to hear.
 
-    The heading is the name of the instrument, and in dim words where it is used. Under it `wave` is a choice
+    The heading is the name of the instrument, and in dim words where it is used. An instrument of a song's own
+    is shown and changed as one of the project's is: `song` is then its song, which the heading names after it,
+    and it is changed at its place in the song and heard as the song has it. Under the heading `wave` is a choice
     of the waves the engine has, and `short` the toggle of the short noise. `tables` are the step tables an
     instrument can have, each by its key, one under the other, and `knobs` its numbers, each by its place in
     the instrument. `keys` is a keyboard that plays the instrument, with `octave` to move it, and the keys of
@@ -625,8 +643,10 @@ class InstPanel(Panel):
         for key, dial in self.knobs.items():
             shown.setdefault(key.split(".")[0], []).append(dial)
         self.settings: dict[str, tuple[Widget, ...]] = {key: tuple(widgets) for key, widgets in shown.items()}
-        #: The name of the instrument that is shown, None for none, and what the heading says of its use.
+        #: The name of the instrument that is shown, None for none, the song whose own it is, None for one of
+        #: the project's, and what the heading says of its use.
         self.name: str | None = None
+        self.song: str | None = None
         self.used = ""
         #: The note that is heard again after a change: the one played last on the keyboard, whose key is lit.
         self.last = self.keys.lit = A4
@@ -647,7 +667,7 @@ class InstPanel(Panel):
         self._wave = USUAL
         # Whether a widget under the hand was left as it was by the last read, and has still to show the file.
         self._waits = False
-        # What each vibrato that was taken out here had beside its depth, by the name of its instrument.
+        # What each vibrato that was taken out here had beside its depth, by the place of its instrument.
         self._vibs: dict[str, dict] = {}
         self._parts = arrange(OFF)
         for key in PIANO:
@@ -693,7 +713,7 @@ class InstPanel(Panel):
                 canvas.frame(box, theme.LINE)
             x, y, w, h = parts["head"]
             at, last = x + HEAD_PAD, x + w - HEAD_PAD
-            for text, colour in ((INSTRUMENT, theme.DIM), (self.name, theme.INSTRUMENT), (self.used, theme.DIM)):
+            for text, colour in heading(self.name, self.song, self.used):
                 canvas.text_in(text, (at, y, max(0, last - at), h), colour)
                 at += Font.width(text) + HEAD_SPACE
             reach = slack(self.rect, self._wave == "fm")
@@ -722,11 +742,12 @@ class InstPanel(Panel):
         model = self.session.model
         self._picked, self._project = model.picked, model.project
         kind, name = self._picked or (None, None)
-        held = self._project.instruments.get(name) if kind == "instrument" else None
-        self.name = None if held is None else name
+        song, name = own(name, self._project.instruments) if kind == "instrument" else (None, None)
+        held = inst_of(self._project, song, name)
+        self.song, self.name = (None, None) if held is None else (song, name)
         self._waits = False
         if held is not None:
-            self.used = used(uses(self._project, name))
+            self.used = used(uses(self._project, name, song))
             self._wave = wave = held.get("wave", USUAL)
             self._show(self.wave, "picked", NAMES.index(wave), forced)
             self._show(self.short, "is_on", held.get("short", False), forced)
@@ -788,7 +809,7 @@ class InstPanel(Panel):
         if self.name is None:
             return
         try:
-            tone = self.session.model.tone(self.name, self.last)
+            tone = self.session.model.tone(self.name, self.last, song=self.song)
             self.scope.show(tone["sides"][0], tone["rate"], self.last)
             self.spectrum.show(tone["sides"][0], tone["rate"])
         except RowSynthError:
@@ -802,6 +823,14 @@ class InstPanel(Panel):
         self._lay()
         return self.scroll != before
 
+    def _where(self, key: str = "") -> str:
+        """The place of the instrument that is shown, or of a place in it: among the project's, or in its song."""
+        return f"{inst_place(self.song, self.name)}{'.' if key else ''}{key}"
+
+    def _inst(self) -> dict:
+        """The instrument that is shown, as the project holds it now: one that is gone holds nothing."""
+        return inst_of(self.session.model.project, self.song, self.name) or {}
+
     def _change(self, key: str, value: object, words: str) -> bool:
         """Put a value at a place of the instrument that is shown, as one step, and show what the file then holds.
 
@@ -812,16 +841,15 @@ class InstPanel(Panel):
         """
         if self.name is None:
             return False
-        where, label = f"instruments.{self.name}{'.' if key else ''}{key}", f"{self.name}: {words}"
+        where, label = self._where(key), f"{self.name}: {words}"
         if value is not NOTHING:
             saved = self.session.change(where, value, label)
         else:
             # What the file does not have is not there to take out: it is as was asked already.
-            held = self.session.model.project.instruments.get(self.name, {})
-            saved = _held(held, key, NOTHING) is NOTHING or self.session.remove(where, label)
+            saved = _held(self._inst(), key, NOTHING) is NOTHING or self.session.remove(where, label)
         self._read(forced=True)
         if saved and self.name is not None and not self.session.playing:
-            self.session.sound(self.name, self.last)
+            self.session.sound(self.name, self.last, self.song)
         return saved
 
     def _waved(self, index: int) -> None:
@@ -831,7 +859,7 @@ class InstPanel(Panel):
         wave, and is written whole, so that the two are one step.
         """
         wave = NAMES[index]
-        held = self.session.model.project.instruments.get(self.name, {})
+        held = self._inst()
         if wave == "fm" and not held.get("ops"):
             self._change("", {**held, "wave": wave, "ops": [dict(op) for op in PLAIN]}, f"wave {wave}")
         else:
@@ -861,13 +889,13 @@ class InstPanel(Panel):
         What a vibrato had beside its depth when it was taken out here is kept, and is its again when it is
         given a depth.
         """
-        held = self.session.model.project.instruments.get(self.name, {}).get("vib")
+        held, where = self._inst().get("vib"), self._where()
         if held is None and depth:
-            self._change("vib", {**self._vibs.get(self.name, {}), "depth": depth}, words)
+            self._change("vib", {**self._vibs.get(where, {}), "depth": depth}, words)
         elif depth:
             self._change("vib.depth", depth, words)
         elif self._change("vib", NOTHING, words) and held is not None:
-            self._vibs[self.name] = {key: part for key, part in held.items() if key != "depth"}
+            self._vibs[where] = {key: part for key, part in held.items() if key != "depth"}
 
     def _wired(self, algorithm: int) -> None:
         """Save the wiring that was picked, at its one place."""
@@ -884,8 +912,7 @@ class InstPanel(Panel):
         `has` is the operator as the envelope has it. What the drag set to the value the engine takes without
         it is not written, and an envelope with nothing left to write is taken out.
         """
-        held = self.session.model.project.instruments.get(self.name, {})
-        was, now = settings(_held(held, f"ops[{op}]", SILENT)), settings(has)
+        was, now = settings(_held(self._inst(), f"ops[{op}]", SILENT)), settings(has)
         moved = {key for key in now if now[key] != was[key]}
         point = next((point.name for point in POINTS if moved & {point.time, point.level}), SHAPE)
         env = {key: value for key, value in has.get("env", {}).items()
@@ -899,7 +926,7 @@ class InstPanel(Panel):
         value in it, after silent ones for those before it that the file leaves out as well.
         """
         words = f"operator {op + FIRST} {words}"
-        ops = self.session.model.project.instruments.get(self.name, {}).get("ops", [])
+        ops = self._inst().get("ops", [])
         if op < len(ops):
             self._change(f"ops[{op}].{key}", value, words)
         else:
@@ -914,7 +941,7 @@ class InstPanel(Panel):
         """Let a note of the instrument be heard, over whatever plays: it is the one played last, and is shown."""
         self.last = self.keys.lit = pitch
         if self.name is not None:
-            self.session.sound(self.name, pitch)
+            self.session.sound(self.name, pitch, self.song)
             self._trace()
 
     def _typed(self, key: str, before: Callable[[], object] | None = None) -> None:

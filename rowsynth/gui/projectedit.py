@@ -9,16 +9,16 @@ from ..edit import NOTHING
 from ..errors import RowSynthError
 from ..project import _AT, _NOT_IN_FILE_NAMES, _sounds_in
 from ..song import _TOKEN, _unread
-from .model import TEST_NOTE, TEST_TICKS, _section
+from .model import TEST_NOTE, TEST_TICKS, _section, inst_place
 
 # The data of a project goes in, as `Project.to_dict` gives it, and a list of changes comes out, which
 # `Session.change_many` makes as one step. The data handed in is never changed, and what comes back shares
 # nothing with it. A thing is a song, a sound or an instrument, and `kind` says which, in that word.
 #
 # A change is to a whole thing, or to the whole table of a kind: a thing keeps its place among the others when
-# its name changes, and only the table can say so. What cannot be done is refused, with the reason. After any
-# other, a project that loaded before still does, once all the changes are made: no one of them alone need
-# leave it so.
+# its name changes, and only the table can say so. An instrument of a song's own is taken out at its place in
+# the song. What cannot be done is refused, with the reason. After any other, a project that loaded before
+# still does, once all the changes are made: no one of them alone need leave it so.
 
 #: One change: a place as `edit.change_file_many` reads it, and the value put there, or NOTHING for what is
 #: there taken out.
@@ -61,6 +61,18 @@ def _known(data: dict, kind: str, name: object) -> dict:
     table = _table(data, kind)
     if not isinstance(name, str) or name not in table:
         raise RowSynthError(f"the project has no {kind} called {name!r}")
+    return table[name]
+
+
+def _own(data: dict, song: object, name: object) -> dict:
+    """The instrument of a song's own that has a name, as the project holds it.
+
+    A song the project does not have is refused, and so is a name the song has no instrument of its own under:
+    one it only gives to an instrument of the project is none.
+    """
+    table = _known(data, "song", song).get("instruments", {})
+    if not isinstance(name, str) or not isinstance(table.get(name), dict):
+        raise RowSynthError(f"the song {song!r} has no instrument of its own called {name!r}")
     return table[name]
 
 
@@ -173,7 +185,7 @@ def _named(section: str, title: str, thing: dict, name: str) -> Iterator[tuple[s
                 yield f"the channel {channel} in the pattern {pattern} of {title}", texts, channel, True
 
 
-def uses(data: dict, kind: str, name: str) -> list[str]:
+def uses(data: dict, kind: str, name: str, song: str | None = None) -> list[str]:
     """Where a thing of a project is named by another, each place once, in words a person can find it by.
 
     Only an instrument is named: by a channel of a song, by one of its drums, by a text that switches to it
@@ -181,7 +193,14 @@ def uses(data: dict, kind: str, name: str) -> list[str]:
     "the drum k of tune", "the channel lead in the pattern a of tune", "the instrument soft of tune" and "the
     sound zap". The songs come first, and the sounds after them. Nothing names a song or a sound, so those
     have no uses. A thing the project does not have is refused.
+
+    With `song` the thing is an instrument of that song's own. Only the song names it: by its channels, its
+    drums and its texts, as it would name one of the project's if it had none of its own.
     """
+    if song is not None:
+        _own(data, song, name)
+        bare = {**data["songs"][song], "instruments": {}}
+        return list(dict.fromkeys(words for words, _, _, _ in _named("songs", song, bare, name)))
     _known(data, kind, name)
     if kind != "instrument":
         return []
@@ -189,18 +208,29 @@ def uses(data: dict, kind: str, name: str) -> list[str]:
                               for words, _, _, _ in _named(section, title, thing, name)))
 
 
-def removed(data: dict, kind: str, name: str) -> list[Change]:
-    """The change that takes a thing out of a project.
+def removed(data: dict, kind: str, name: str, song: str | None = None) -> list[Change]:
+    """The change that takes a thing out of a project, or with `song` an instrument of its own out of that song.
 
     An instrument that is still named is refused, and the refusal says where, as `uses` words it: `NAMED` of
     the places, and how many more there are. A thing the project does not have is refused.
     """
-    found = uses(data, kind, name)
+    found = uses(data, kind, name, song)
     if found:
         more = len(found) - NAMED
         raise RowSynthError(f"{kind} {name!r} is still used by " + ", ".join(found[:NAMED])
                             + (f" and {more} more" if more > 0 else ""))
-    return [(f"{_section(kind)}.{name}", NOTHING)]
+    return [(f"{_section(kind)}.{name}" if song is None else inst_place(song, name), NOTHING)]
+
+
+def shared(data: dict, song: str, name: str) -> list[Change]:
+    """The changes that make an instrument of a song's own one of the project's, under the name it has.
+
+    The project gets it as the last of its instruments, and the song has it of its own no longer: so the song
+    goes on playing it by that name. The name is held to what `allowed` allows, so a project that has an
+    instrument of that name already is refused. So is a song with no instrument of its own under the name.
+    """
+    inst = copy.deepcopy(_own(data, song, name))
+    return [_put(data, "instrument", allowed(data, "instrument", name), inst), (inst_place(song, name), NOTHING)]
 
 
 def _switched(text: str, old: str, new: str, words: str) -> str:

@@ -29,11 +29,11 @@ NEEDS = "pygame is not installed"
 RECT = (124, 22, 662, 504)
 CENTRE = (455, 274)
 
-#: A project with one thing of each kind.
+#: A project with one thing of each kind, and an instrument of the song's own.
 PROJECT = {
     "instruments": {"tone": {"wave": "tri"}},
     "sounds": {"ping": {"def": {"voices": [{"inst": "tone", "notes": [[0, "c5", 6]]}]}}},
-    "songs": {"walk": {"row_ticks": 6, "channels": {"air": {"inst": "tone"}},
+    "songs": {"walk": {"row_ticks": 6, "instruments": {"soft": {"wave": "saw"}}, "channels": {"air": {"inst": "tone"}},
                        "patterns": {"a": {"air": "o4 l4 c e g e"}}, "order": ["a"]}},
 }
 
@@ -96,6 +96,13 @@ class Shown(unittest.TestCase):
         self.assertEqual((self.inst.name, self.inst.wave.options[self.inst.wave.picked], self.inst.wave.visible),
                          ("tone", "TRI", True))
         self.assertFalse(self.sound.view.visible)
+
+    def test_an_instrument_of_a_song_s_own_is_shown_in_the_instrument_panel_as_any_instrument_is(self) -> None:
+        self.assertEqual(fitting(("instrument", "walk.soft")), INSTRUMENT)
+        self.pick("instrument", "walk.soft")
+        self.assertEqual((self.middle.fits, self.seen()), (INSTRUMENT, [INSTRUMENT]))
+        self.assertEqual((self.inst.name, self.inst.song, self.inst.wave.options[self.inst.wave.picked]),
+                         ("soft", "walk", "SAW"))
 
     def test_with_nothing_picked_no_panel_is_on_the_window(self) -> None:
         # The file is emptied outside, and with it goes what was picked.

@@ -21,7 +21,7 @@ from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model, things
+from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model, inst_of, inst_place, own, things
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
 from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems
@@ -702,6 +702,70 @@ class ToneTest(ModelCase):
                 with self.assertRaises(RowSynthError) as refused:
                     model.tone(*asked)
                 self.assertEqual(str(refused.exception), said)
+
+
+class OwnInstrumentTest(ModelCase):
+    def test_a_name_with_a_dot_is_an_instrument_of_a_song_s_own_unless_the_project_has_one_called_so(self):
+        self.assertEqual([own("beep"), own("mine.beep"), own("mine.beep", {"beep"}), own("mine.beep", {"mine.beep"})],
+                         [(None, "beep"), ("mine", "beep"), ("mine", "beep"), (None, "mine.beep")])
+        self.assertEqual([inst_place(None, "beep"), inst_place("mine", "beep")],
+                         ["instruments.beep", "songs.mine.instruments.beep"])
+        held = Project.from_dict(OWN)
+        self.assertEqual([inst_of(held, None, "beep"), inst_of(held, "mine", "beep")],
+                         [PROJECT["instruments"]["beep"], MINE["instruments"]["beep"]])
+        # A name the song only gives to an instrument of the project is none of its own, and nor is one that
+        # only the project has, one of a song there is not, or a name nobody has.
+        self.assertEqual([inst_of(held, *where) for where in (("mine", "low"), ("mine", "hum"), ("nowhere", "beep"),
+                                                              (None, "low"))], [None] * 4)
+
+    def test_the_listing_has_the_own_instruments_of_each_song_after_the_project_s_tagged_with_their_song(self):
+        self.assertEqual(self.opened(OWN).listing()[2],
+                         ("instruments", [("hum", ""), ("beep", ""), ("mine.beep", "mine")]))
+        # Names written by hand with a dot in them: an instrument of the project that is called as one of a
+        # song's own is picked, which is then not listed, and nor is one whose song or own name has a dot.
+        saw = {"wave": "saw"}
+        by_hand = {"instruments": {**PROJECT["instruments"], "air.beep": {"wave": "tri", "vol": 3}},
+                   "songs": {"mine": {**MINE, "instruments": {**MINE["instruments"], "c.d": saw}},
+                             "air": {**song("l2 e g"), "instruments": {"beep": saw}},
+                             "a.b": {**song("l4 c"), "instruments": {"beep": saw}}}}
+        model = self.opened(by_hand)
+        self.assertEqual(model.listing()[2],
+                         ("instruments", [("hum", ""), ("beep", ""), ("air.beep", ""), ("mine.beep", "mine")]))
+        model.pick("instrument", "air.beep")
+        note = {"def": {"voices": [{"inst": by_hand["instruments"]["air.beep"], "notes": [[0, "c4", 12]]}]}}
+        self.assert_render(model.render(), render_entry(note, RATE), False)
+
+    def test_an_own_instrument_is_picked_by_its_song_and_its_name_and_rendered_as_its_own_test_note(self):
+        model = self.opened(OWN)
+        model.pick("instrument", "mine.beep")
+        self.assertEqual(model.picked, ("instrument", "mine.beep"))
+        note = {"def": {"voices": [{"inst": MINE["instruments"]["beep"], "notes": [[0, "c4", 12]]}]}}
+        self.assert_render(model.render(), render_entry(note, RATE), False)
+        np.testing.assert_array_equal(model.render()["sides"][0],
+                                      model.tone("beep", TEST_NOTE, song="mine")["sides"][0])
+        self.assertFalse(np.array_equal(model.render()["sides"][0], model.tone("beep", TEST_NOTE)["sides"][0]))
+        # A name the song only gives to one of the project's is not picked, nor one of a song with none such.
+        for name in ("mine.low", "tune.beep", "nowhere.beep"):
+            with self.subTest(name=name):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.pick("instrument", name)
+                self.assertEqual(str(refused.exception), f"no instrument named {name!r}")
+        self.assertEqual(model.picked, ("instrument", "mine.beep"))
+
+    def test_an_own_instrument_stays_picked_when_it_is_changed_and_is_picked_no_longer_once_it_is_gone(self):
+        model = self.opened(OWN)
+        model.pick("instrument", "mine.beep")
+        model.change("songs.mine.instruments.beep.vol", 5)
+        self.assertEqual([model.picked, model.project.songs["mine"]["instruments"]["beep"]],
+                         [("instrument", "mine.beep"), {"wave": "saw", "vol": 5}])
+        # Outside, the song gives the name to an instrument of the project, or the song itself is removed.
+        named = {**OWN, "songs": {**OWN["songs"], "mine": {**MINE, "instruments": {"beep": "hum"}}}}
+        for after in (named, PROJECT):
+            with self.subTest(songs=list(after["songs"])):
+                model = self.opened(OWN)
+                model.pick("instrument", "mine.beep")
+                self.write(after)
+                self.assertEqual([model.poll(), model.picked], [{("song", "mine")}, None])
 
 
 class FindingsTest(ModelCase):

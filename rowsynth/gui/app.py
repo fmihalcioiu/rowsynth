@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
-from collections.abc import Callable
+from collections.abc import Callable, Container
 from pathlib import Path
 
 import pygame
@@ -19,7 +19,7 @@ from .font import Font
 from .inspector import Inspector
 from .layout import Rect
 from .middle import Middle
-from .model import Model
+from .model import Model, own
 from .panels import Panel
 from .popups import Menu
 from .screen import Screen
@@ -50,9 +50,17 @@ _EXAMPLE = "A FILE FOR YOUR COPY OF THE EXAMPLE"
 _NEW_NAME = "project" + files.ENDING
 
 
-def picked_words(picked: tuple[str, str] | None) -> str:
-    """What is picked in a few words: its kind in capitals and then its name, and nothing for nothing picked."""
-    return "" if picked is None else f"{picked[0].upper()} {picked[1]}"
+def picked_words(picked: tuple[str, str] | None, shared: Container[str] = ()) -> str:
+    """What is picked in a few words: its kind in capitals and then its name, and nothing for nothing picked.
+
+    An instrument of a song's own is named with its song, as "INSTRUMENT lead of tune". `shared` is the names of
+    the project's instruments, by which `model.own` knows one of those.
+    """
+    if picked is None:
+        return ""
+    kind, name = picked
+    song, name = own(name, shared) if kind == "instrument" else (None, name)
+    return f"{kind.upper()} {name}" + (f" of {song}" if song else "")
 
 
 def status_line(help: str, message: str, age: float) -> tuple[str, Colour]:
@@ -391,7 +399,7 @@ class App:
         x, y, w, h = rect
         # Under the bar's line, and in from its two ends.
         left, top, room, high = x + theme.BAR_MARGIN, y + 1, max(0, w - 2 * theme.BAR_MARGIN), h - 1
-        picked = picked_words(None if self.model is None else self.model.picked)
+        picked = "" if self.model is None else picked_words(self.model.picked, self.model.project.instruments)
         self.canvas.text_in(picked, (left, top, room, high), theme.DIM, "right")
         if picked:
             room = max(0, room - Font.width(picked) - theme.GROUP_GAP)

@@ -12,7 +12,7 @@ import numpy as np
 from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING, delete_in, set_in
 from rowsynth.errors import RowSynthError
-from rowsynth.gui.projectedit import Change, added, allowed, free, removed, renamed, uses
+from rowsynth.gui.projectedit import Change, added, allowed, free, removed, renamed, shared, uses
 from rowsynth.project import Project
 from rowsynth.song import render_loop
 
@@ -46,6 +46,19 @@ DATA = {
                 "patterns": {"a": {"x": "o4 c1", "y": "o3 e1", "z": "o2 c1"}}, "order": ["a"]},
     },
 }
+
+
+def with_buzz() -> dict:
+    """DATA with two more instruments of the second song's own: buzz, which it plays, and spare, which it does not.
+
+    One channel has buzz for its instrument, and the text of another switches to it.
+    """
+    data = copy.deepcopy(DATA)
+    song = data["songs"]["own"]
+    song["instruments"].update(buzz={"wave": "saw", "vol": 9}, spare={"wave": "tri"})
+    song["channels"]["z"]["inst"] = "buzz"
+    song["patterns"]["a"]["y"] = "o3 e2 @buzz e2"
+    return data
 
 
 def applied(data: dict, changes: list[Change]) -> dict:
@@ -159,6 +172,44 @@ class Removing(unittest.TestCase):
         left = Project.from_dict(applied(gone, removed(gone, "instrument", "lead2")))
         self.assertEqual([list(left.instruments), list(left.sounds), list(left.songs)],
                          [["lead", "thud"], ["pop"], ["own"]])
+
+
+class Owned(unittest.TestCase):
+    def test_an_own_instrument_made_shared_is_the_project_s_under_its_name_and_the_song_sounds_as_before(self) -> None:
+        data = with_buzz()
+        began = copy.deepcopy(data)
+        changes = shared(data, "own", "buzz")
+        self.assertEqual((data, changes), (began, [("instruments.buzz", {"wave": "saw", "vol": 9}),
+                                                   ("songs.own.instruments.buzz", NOTHING)]))
+        made = applied(data, changes)
+        self.assertEqual([list(made["instruments"]), list(made["songs"]["own"]["instruments"])],
+                         [["lead", "lead2", "thud", "buzz"], ["lead", "soft", "spare"]])
+        np.testing.assert_array_equal(heard(made, "song", "own"), heard(data, "song", "own"))
+        for given, message in (
+            # The song's own lead is not the project's lead, which is there already.
+            ((data, "own", "lead"), "the project has an instrument called 'lead' already"),
+            ((data, "own", "soft"), "the song 'own' has no instrument of its own called 'soft'"),
+            ((data, "tune", "lead"), "the song 'tune' has no instrument of its own called 'lead'"),
+            ((data, "march", "buzz"), "the project has no song called 'march'"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(refusal(shared, *given), message)
+
+    def test_an_own_instrument_is_taken_out_of_its_song_unless_the_song_still_plays_it(self) -> None:
+        data = with_buzz()
+        # The song plays its own lead by the name the project has for another: only its own uses are found.
+        self.assertEqual([uses(data, "instrument", "lead", "own"), uses(data, "instrument", "spare", "own")],
+                         [["the channel x of own"], []])
+        self.assertEqual(refusal(removed, data, "instrument", "buzz", "own"),
+                         "instrument 'buzz' is still used by the channel z of own, the channel y in the pattern a of "
+                         "own")
+        self.assertEqual(refusal(removed, data, "instrument", "soft", "own"),
+                         "the song 'own' has no instrument of its own called 'soft'")
+        changes = removed(data, "instrument", "spare", "own")
+        self.assertEqual(changes, [("songs.own.instruments.spare", NOTHING)])
+        left = Project.from_dict(applied(data, changes))
+        self.assertEqual([list(left.songs["own"]["instruments"]), list(left.instruments)],
+                         [["lead", "soft", "buzz"], ["lead", "lead2", "thud"]])
 
 
 class Adding(unittest.TestCase):

@@ -8,7 +8,7 @@ from ..errors import RowSynthError
 from . import projectedit, theme
 from .layout import Rect
 from .lists import List, Row
-from .model import KINDS
+from .model import KINDS, own
 from .panels import Panel, within
 from .popups import Item, Menu, ask
 from .projectedit import Change
@@ -29,11 +29,14 @@ def rows_of(listing: Listing) -> list[Row]:
 
     A heading is known by its section, and reads as that in capitals: a section that holds nothing has its
     heading all the same. A thing is known by (kind, name), reads as its name, and has its tag at the right.
+    An instrument with a tag is one of a song's own, listed by the name it is picked by: it reads as the name
+    it has in its song, which is the tag.
     """
     rows = []
     for section, things in listing:
         rows.append(Row(section, section.upper(), head=True, colour=COLOURS[section]))
-        rows.extend(Row((KINDS[section], name), name, tag=tag) for name, tag in things)
+        rows.extend(Row((KINDS[section], name), own(name)[1] if tag and section == "instruments" else name, tag=tag)
+                    for name, tag in things)
     return rows
 
 
@@ -75,6 +78,10 @@ class Browser(Panel):
     why: an instrument that is still used is not deleted, and a name that is refused leaves the box open, so
     that it can be mended. A new thing, a copy and a thing under its new name is the picked one afterwards.
     Where the picked thing is deleted, the session picks the first thing there is.
+
+    An instrument of a song's own has a menu of its own. `Make shared` moves it to the instruments of the
+    project under its name, where the song goes on playing it, and picks it there: a project that has an
+    instrument of that name already is refused. `Delete` takes it out of its song, unless the song still plays it.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
@@ -108,11 +115,17 @@ class Browser(Panel):
                                             for kind in KINDS.values()]
         else:
             kind, name = key
-            items = (Item("Rename...", lambda: self._rename(kind, name)),
-                     Item("Copy", lambda: self._add(kind, name)),
-                     None,
-                     Item("Delete", lambda: self._do(lambda: projectedit.removed(self._data(), kind, name),
-                                                     f"{kind} {name} deleted")))
+            song, inst = own(name, self.session.model.project.instruments) if kind == "instrument" else (None, name)
+            said = name if song is None else f"{inst} of {song}"
+            delete = Item("Delete", lambda: self._do(lambda: projectedit.removed(self._data(), kind, inst, song),
+                                                     f"{kind} {said} deleted"))
+            if song is None:
+                items = (Item("Rename...", lambda: self._rename(kind, name)),
+                         Item("Copy", lambda: self._add(kind, name)), None, delete)
+            else:
+                items = (Item("Make shared", lambda: self._do(lambda: projectedit.shared(self._data(), song, inst),
+                                                              f"{kind} {said} made shared", (kind, inst))),
+                         None, delete)
         self.ui.open(Menu(items, pos, chosen=lambda act: act()))
 
     def _data(self) -> dict:

@@ -18,8 +18,8 @@ from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.dials import WHEEL_WAIT
 from rowsynth.gui.font import Font
 from rowsynth.gui.instpanel import (A4, BUZZ_UNUSED, DIALS, FEEDBACK, FM_NEEDED, FM_TABLES, NEEDED, NUMBERS, PLAIN,
-                                    SCOPE_HELP, SILENT, TABLES, InstPanel, Waves, arrange, key_at, keyboard,
-                                    note_name, role, slack, used, uses)
+                                    SCOPE_HELP, SILENT, TABLES, InstPanel, Waves, arrange, heading, key_at,
+                                    keyboard, note_name, role, slack, used, uses)
 from rowsynth.gui.model import Model
 from rowsynth.gui.panels import within
 from rowsynth.gui.session import POLL_EVERY, Session
@@ -301,6 +301,21 @@ class Sums(unittest.TestCase):
         # A panel with no room at all has every part of either page, none with a size below nothing.
         self.assertTrue(all(w >= 0 and h >= 0 for fm in (False, True)
                             for _, _, w, h in arrange((0, 0, 0, 0), fm=fm).values()))
+
+
+class OwnSums(unittest.TestCase):
+    def test_an_own_instrument_is_counted_in_its_song_alone_and_the_heading_names_the_song_after_it(self) -> None:
+        held = Project.from_dict(PROJECT)
+        # One channel has the song's own for its instrument and another switches to it. Its noise is played by
+        # a channel and a drum letter, and by no sound: those play the project's of that name.
+        self.assertEqual(uses(held, "own", "walk"), {"channels": {"walk": 1}, "switches": {"walk": 1}, "drums": {},
+                                                     "sounds": {}})
+        self.assertEqual(used(uses(held, "hiss", "walk")), "in 1 channel of walk, 1 drum of walk")
+        self.assertEqual(heading("own", "walk", "in 2 channels of walk"),
+                         [("INSTRUMENT", theme.DIM), ("own", theme.INSTRUMENT), ("of walk", theme.DIM),
+                          ("in 2 channels of walk", theme.DIM)])
+        self.assertEqual(heading("bell", None, "used nowhere"),
+                         [("INSTRUMENT", theme.DIM), ("bell", theme.INSTRUMENT), ("used nowhere", theme.DIM)])
 
 
 class Opened(unittest.TestCase):
@@ -835,6 +850,66 @@ class Played(Opened):
         self.drag(panel.knobs["release"], 5)
         self.assertEqual((self.inst()["release"], self.session.undo_label, len(self.heard())),
                          (8, "bell: fade 8", 5))
+
+
+class Owned(Opened):
+    """The panel with an instrument of the song's own picked: by the name of its song, a dot and its name there."""
+
+    def own(self, name: str = "own") -> dict:
+        """What the file holds now for an instrument of the song's own."""
+        return self.data()["songs"]["walk"]["instruments"][name]
+
+    def test_an_own_instrument_is_shown_as_one_of_the_project_s_is_with_its_song_beside_its_name(self) -> None:
+        panel = self.panel
+        self.pick("walk.own")
+        self.assertEqual((panel.name, panel.song, panel.used, panel.wave.picked),
+                         ("own", "walk", "in 2 channels of walk", 1))
+        self.assertTrue(all(widget.visible for widget in (panel.wave, panel.keys, *panel.knobs.values())))
+        # The noise the song calls hiss is the one shown, and not the project's of that name, which is a short one.
+        self.pick("walk.hiss")
+        self.assertEqual((panel.name, panel.song, panel.used, panel.wave.picked, panel.short.is_on),
+                         ("hiss", "walk", "in 1 channel of walk, 1 drum of walk", 3, False))
+        self.pick("hiss")
+        self.assertEqual((panel.name, panel.song, panel.used, panel.short.is_on), ("hiss", None, "in 3 sounds", True))
+
+    def test_a_change_to_an_own_instrument_is_saved_at_its_place_in_the_song_and_it_stays_the_picked_one(
+            self) -> None:
+        panel = self.panel
+        self.pick("walk.own")
+        before = self.data()
+        click(self.ui, middle(panel.wave.cells()[2]))
+        self.assertEqual((differing(before, self.data()), self.own(), self.session.undo_label),
+                         (["songs.walk.instruments.own.wave"], {"wave": "tri"}, "own: wave tri"))
+        self.assertEqual((self.session.model.picked, panel.name, panel.song, panel.wave.picked),
+                         (("instrument", "walk.own"), "own", "walk", 2))
+        # A knob that is turned is written, and put back to what the engine takes without it, it is taken out.
+        self.drag(panel.knobs["release"], 4)
+        self.assertEqual((list(self.own()), self.own()["release"] > 2), (["wave", "release"], True))
+        click(self.ui, middle(panel.knobs["release"].rect), button=3)
+        self.assertEqual((self.own(), self.session.undo_label), ({"wave": "tri"}, "own: fade 2"))
+        # The FM wave comes with its operators, written as the whole of the instrument at its place.
+        click(self.ui, middle(panel.wave.cells()[4]))
+        self.assertEqual((self.own(), self.inst(), panel.wiring.visible),
+                         ({"wave": "fm", "ops": [dict(op) for op in PLAIN]}, BELL, True))
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.own(), self.session.model.picked), ({"wave": "tri"}, ("instrument", "walk.own")))
+
+    def test_the_keys_and_the_scope_have_the_note_of_an_own_instrument_as_its_song_has_it(self) -> None:
+        panel = self.panel
+        self.pick("walk.hiss")
+        with mock.patch.object(panel.scope, "show", wraps=panel.scope.show) as scope:
+            click(self.ui, self.key(48))
+            mine = self.session.model.tone("hiss", 48, song="walk")["sides"]
+            self.assertIs(self.heard()[0], mine)
+            self.assertIs(scope.call_args.args[0], mine[0])
+            self.assertIsNot(mine, self.tone(48, "hiss"))
+            # After a change the note played last is heard again, in the song's instrument as it is now.
+            click(self.ui, middle(panel.short.rect))
+            now = self.session.model.tone("hiss", 48, song="walk")["sides"]
+            self.assertEqual((self.own("hiss"), len(self.heard())), ({"wave": "noise", "short": True}, 2))
+            self.assertIs(self.heard()[1], now)
+            self.assertIs(scope.call_args.args[0], now[0])
+            self.assertIsNot(now, mine)
 
 
 class Outside(Opened):

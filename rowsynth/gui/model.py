@@ -7,7 +7,7 @@ import math
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Container, Iterable, Mapping, Sequence
 from numbers import Real
 from pathlib import Path
 from typing import TypeVar
@@ -75,6 +75,48 @@ def _tag(entry: dict) -> str:
     if "defs" in entry:
         return str(len(entry["defs"]))
     return next((form for form in ("parts", "held") if form in entry), "")
+
+
+def own(name: str, shared: Container[str] = ()) -> tuple[str | None, str]:
+    """The name an instrument is picked by, as (song, name): the song whose own it is, and its name there.
+
+    An instrument of a song's own is picked as "SONG.NAME". One of the project's is picked by its name alone,
+    and has None for the song: every name with no dot is one, and so is every name in `shared`, the names of
+    the project's instruments. A name made in the window holds no dot, so the two are not mistaken. A song or
+    an instrument whose name was written by hand with a dot in it is not listed as an own instrument: it could
+    not be told apart.
+    """
+    song, dot, inst = name.partition(".")
+    return (song, inst) if dot and name not in shared else (None, name)
+
+
+def inst_place(song: str | None, name: str) -> str:
+    """Where a project holds an instrument: "instruments.NAME", or with a song its own "songs.SONG.instruments.NAME"."""
+    return f"instruments.{name}" if song is None else f"songs.{song}.instruments.{name}"
+
+
+def inst_of(project: Project, song: str | None, name: str) -> dict | None:
+    """An instrument of a project, or with a song one of the song's own, as the project holds it now.
+
+    None where there is none: a name a song only gives to an instrument of the project is none of its own.
+    """
+    table = project.instruments if song is None else project.songs.get(song, {}).get("instruments", {})
+    found = table.get(name)
+    return found if isinstance(found, dict) else None
+
+
+def _owned(project: Project) -> list[tuple[str, str]]:
+    """The instruments of the songs' own as they are listed: each by the name it is picked by, tagged with its song."""
+    return [(pick, song) for song, held in project.songs.items()
+            for name, inst in held.get("instruments", {}).items() for pick in [f"{song}.{name}"]
+            if isinstance(inst, dict) and "." not in song + name and pick not in project.instruments]
+
+
+def _has(project: Project, kind: str, name: str) -> bool:
+    """Whether a project has a thing to pick. An instrument can be one of a song's own, named as `own` reads it."""
+    return name in _table(project, kind) or (
+        kind == "instrument" and isinstance(name, str)
+        and inst_of(project, *own(name, project.instruments)) is not None)
 
 
 def _first(project: Project) -> tuple[str, str] | None:
@@ -240,7 +282,7 @@ def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
         buffers = render_entry(project.sound(name), rate)
         sides = buffers[:1]
     else:
-        sides = [_note(project.instruments[name], TEST_NOTE, TEST_TICKS, rate)]
+        sides = [_note(inst_of(project, *own(name, project.instruments)), TEST_NOTE, TEST_TICKS, rate)]
     row = mono(sides)
     told = {**measure(row, rate), **brightness(row, rate=rate)}
     return {"render": {"sides": sides, "rate": rate, "loop": kind == "song", "seconds": len(row) / rate,
@@ -444,7 +486,10 @@ class Model:
 
     @property
     def picked(self) -> tuple[str, str] | None:
-        """The one thing that is selected: (kind, name), the kind "song", "sound" or "instrument". None for nothing."""
+        """The one thing that is selected: (kind, name), the kind "song", "sound" or "instrument". None for nothing.
+
+        An instrument of a song's own has the name `own` reads: "SONG.NAME".
+        """
         return self._picked
 
     def listing(self) -> list[tuple[str, list[tuple[str, str]]]]:
@@ -452,10 +497,13 @@ class Model:
 
         The sections are "songs", "sounds" and "instruments", always the three and in that order. A sound whose
         entry is more than one sound has a tag: how many variants it has, as in "3", or "parts", or "held".
-        Every other tag is "".
+        Every other tag is "", but for the instruments of the songs' own, which come after the project's, in the
+        order of the songs and then of the file. Each is named as it is picked, "SONG.NAME", and its tag is the
+        name of its song. A name a song only gives to an instrument of the project is not listed.
         """
         return [(section, [(name, _tag(entry) if section == "sounds" else "")
-                           for name, entry in getattr(self._project, section).items()])
+                           for name, entry in getattr(self._project, section).items()]
+                 + (_owned(self._project) if section == "instruments" else []))
                 for section in KINDS]
 
     @property
@@ -466,9 +514,10 @@ class Model:
     def pick(self, kind: str, name: str) -> None:
         """Selects a song, a sound or an instrument of the project. One the project does not have is refused.
 
-        When it is another thing than the one that was picked, all its channels are heard.
+        An instrument of a song's own is selected by the name `own` reads, "SONG.NAME". When it is another
+        thing than the one that was picked, all its channels are heard.
         """
-        if name not in _table(self._project, kind):
+        if not _has(self._project, kind, name):
             raise RowSynthError(f"no {kind} named {name!r}")
         with self._lock:
             if (kind, name) != self._picked:
@@ -752,7 +801,7 @@ class Model:
             self._project = project
             if found:
                 self._loads += 1
-                if self._picked is not None and self._picked[1] not in _table(project, self._picked[0]):
+                if self._picked is not None and not _has(project, *self._picked):
                     self._picked = None
                 now = _channels(project, self._picked)
                 if now is None or set(now) != set(channels or ()):
