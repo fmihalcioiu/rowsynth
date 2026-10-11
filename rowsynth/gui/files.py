@@ -50,8 +50,18 @@ NO_NAME = "type a name, or press a file"
 #: What the folder line of a chooser reads while its list is of the drives, and what it says of a name typed there.
 DRIVES = "drives"
 NO_DRIVE = "go into a drive first, or type a whole path"
-#: The line of help of a chooser.
+#: The line of help of a chooser, and what its parts say of themselves with the mouse on one: the row that goes
+#: up, a folder, a file where one is opened and where a new one is named, the box of the name and the two buttons.
 CHOOSER_HELP = "a double press goes into a folder and takes a file: enter takes the name, escape closes"
+UP_HELP = "a double press goes up, to the folder this one is in"
+FOLDER_HELP = "a double press goes into this folder"
+FILE_HELP = "a press puts this name in the box, and a double press takes the file"
+OLD_FILE_HELP = "a press puts this name in the box: the new file needs a name that no file here has yet"
+PART_HELP = {
+    "name": "type the name of the file here, or a whole path: a name that is a folder is gone into",
+    "cancel": "close with no file taken, as escape does",
+    "take": "take the name in the box, as enter does: with no name there, the picked folder is gone into",
+}
 
 #: The things of the FILE menu that stand above the files opened last, each as its text and what the app is
 #: asked for. A thing that is added here needs the app to know it by that word.
@@ -328,6 +338,9 @@ class Chooser(Widget):
     With `new` the name is for a file that is not there yet: one that is there is refused in `words`, and the
     chooser stays open. Otherwise the file has to be there. A file that is taken closes the chooser, and
     `taken` is called with its path. `clock` gives the time in seconds, which two presses are told apart by.
+
+    `help` is the line of the part the mouse is on: a row of the list, the box of the name or a button. Anywhere
+    else on the chooser it is the chooser's own line.
     """
 
     takes_text = True
@@ -358,6 +371,24 @@ class Chooser(Widget):
         self._places = arrange(theme.DESIGN)
         self.go(folder)
         self.keep_in(theme.DESIGN)
+
+    @property
+    def help(self) -> str:
+        """The line of the part the mouse is on: a row of the list, the box of the name or a button.
+
+        Anywhere else it is the chooser's own line.
+        """
+        row = self.list.at(self._mouse)
+        if row is not None:
+            if row.key[0] == FILE:
+                return OLD_FILE_HELP if self.new else FILE_HELP
+            return UP_HELP if row.key[1] == UP and not self.at_drives else FOLDER_HELP
+        return next((line for part, line in PART_HELP.items() if inside(self._places[part], self._mouse)),
+                    self._help)
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
 
     def keep_in(self, size: tuple[int, int]) -> None:
         """Take the size of the art surface, and lay the chooser out in the middle of it."""
@@ -560,7 +591,8 @@ class First:
     It has the program's name, the button `new` for a new project and `open` for a file, and `list`: the
     examples under one heading and the files opened last under another, the gone ones dim. A press on a row
     calls `pressed` with the key of the row: ("example", path) or ("recent", path). A press on a dim row opens
-    nothing: `say` is called with the words of `gone` for its file, and the row is not picked.
+    nothing: `say` is called with the words of `gone` for its file, and the row is not picked. The keys that
+    move the pick step over a dim row.
 
     `there` says whether a file opened before is still on the disk, as the list is made.
     """
@@ -580,6 +612,7 @@ class First:
         self.open = ui.add(Button(nowhere, OPEN_FILE, action=open, help="open a project file"))
         self.list = ui.add(List(nowhere, changed=self._pressed,
                                 help="an example is opened as a copy of your own, and a file opened before as it is"))
+        self.list.skips_dim = True
         self._places = first_places(nowhere)
         self.show(found, recent)
 

@@ -226,11 +226,14 @@ def shared(data: dict, song: str, name: str) -> list[Change]:
     """The changes that make an instrument of a song's own one of the project's, under the name it has.
 
     The project gets it as the last of its instruments, and the song has it of its own no longer: so the song
-    goes on playing it by that name. The name is held to what `allowed` allows, so a project that has an
-    instrument of that name already is refused. So is a song with no instrument of its own under the name.
+    goes on playing it by that name. Where it was all the song's table of instruments held, the table goes with
+    it, so that no empty one is left in the song. The name is held to what `allowed` allows, so a project that
+    has an instrument of that name already is refused. So is a song with no instrument of its own under the name.
     """
     inst = copy.deepcopy(_own(data, song, name))
-    return [_put(data, "instrument", allowed(data, "instrument", name), inst), (inst_place(song, name), NOTHING)]
+    alone = len(data["songs"][song]["instruments"]) == 1
+    gone = f"songs.{song}.instruments" if alone else inst_place(song, name)
+    return [_put(data, "instrument", allowed(data, "instrument", name), inst), (gone, NOTHING)]
 
 
 def _switched(text: str, old: str, new: str, words: str) -> str:

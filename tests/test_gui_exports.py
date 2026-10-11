@@ -468,6 +468,23 @@ class Drawn(Case):
             ui.draw(canvas)
         self.assertTrue(self.inked(surface, at["said"], theme.FAULT))
 
+    def test_the_first_tab_says_what_is_picked_as_the_status_bar_does_an_own_instrument_with_its_song(self) -> None:
+        self.assertEqual([exports.pick_words(picked, ("beep", "old.one")) for picked in
+                          (("song", "tune"), ("instrument", "beep"), ("instrument", "tune.soft"),
+                           ("instrument", "old.one"), None)],
+                         ["SONG tune", "INSTRUMENT beep", "INSTRUMENT soft of tune", "INSTRUMENT old.one", "NOTHING"])
+        own = {**PROJECT, "songs": {"tune": {**TUNE, "instruments": {"soft": {"vol": 9}}}}}
+        ui, window = self.opened(data=own, picked=("instrument", "tune.soft"))
+        at = exports.parts(theme.DESIGN)["picked"]
+        drawn = []
+        for draw in (lambda canvas: ui.draw(canvas),
+                     lambda canvas: canvas.text_in("INSTRUMENT soft of tune", at, theme.TEXT)):
+            surface = pygame.Surface(theme.DESIGN)
+            draw(Canvas(surface, Font(sprites.load("font")), sprites.load("icons")))
+            drawn.append([(x, y) for x in range(at[0], at[0] + at[2]) for y in range(at[1], at[1] + at[3])
+                          if tuple(surface.get_at((x, y)))[:3] == theme.TEXT])
+        self.assertEqual((drawn[0], len(drawn[1]) > 100), (drawn[1], True))
+
     def test_the_second_row_of_a_held_sound_is_drawn_as_its_parts_with_their_word_before_them(self) -> None:
         surface = pygame.Surface(theme.DESIGN)
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))

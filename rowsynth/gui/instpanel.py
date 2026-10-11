@@ -217,10 +217,13 @@ OCTAVE_HELP = "the octave the keyboard starts at: its lowest key is this c"
 #: What the wirings and the envelope of an operator say of themselves, off their pictures and off their points, and
 #: the scope and the spectrum while they have no sound to show.
 WIRING_HELP = "which operators are heard and which change which: click a wiring to pick it"
-ENVELOPE_HELP = ("how loud the operator is over a note: drag a point for its attack, its decay and the level it "
-                 "falls to, its fall while held, or its release")
+ENVELOPE_HELP = ("how loud the operator is over a note: drag a point to set its attack, its decay, its fall while "
+                 "held or its release")
 SCOPE_HELP = "a few cycles of the note played last, as the instrument sounds now"
 SPECTRUM_HELP = "what is in the note played last from low to high, and where it begins to be harsh"
+#: What the ground of the panel says of itself, where the mouse is on none of its parts.
+PAGE_HELP = ("press here and the keys of the computer play the instrument: the wheel moves the page where it does "
+             "not fit")
 
 #: How high the tables are together at the least, with the gaps between them, and the page with all its parts.
 TABLES_MIN = TABLE_UNIT * sum(table.share for table in TABLES) + TABLE_GAP * (len(TABLES) - 1)
@@ -303,18 +306,19 @@ def uses(project: Project, name: str, of: str | None = None) -> dict[str, dict[s
     return found
 
 
-def used(found: dict[str, dict[str, int]]) -> str:
+def used(found: dict[str, dict[str, int]], named: bool = True) -> str:
     """What `uses` found in a few words, as the heading says it: `in 3 channels of tune, 2 sounds`.
 
     A channel that switches to the instrument is a channel of it. Used by one song, that song is named, and by
-    more their count is. An instrument nothing plays is `used nowhere`.
+    more their count is. An instrument nothing plays is `used nowhere`. Without `named` no song is named, as in
+    `in 3 channels`: that is for an instrument of a song's own, whose heading has named its song already.
     """
     def some(count: int, word: str) -> str:
         return f"{count} {word}{'' if count == 1 else 's'}"
 
     def of(counts: dict[str, int], word: str) -> str:
         where = next(iter(counts)) if len(counts) == 1 else f"{len(counts)} songs"
-        return f"{some(sum(counts.values()), word)} of {where}"
+        return some(sum(counts.values()), word) + (f" of {where}" if named else "")
 
     channels = {song: found["channels"].get(song, 0) + found["switches"].get(song, 0)
                 for song in (*found["channels"], *found["switches"])}
@@ -456,8 +460,8 @@ class Page(Widget):
     wheel, and says whether the page moved.
     """
 
-    def __init__(self, rect: Rect, scrolled: Callable[[int], bool]) -> None:
-        super().__init__(rect)
+    def __init__(self, rect: Rect, scrolled: Callable[[int], bool], help: str = "") -> None:
+        super().__init__(rect, help)
         self.scrolled = scrolled
 
     def on(self, event: Event, ui: Ui) -> bool:
@@ -566,7 +570,8 @@ class InstPanel(Panel):
 
     The heading is the name of the instrument, and in dim words where it is used. An instrument of a song's own
     is shown and changed as one of the project's is: `song` is then its song, which the heading names after it,
-    and it is changed at its place in the song and heard as the song has it. Under the heading `wave` is a choice
+    and it is changed at its place in the song and heard as the song has it. The heading names that song once:
+    where the instrument is used is then said with no song named. Under the heading `wave` is a choice
     of the waves the engine has, and `short` the toggle of the short noise. `tables` are the step tables an
     instrument can have, each by its key, one under the other, and `knobs` its numbers, each by its place in
     the instrument. `keys` is a keyboard that plays the instrument, with `octave` to move it, and the keys of
@@ -614,7 +619,7 @@ class InstPanel(Panel):
                                  steps=number.steps, colour=theme.INSTRUMENT, text=number.text, help=number.help,
                                  settled=settled, clock=clock))
 
-        self.page = self.add(Page(OFF, self._wheel))
+        self.page = self.add(Page(OFF, self._wheel, PAGE_HELP))
         self.word = self.add(Label(OFF, WAVE))
         self.wave = self.add(Waves(OFF, NAMES, self._waved, WAVE_HELP))
         self.short = self.add(Toggle(OFF, BUZZ, changed=self._buzzed, colour=theme.INSTRUMENT, help=BUZZ_HELP))
@@ -644,10 +649,12 @@ class InstPanel(Panel):
             shown.setdefault(key.split(".")[0], []).append(dial)
         self.settings: dict[str, tuple[Widget, ...]] = {key: tuple(widgets) for key, widgets in shown.items()}
         #: The name of the instrument that is shown, None for none, the song whose own it is, None for one of
-        #: the project's, and what the heading says of its use.
+        #: the project's, and where it is used, in words.
         self.name: str | None = None
         self.song: str | None = None
         self.used = ""
+        # What the heading says of its use: that, with no song named where the heading names the song before it.
+        self._said = ""
         #: The note that is heard again after a change: the one played last on the keyboard, whose key is lit.
         self.last = self.keys.lit = A4
         self.scroll = 0
@@ -713,7 +720,7 @@ class InstPanel(Panel):
                 canvas.frame(box, theme.LINE)
             x, y, w, h = parts["head"]
             at, last = x + HEAD_PAD, x + w - HEAD_PAD
-            for text, colour in heading(self.name, self.song, self.used):
+            for text, colour in heading(self.name, self.song, self._said):
                 canvas.text_in(text, (at, y, max(0, last - at), h), colour)
                 at += Font.width(text) + HEAD_SPACE
             reach = slack(self.rect, self._wave == "fm")
@@ -747,7 +754,8 @@ class InstPanel(Panel):
         self.song, self.name = (None, None) if held is None else (song, name)
         self._waits = False
         if held is not None:
-            self.used = used(uses(self._project, name, song))
+            found = uses(self._project, name, song)
+            self.used, self._said = used(found), used(found, song is None)
             self._wave = wave = held.get("wave", USUAL)
             self._show(self.wave, "picked", NAMES.index(wave), forced)
             self._show(self.short, "is_on", held.get("short", False), forced)

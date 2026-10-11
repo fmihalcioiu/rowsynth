@@ -59,6 +59,9 @@ SONG_LEVELS = (0.0, 1.0, 100)
 MUTE = "M"
 SOLO = "S"
 ALL = "ALL"
+#: What the mixer says of itself where the mouse is on none of its controls.
+DESK_HELP = ("a strip for each channel, and at the right the whole song: the wheel moves along them where they do "
+             "not fit")
 #: The parts of a strip, as `strip_parts` calls them.
 PARTS = ("number", "meter", "fader", "mute", "solo", "both", "name")
 
@@ -214,8 +217,8 @@ class Desk(Widget):
     None while every strip is in view. The mixer sets the three.
     """
 
-    def __init__(self, rect: Rect, wheel: Callable[[int], bool]) -> None:
-        super().__init__(rect)
+    def __init__(self, rect: Rect, wheel: Callable[[int], bool], help: str = "") -> None:
+        super().__init__(rect, help)
         self.wheel = wheel
         self.line: Rect = (0, 0, 0, 0)
         self.bar: Rect | None = None
@@ -288,7 +291,7 @@ class Mixer:
         self.picked = picked
         self._panel, self._clock = panel, clock
         nowhere = (0, 0, 0, 0)
-        self.desk = panel.add(Desk(nowhere, self._wheel))
+        self.desk = panel.add(Desk(nowhere, self._wheel, DESK_HELP))
         self.strips: list[Strip] = []
         self.number = panel.add(Label(nowhere, "", theme.TEXT, "centre"))
         self.meter = panel.add(Meter(nowhere))

@@ -1,7 +1,7 @@
 """The left panel: what the project holds, as a list to pick a song, a sound or an instrument from, and to change."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Container, Sequence
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
@@ -23,6 +23,10 @@ COLOURS = {"songs": theme.SONG, "sounds": theme.SOUND, "instruments": theme.INST
 #: A listing as a model gives it: each section with the names of its things, and the tag of each.
 Listing = Sequence[tuple[str, Sequence[tuple[str, str]]]]
 
+#: What the list says of itself where the mouse is on no row, and what comes after the click in the line of a row.
+LIST_HELP = "what the project holds: press the right button to make a new thing of any kind"
+MORE = "or press the right button for more"
+
 
 def rows_of(listing: Listing) -> list[Row]:
     """A listing as the rows of a list: each section a heading in its colour, and its things under it.
@@ -38,6 +42,21 @@ def rows_of(listing: Listing) -> list[Row]:
         rows.extend(Row((KINDS[section], name), own(name)[1] if tag and section == "instruments" else name, tag=tag)
                     for name, tag in things)
     return rows
+
+
+def row_help(row: Row, shared: Container[str] = ()) -> str:
+    """The line of help of a row of the list: of a heading, and of a thing by its kind and its name.
+
+    A sound and an instrument are heard when they are picked, and a song is not. An instrument of a song's own
+    is named with its song. `shared` is the names of the project's instruments, by which `model.own` knows one
+    of those.
+    """
+    if row.head:
+        return f"click to fold the {row.key} away or bring them back, or press the right button to make a new thing"
+    kind, name = row.key
+    song, name = own(name, shared) if kind == "instrument" else (None, name)
+    said = f"{kind} {name}" + (f" of {song}" if song else "")
+    return f"click to show {said}{'' if kind == 'song' else ' and hear it'}, {MORE}"
 
 
 def in_name(char: str) -> bool:
@@ -86,7 +105,9 @@ class Browser(Panel):
 
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
-        self.list = ui.add(Things((0, 0, 0, 0), changed=lambda key: session.pick(*key), asked=self._ask))
+        self.list = ui.add(Things((0, 0, 0, 0), changed=lambda key: session.pick(*key), help=LIST_HELP,
+                                  asked=self._ask))
+        self.list.told = lambda row: row_help(row, session.model.project.instruments)
         # The listing the rows were last made of.
         self._listing: Listing | None = None
 

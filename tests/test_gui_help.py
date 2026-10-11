@@ -1,0 +1,476 @@
+"""Tests for the line of help in the status bar: every control of the window says one, and each has its room."""
+from __future__ import annotations
+
+import json
+import os
+import shutil
+import tempfile
+import threading
+import unittest
+from collections.abc import Hashable, Iterable
+from pathlib import Path
+from typing import TYPE_CHECKING
+from unittest import mock
+
+# No test opens a window that can be seen, or a sound device. This is said before pygame is first imported.
+os.environ["SDL_VIDEODRIVER"] = "dummy"
+os.environ["SDL_AUDIODRIVER"] = "dummy"
+os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
+
+from rowsynth import checks
+from rowsynth.errors import RowSynthError
+from rowsynth.gui import browser, exports, files, fmview, instpanel, layerview, layout, mixer, songpanel, soundpanel
+from rowsynth.gui import model as gui_model
+from rowsynth.gui import start, theme
+from rowsynth.gui.font import Font
+from rowsynth.gui.lists import List, Row
+from rowsynth.gui.roll import Roll
+from rowsynth.gui.ui import Event, Ui, Widget, inside
+
+try:
+    import pygame
+except ImportError:
+    pygame = None
+
+if TYPE_CHECKING:
+    from rowsynth.gui.app import App
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+NEEDS = "pygame is not installed"
+Pos = tuple[int, int]
+#: How far apart the places are at which the mouse is rested all over the window.
+STEP = 12
+#: How wide the art surface of the smallest window is.
+SMALLEST = theme.MIN_ART[0]
+#: A held sound for the arcade example, which has none, with a longest time that has its line on the clock.
+HUM = {"held": {"note": {"voices": [{"inst": "bass", "notes": [[0, "c3", 60]]}]}, "start": 6, "loop": 30, "join": 3,
+                "end": {"voices": [{"inst": "bass", "notes": [[0, "c3", 2]]}]}, "let_go": 4},
+       "db": -6, "max_seconds": 0.8}
+
+#: The things of the widgets that draw several, each with how a line begins that is said on a thing of that kind:
+#: at the places the layout of its widget gives for it, every one of the beginnings is that of a line.
+KINDS: dict[str, tuple[str, ...]] = {
+    "the left list, a heading": ("click to fold the songs away or bring them back",),
+    "the left list, a song": ("click to show song tune, ",),
+    "the left list, a sound": ("click to show sound coin and hear it, ",),
+    "the left list, an instrument": ("click to show instrument lead and hear it, ",),
+    "the left list, under its rows": (browser.LIST_HELP,),
+    "the strip, a block": ("drag to move a, ",),
+    "the strip, off its blocks": ("the patterns in the order they play",),
+    "the channels, a heading": ("click to fold these channels away",),
+    "the channels, a channel": ("click to show channel lead, ",),
+    "the channels, under the rows": (songpanel.LIST_HELP,),
+    "the roll, a note": ("move ", "stretch "),
+    "the roll, empty grid": ("place a note at ",),
+    "the roll, a key": ("hear ",),
+    "the roll, the ruler": (songpanel.ROLL_HELP,),
+    "the roll, the chord of a bar": ("pick the chord of bar ",),
+    "the roll, the levels": ("set the level of ",),
+    "the steps, the squares": ("take the hit away: ", "put a hit: "),
+    "the steps, the names of the drums": (songpanel.STEPS_HELP,),
+    "the mixer, the name of a channel": ("lead, lead: a click shows its notes",),
+    "the mixer, between its strips": (mixer.DESK_HELP,),
+    "the layers, a switch": ("group rhythm in version beat: ",),
+    "the layers, a group": ("group rhythm: ",),
+    "the layers, a version": ("version beat", "hear version beat alone"),
+    "the layers, the buttons that add": ("a new version", "a new group"),
+    "the layers, off all of them": ("the groups of channels down the side",),
+    "a sound, a note": ("move ", "stretch "),
+    "a sound, empty grid": ("place a note at ",),
+    "a sound, the ruler": ("press the right button to set the longest time the sound may last",),
+    "a sound, the wave and the keys": (soundpanel.HELP,),
+    "variants, the labels": ("click to hear variant ", "add a variant, a copy of variant "),
+    "variants, the ruler": ("press the right button to set the longest time the sound may last",),
+    "parts, the labels": ("drag to move where part ", "add a part at the end, a copy of part "),
+    "parts, the ruler": ("press the right button to set the longest time the sound may last, and ctrl and a click",),
+    "a held sound, the labels": ("drag to move where the loop starts", "drag to move where the loop ends",
+                                 "click to work on the note", "click to work on the end"),
+    "a held sound, the ruler": ("the longest time the sound may last: drag to move it", "press the right button"),
+    "a step table, a step": ("step 1 of ",),
+    "a step table, its heading and its handle": (instpanel.TABLES[0].help,),
+    "the keyboard, a key": ("c3: press a key to hear it",),
+    "the instrument, between its parts": (instpanel.PAGE_HELP,),
+    "the wirings, a picture": (fmview.told(0),),
+    "an envelope, a point": ("attack: ",),
+    "an envelope, off its points": (instpanel.ENVELOPE_HELP,),
+    "the export, its parts": tuple(exports.HELP[part]
+                                   for part in ("tabs", "stems", "change", "files", "write", "close")),
+    "the export, off its parts": (exports.HELP["window"],),
+    "the export, a build": tuple(exports.HELP[part] for part in ("build_format", "rate", "songs")),
+    "the export, the listen page": (exports.HELP["page_format"],),
+    "the export, a sound of variants": (exports.HELP["variant"],),
+    "the export, a held sound": (exports.HELP["part"],),
+    "the export, the box of its folder": (exports.HELP["box"],),
+    "a chooser, its rows": (files.UP_HELP, files.FOLDER_HELP, files.FILE_HELP),
+    "a chooser, its foot": tuple(files.PART_HELP.values()),
+    "a chooser, off its parts": (files.CHOOSER_HELP,),
+    "a chooser for a new file, a file": (files.OLD_FILE_HELP,),
+    "the first screen, its list": ("an example is opened as a copy of your own",),
+}
+
+
+def settle() -> None:
+    """Waits for every render and every run of the checks that is still on a thread of a model's."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("rowsynth-"):
+            thread.join()
+
+
+def refused(*args: object, **more: object) -> None:
+    """Stands in for a render and for the checks: refused at once, so that none is waited for."""
+    raise RowSynthError("not made in this test")
+
+
+def frame(app: App) -> None:
+    """Have the window take two frames: the panels have then read what is picked, and laid their widgets out."""
+    for _ in range(2):
+        app.update()
+        app.draw(app.screen.begin())
+
+
+def over(ui: Ui, pos: Pos) -> Widget | None:
+    """The widget whose line the status bar has with the mouse at a position, found as `Ui.help` finds it."""
+    if ui.modal is not None:
+        return ui.modal if ui.modal.hit(pos) else None
+    return next((widget for widget in reversed(ui.widgets) if widget.visible and widget.hit(pos)), None)
+
+
+def middle(rect: layout.Rect) -> Pos:
+    """The pixel in the middle of a rectangle."""
+    return rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+
+
+def along(rect: layout.Rect, step: int = 2) -> list[Pos]:
+    """Places from side to side of a rectangle, through its middle."""
+    return [(x, rect[1] + rect[3] // 2) for x in range(rect[0], rect[0] + rect[2], step)]
+
+
+def across(rect: layout.Rect, step: int = 4) -> list[Pos]:
+    """Places all over a rectangle, row by row from its upper left corner."""
+    x, y, w, h = rect
+    return [(left, top) for top in range(y, y + h, step) for left in range(x, x + w, step)]
+
+
+def spot(rows: List, key: Hashable) -> Pos:
+    """A place on the row of a key, as the list is scrolled now."""
+    x, y, _, h = rows.rect
+    return next((x + 2, down + 2) for down in range(y, y + h) if getattr(rows.at((x + 2, down)), "key", None) == key)
+
+
+def under(rows: List) -> Pos:
+    """A place of a list that is under its last row."""
+    x, y, _, h = rows.rect
+    return next((x + 2, down) for down in range(y + h - 1, y, -1) if rows.at((x + 2, down)) is None)
+
+
+@unittest.skipUnless(pygame, NEEDS)
+class Walked(unittest.TestCase):
+    """The window walked once through its states, the mouse rested all over each: what the status bar said there.
+
+    The states are the trailer piece with its song as notes, drums, mixer and layers, a copy of the arcade example
+    with its song in each of those, a sound of each kind, an instrument and an FM instrument, the window that
+    writes files on each tab, the chooser for a file to open and for a new one, and the first screen.
+
+    A widget needs a line where the mouse can rest on it: where it is the topmost one that is seen and takes
+    the mouse. A label, a meter and the picture of an intro take nothing from the mouse, so they need none: the
+    line under them is that of what they stand on. Of the widgets that do take the mouse one is let through
+    with no line: the sign over the count of findings in the top bar, which the tests of the shell hold to no
+    line unless the checks could not run.
+
+    No render is waited for: every render and the checks are refused at once. So the wave of a sound, the
+    scope and the spectrum have nothing to read out here, and no finding has its button. What those say is
+    held by the tests of their own modules. The menus are not walked either: their items say what they do.
+    """
+
+    folder: Path
+    #: The widgets that said nothing, each by its state and its kind, every line that was said, and the lines
+    #: said on each kind of thing of `KINDS`.
+    silent: list[str]
+    lines: set[str]
+    found: dict[str, set[str]]
+
+    @classmethod
+    def setUpClass(cls) -> None:
+        folder = tempfile.TemporaryDirectory()
+        cls.addClassCleanup(folder.cleanup)
+        cls.folder = Path(folder.name)
+        # No thread is left to run into another test, and neither is a window or a sound output.
+        cls.addClassCleanup(settle)
+        cls.addClassCleanup(pygame.mixer.quit)
+        cls.addClassCleanup(pygame.display.quit)
+        patches = [mock.patch("pygame.display.get_desktop_sizes", return_value=[(1920, 1080)]),
+                   *(mock.patch.object(owner, name, side_effect=refused)
+                     for owner, name in ((gui_model, "render_stems"), (gui_model, "render_entry"), (checks, "run")))]
+        for patch in patches:
+            patch.start()
+            cls.addClassCleanup(patch.stop)
+        cls.silent, cls.lines, cls.found = [], set(), {}
+        (cls.folder / "sub").mkdir()
+        shutil.copyfile(EXAMPLES / "arcade.json", cls.folder / "arcade.json")
+        for walk, path in ((cls.piece, EXAMPLES / "piece.json"), (cls.arcade, cls.folder / "arcade.json"),
+                           (cls.first, None)):
+            app = start(path)
+            try:
+                walk(app)
+            finally:
+                app.close()
+
+    @classmethod
+    def say(cls, ui: Ui, pos: Pos) -> str:
+        """Rest the mouse at a position, and give the line the status bar then has. It is one of `lines`."""
+        ui.handle(Event("move", pos))
+        line = ui.help
+        cls.lines.add(line)
+        return line
+
+    @classmethod
+    def at(cls, what: str, app: App, places: Iterable[Pos]) -> None:
+        """Rest the mouse at each of some places of one kind of thing, and keep what was said there."""
+        cls.found.setdefault(what, set()).update(cls.say(app.ui, pos) for pos in places)
+
+    @classmethod
+    def walk(cls, app: App, state: str) -> None:
+        """Rest the mouse all over the window as it is now, and note each widget that said nothing somewhere.
+
+        The mouse rests at every `STEP` pixels each way, and on each widget that takes the mouse and has none
+        of those places, at the first place where it is the topmost. With a window open over the others, it is
+        that one that is walked. A widget is noted once, at the first place where it said nothing.
+        """
+        frame(app)
+        ui = app.ui
+        # The widgets that are seen, the topmost first: the one a place is on is the first of them it hits.
+        shown = [ui.modal] if ui.modal is not None else [widget for widget in reversed(ui.widgets) if widget.visible]
+        sign = app.panels["top"].sign if app.panels else None
+        reached: set[int] = set()
+        noted: set[int] = {id(sign)}
+
+        def rest(pos: Pos) -> Widget | None:
+            widget = next((widget for widget in shown if widget.hit(pos)), None)
+            if widget is not None:
+                reached.add(id(widget))
+                if not cls.say(ui, pos) and id(widget) not in noted:
+                    noted.add(id(widget))
+                    cls.silent.append(f"{state}: {type(widget).__name__} at {pos}")
+            return widget
+
+        width, height = ui.size
+        for pos in across((0, 0, width, height), STEP):
+            rest(pos)
+        for widget in shown:
+            if id(widget) not in reached and widget.hit(middle(widget.rect)):
+                next((pos for pos in across(widget.rect, 1) if rest(pos) is widget), None)
+
+    @classmethod
+    def piece(cls, app: App) -> None:
+        """Walk the trailer piece: the notes of a tuned channel, its drums, its mixer and its layers."""
+        cls.walk(app, "the piece, its notes")
+        song = app.panels["middle"].panels["song"]
+        cls.press(app, spot(song.list, "kick"))
+        cls.walk(app, "the piece, its drums")
+        for index, state in ((1, "its mixer"), (2, "its layers")):
+            song.choice.pick(index)
+            cls.walk(app, f"the piece, {state}")
+
+    @staticmethod
+    def press(app: App, pos: Pos) -> None:
+        """Press the left button at a position and let it go there."""
+        app.ui.handle(Event("down", pos, button=1))
+        app.ui.handle(Event("up", pos, button=1))
+
+    @staticmethod
+    def change(app: App, where: str, value: object) -> None:
+        """Put a value at a place of the project that is open, as one step. One that is refused fails the walk."""
+        if not app.session.change(where, value, f"{where} for the walk"):
+            raise AssertionError(f"{where} was refused: {app.session.message}")
+
+    @classmethod
+    def arcade(cls, app: App) -> None:
+        """Walk the copy of the arcade example: its song, its sounds, two instruments, and the windows over them."""
+        ui = app.ui
+        song = app.panels["middle"].panels["song"]
+        cls.walk(app, "the song, its notes")
+        things = app.panels["left"].list
+        cls.at("the left list, a heading", app, [spot(things, "songs")])
+        cls.at("the left list, a song", app, [spot(things, ("song", "tune"))])
+        cls.at("the left list, a sound", app, [spot(things, ("sound", "coin"))])
+        cls.at("the left list, an instrument", app, [spot(things, ("instrument", "lead"))])
+        cls.at("the left list, under its rows", app, [under(things)])
+        seen = song.strip.map
+        cls.at("the strip, a block", app, [middle(seen.block(0))])
+        cls.at("the strip, off its blocks", app, [next(pos for pos in across(song.strip.rect, 1)
+                                                      if seen.block_at(pos) is None)])
+        cls.at("the channels, a heading", app, [spot(song.list, (songpanel.TUNED,))])
+        cls.at("the channels, a channel", app, [spot(song.list, "lead")])
+        cls.at("the channels, under the rows", app, [under(song.list)])
+        cls.roll(app, song.roll)
+        cls.press(app, spot(song.list, "kit"))
+        cls.walk(app, "the song, its drums")
+        grid = song.steps.grid
+        squares = [middle(grid.square(drum, row)) for drum in grid.drums_in_view() for row in grid.rows_in_view()]
+        cls.at("the steps, the squares", app, [pos for pos in squares if inside(grid.area, pos)])
+        cls.at("the steps, the names of the drums", app, [(song.steps.rect[0] + 2, grid.y(0) + 2)])
+        song.choice.pick(1)
+        cls.walk(app, "the song, its mixer")
+        name = song.mixer.strips[0].name
+        cls.at("the mixer, the name of a channel", app, [middle(name.rect)])
+        cls.at("the mixer, between its strips", app, [next(pos for pos in across(song.mixer.desk.rect, 1)
+                                                          if over(ui, pos) is song.mixer.desk)])
+        cls.change(app, "songs.tune.intro", {"order": ["a"]})
+        song.choice.pick(2)
+        cls.walk(app, "the song, its layers")
+        table = song.layers.table
+        laid = table.laid
+        button, version = layerview.head_parts(laid.heads[0])
+        cls.at("the layers, a switch", app, [middle(layerview.cell(laid, 0, 0))])
+        cls.at("the layers, a group", app, [middle(laid.rows[0])])
+        cls.at("the layers, a version", app, [middle(version), middle(button)])
+        cls.at("the layers, the buttons that add", app, [middle(laid.add_version), middle(laid.add_group)])
+        cls.at("the layers, off all of them", app, [next(pos for pos in across(table.rect, 1)[::-1]
+                                                        if layerview.hit(laid, pos) is None)])
+        cls.sounds(app)
+        cls.instruments(app)
+        cls.windows(app)
+
+    @classmethod
+    def roll(cls, app: App, roll: Roll) -> None:
+        """Rest the mouse on each kind of thing of the piano roll, as it shows the first channel of the song."""
+        seen = roll.map
+        bars = [seen.note(note.row, note.rows, note.pitch) for note in roll.notes]
+        x, y, w, _ = next(bar for bar in bars if inside(seen.grid, bar[:2])
+                          and inside(seen.grid, (bar[0] + bar[2] - 1, bar[1] + bar[3] - 1)))
+        cls.at("the roll, a note", app, [(x, y + 1), (x + w - 1, y + 1)])
+        cls.at("the roll, empty grid", app, [next(pos for pos in across(seen.grid, 3) if roll.note_at(pos) is None)])
+        cls.at("the roll, a key", app, [middle(seen.keys)])
+        cls.at("the roll, the ruler", app, [middle(seen.ruler)])
+        cls.at("the roll, the chord of a bar", app, [middle(seen.chords)])
+        cls.at("the roll, the levels", app, along(seen.lane))
+
+    @classmethod
+    def sounds(cls, app: App) -> None:
+        """Walk a sound of each kind, and rest the mouse on each kind of thing of the view of each."""
+        session = app.session
+        view = app.panels["middle"].panels["sound"].view
+        cls.change(app, "sounds.hum", HUM)
+        for name, kind in (("powerup", "a sound"), ("blip", "variants"), ("explosion", "parts"),
+                           ("hum", "a held sound")):
+            session.pick("sound", name)
+            cls.walk(app, f"{kind}, {name}")
+            seen = view.map
+            cls.at(f"{kind}, the ruler", app, along(seen.ruler, 1))
+            if name != "powerup":
+                cls.at(f"{kind}, the labels", app, along(seen.names, 1))
+            else:
+                # The first place that is on a note, and the places of that note from there to its right end.
+                x, y = next(pos for pos in across(seen.grid, 3) if view.bar_at(pos) is not None)
+                on = [(right, y) for right in range(x, x + seen.grid[2])
+                      if view.bar_at((right, y)) == view.bar_at((x, y))]
+                cls.at("a sound, a note", app, [on[0], on[-1]])
+                cls.at("a sound, empty grid", app, [next(pos for pos in across(seen.grid, 3)
+                                                         if view.bar_at(pos) is None)])
+                cls.at("a sound, the wave and the keys", app, [middle(seen.wave), middle(seen.keys)])
+
+    @classmethod
+    def instruments(cls, app: App) -> None:
+        """Walk an instrument of a plain wave and one of the FM wave, and rest the mouse on the things of each."""
+        session = app.session
+        panel = app.panels["middle"].panels["instrument"]
+        session.pick("instrument", "lead")
+        cls.walk(app, "an instrument")
+        table = panel.tables["vol"]
+        seen = table.map
+        cls.at("a step table, a step", app, [(seen.x(0), middle(seen.zone)[1]), (seen.x(0), middle(seen.strip)[1])])
+        cls.at("a step table, its heading and its handle", app, [middle(seen.head),
+                                                                 middle(seen.handle(len(table.steps)))])
+        cls.at("the keyboard, a key", app, [middle(instpanel.keyboard(panel.keys.rect, panel.keys.low)[0][1])])
+        cls.at("the instrument, between its parts", app, [next(pos for pos in across(panel.page.rect, 1)
+                                                              if over(app.ui, pos) is panel.page)])
+        drive = json.loads((EXAMPLES / "piece.json").read_text(encoding="utf-8"))["instruments"]["fmdrive"]
+        cls.change(app, "instruments.fmdrive", drive)
+        session.pick("instrument", "fmdrive")
+        cls.walk(app, "an FM instrument")
+        cls.at("the wirings, a picture", app, [middle(fmview.cells(panel.wiring.rect)[0])])
+        envelope = panel.operators[0]["env"]
+        cls.at("an envelope, a point", app, [envelope.map.spots(fmview.settings(envelope.op))[0]])
+        cls.at("an envelope, off its points", app, [next(pos for pos in across(envelope.rect, 1)
+                                                        if envelope.at(pos) is None)])
+
+    @classmethod
+    def windows(cls, app: App) -> None:
+        """Walk the window that writes files on each of its tabs, and the chooser as it opens a file and names one."""
+        session, ui = app.session, app.ui
+        session.pick("song", "tune")
+        app.export()
+        window = ui.modal
+        at = exports.parts(ui.size)
+        for index, (state, parts) in enumerate((("its parts", ("tabs", "row1", "change", "list", "write", "close")),
+                                                ("a build", ("row0", "row1", "row2")),
+                                                ("the listen page", ("row0",)))):
+            window.tabs.pick(index)
+            cls.walk(app, f"the export, {state}")
+            cls.at(f"the export, {state}", app, [middle(at[part]) for part in parts])
+        cls.at("the export, off its parts", app, [middle(at["folder"]), middle(at["said"]), middle(at["title"])])
+        window.tabs.pick(0)
+        for name, state in (("blip", "a sound of variants"), ("hum", "a held sound")):
+            session.pick("sound", name)
+            cls.walk(app, f"the export, {state}")
+            cls.at(f"the export, {state}", app, [middle(at["row1"])])
+        window.change.fire()
+        cls.walk(app, "the export, the box of its folder")
+        cls.at("the export, the box of its folder", app, [middle(at["folder"])])
+        ui.handle(Event("key", key="escape"))
+        window.close()
+        app.browse()
+        cls.walk(app, "a chooser")
+        at, rows = files.arrange(ui.size), ui.modal.list
+        cls.at("a chooser, its rows", app, [spot(rows, (files.FOLDER, files.UP)), spot(rows, (files.FOLDER, "sub")),
+                                            spot(rows, (files.FILE, "arcade.json"))])
+        cls.at("a chooser, its foot", app, [middle(at[part]) for part in files.PART_HELP])
+        cls.at("a chooser, off its parts", app, [middle(at["title"]), middle(at["folder"]), under(rows)])
+        ui.handle(Event("key", key="escape"))
+        app.keep_copy()
+        cls.walk(app, "a chooser for a new file")
+        cls.at("a chooser for a new file, a file", app, [spot(ui.modal.list, (files.FILE, "arcade.json"))])
+        ui.handle(Event("key", key="escape"))
+
+    @classmethod
+    def first(cls, app: App) -> None:
+        """Walk the first screen, with a file that was opened before and is gone, and each kind of row of its list."""
+        gone = str(cls.folder / "gone.json")
+        app.first.show(files.examples(), [str(cls.folder / "arcade.json"), gone])
+        cls.walk(app, "the first screen")
+        rows = app.first.list
+        cls.at("the first screen, its list", app, [spot(rows, key) for key in ("examples", ("recent", gone))])
+
+    def test_every_widget_the_mouse_can_rest_on_says_a_line_wherever_it_rests(self) -> None:
+        self.assertEqual(self.silent, [])
+        # The walk went through every state, and heard far more than the lines that are written out in the code.
+        self.assertGreater(len(self.lines), 200)
+
+    def test_each_kind_of_thing_in_a_widget_of_several_has_its_line(self) -> None:
+        self.assertEqual(sorted(self.found), sorted(KINDS))
+        wrong = {what: sorted(self.found[what]) for what, begins in KINDS.items()
+                 if "" in self.found[what] or not all(any(line.startswith(begin) for line in self.found[what])
+                                                      for begin in begins)}
+        self.assertEqual(wrong, {})
+        # An instrument of a song's own is named with its song, as the status bar names what is picked.
+        self.assertEqual(browser.row_help(Row(("instrument", "tune.soft"), "soft", tag="tune"), ("lead",)),
+                         "click to show instrument soft of tune and hear it, or press the right button for more")
+
+    def test_no_line_is_wider_than_the_room_the_status_bar_has_in_the_smallest_window(self) -> None:
+        # At the right end of the bar stands what is picked: the longest that the two examples can have there.
+        things = [(kind, name) for example in ("arcade.json", "piece.json")
+                  for section, kind in gui_model.KINDS.items()
+                  for name in json.loads((EXAMPLES / example).read_text(encoding="utf-8")).get(section, {})]
+        picked = max((exports.pick_words(thing) for thing in things), key=len)
+        self.assertEqual(picked, "INSTRUMENT fmdrive")
+        # The room is what `App._status` leaves the line: the bar less its two margins, the pick and the gap.
+        room = SMALLEST - 2 * theme.BAR_MARGIN - Font.width(picked) - theme.GROUP_GAP
+        self.assertGreater(room, SMALLEST // 2)
+        self.assertEqual(sorted(line for line in self.lines if Font.width(line) > room), [])
+
+    def test_a_line_begins_with_no_capital_and_ends_with_no_full_stop(self) -> None:
+        self.assertEqual(sorted(line for line in self.lines if line[:1].isupper() or line.endswith(".")), [])
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -56,6 +56,12 @@ LAYERS = "LAYERS"
 #: What the two headings of the list of channels read.
 TUNED = "TUNED"
 DRUMS = "DRUMS"
+#: What the list of the channels says of itself where the mouse is on no row, and the roll and the steps where a
+#: press would do nothing.
+LIST_HELP = "the channels of the song: a dim one is not heard just now, or this pattern has nothing written for it"
+ROLL_HELP = ("the wheel moves along the keys, with shift along the rows, and with ctrl it zooms: the right button "
+             "removes a note")
+STEPS_HELP = "a lane for each drum: the wheel on a hit sets its level, and anywhere else it moves along the lanes"
 #: What is said, after the channel and its pattern, of an edit that ended after the channel was changed outside.
 MEANWHILE = "was changed outside while it was edited here: this edit stands, and undo brings the other back"
 #: The song's own settings are two lines, each as high as a small button: its tempo and its key. These are the
@@ -200,6 +206,13 @@ def channel_rows(channels: Sequence[Channel], heard: Collection[str] | None = No
     return rows
 
 
+def channel_help(row: Row) -> str:
+    """The line of help of a row of the list of the channels: of a heading, and of a channel by its name."""
+    if row.head:
+        return "click to fold these channels away or bring them back"
+    return f"click to show channel {row.key}, or press the right button for more"
+
+
 def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
@@ -328,11 +341,13 @@ class SongPanel(Panel):
                                         named=self._rename))
         self.choice = self.add(Choice(nowhere, (NOTES, MIXER, LAYERS), changed=lambda index: self._seen(),
                                       help="the notes of one channel, the levels of them all, or the layers and intro"))
-        self.list = self.add(List(nowhere, changed=self._pick, asked=self._ask_channel))
+        self.list = self.add(List(nowhere, changed=self._pick, help=LIST_HELP, asked=self._ask_channel))
+        self.list.told = channel_help
         self.bar = ChannelBar(self)
-        self.roll = self.add(Roll(nowhere, edited=lambda notes, label: self._save(self.roll.channel, notes, label),
+        self.roll = self.add(Roll(nowhere, ROLL_HELP,
+                                  edited=lambda notes, label: self._save(self.roll.channel, notes, label),
                                   sounded=self._sound, typed=self._key, chord_asked=self._ask_chord))
-        self.steps = self.add(Steps(nowhere, edited=self._save, sounded=self._drum))
+        self.steps = self.add(Steps(nowhere, STEPS_HELP, edited=self._save, sounded=self._drum))
         self.fault = self.add(Label(nowhere, "", theme.FAULT, "centre"))
         self.tempo = self.add(Stepper(nowhere, ("",), changed=self._tempo,
                                       help="how fast the song plays, in beats a minute"))

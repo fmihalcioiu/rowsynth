@@ -121,7 +121,8 @@ class TopBar(Panel):
         nowhere = (0, 0, 0, 0)
         self.asked = asked
         self.file = ui.add(Button(nowhere, FILE, action=self._file,
-                                  help="a new project, another file, a copy of this one, or the first screen"))
+                                  help="a new project, another file, a copy of this one, the export of files, "
+                                       "or the first screen"))
         self.name = ui.add(Label(nowhere, session.model.path.name, theme.TEXT))
         self.undo = ui.add(Button(nowhere, icon="undo", action=session.undo))
         self.redo = ui.add(Button(nowhere, icon="redo", action=session.redo))

@@ -307,6 +307,23 @@ class Gone(unittest.TestCase):
         click(ui, spot(first.list, ("recent", kept)))
         self.assertEqual((pressed, len(said)), ([("recent", kept)], 1))
 
+    def test_the_keys_that_move_the_pick_step_over_a_dim_row_of_the_first_screen(self) -> None:
+        kept, gone = self.recent
+        last = os.path.join("music", "kept as well.json")
+        ui, pressed, said = Ui(), [], []
+        first = files.First(ui, None, None, pressed.append, (), [kept, gone, last], said.append, self.there)
+        first.place((0, 0, *theme.DESIGN))
+        click(ui, spot(first.list, ("recent", kept)))
+        press(ui, "down")
+        self.assertEqual((pressed, said, first.list.picked),
+                         ([("recent", kept), ("recent", last)], [], ("recent", last)))
+        press(ui, "up")
+        self.assertEqual((pressed[2:], said, first.list.picked), ([("recent", kept)], [], ("recent", kept)))
+        # Any other list stops at a dim row, which is a row like the rest there.
+        plain = Ui().add(List((0, 0, 100, 100), first.list.rows, ("recent", kept)))
+        plain.on(Event("key", key="down"), ui)
+        self.assertEqual(plain.picked, ("recent", gone))
+
 
 @unittest.skipUnless(pygame, NEEDS)
 class InTheWindow(unittest.TestCase):

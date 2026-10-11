@@ -5,7 +5,7 @@ import math
 import os
 import shutil
 import threading
-from collections.abc import Sequence
+from collections.abc import Container, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -24,6 +24,7 @@ from .dials import Stepper
 from .font import ADVANCE, CUT
 from .layout import Rect
 from .lists import List, Row
+from .model import own
 from .popups import ask
 from .theme import Colour
 from .ui import Button, Choice, Event, Pos, Toggle, Ui, Widget, inside
@@ -68,8 +69,9 @@ WORDS = {"render": ("PICKED", "", ""), "build": ("FORMAT", "RATE", "SONGS"), "pa
 #: Why the first tab can write nothing while no sound and no song is picked.
 NO_PICK = "pick a sound or a song in the list at the left: THIS writes the picked one"
 
-#: The help line of each part.
+#: The help line of each part, and under "window" of the window where the mouse is on none of them.
 HELP = {
+    "window": "writes files into the folder that is shown: escape closes this window",
     "tabs": "what to write: the picked sound or song, the whole project for a program to play, or the listen page",
     "stems": "write the song as one mono loop a channel, each CHANNEL.wav, in place of the one stereo file",
     "variant": "the variant of the sound to write: the first as NAME.wav, or one by its number, counted from 0",
@@ -156,6 +158,19 @@ def size_words(size: int | None) -> str:
     if size < 1024 * 1024:
         return f"{size / 1024:.0f} KB"
     return f"{size / 1024 / 1024:.1f} MB"
+
+
+def pick_words(picked: tuple[str, str] | None, shared: Container[str] = ()) -> str:
+    """What the first tab says is picked, as the status bar says it: its kind in capitals and then its name.
+
+    An instrument of a song's own is named with its song, as "INSTRUMENT lead of tune". `shared` is the names of
+    the project's instruments, by which `model.own` knows one of those. Nothing picked is `NOTHING`.
+    """
+    if picked is None:
+        return NOTHING
+    kind, name = picked
+    song, name = own(name, shared) if kind == "instrument" else (None, name)
+    return f"{kind.upper()} {name}" + (f" of {song}" if song else "")
 
 
 def counted(count: int) -> str:
@@ -448,7 +463,7 @@ class Export(Widget):
         """`ui` is the Ui the window is opened on, and `start` the tab it opens at, one of `TABS`."""
         if start not in TABS:
             raise RowSynthError(f"the window that writes files opens at one of {', '.join(TABS)}, not at {start!r}")
-        super().__init__((0, 0, 0, 0))
+        super().__init__((0, 0, 0, 0), HELP["window"])
         self.ui = ui
         self.session = session
         self.folder = session.model.path.parent / OUT
@@ -604,7 +619,7 @@ class Export(Widget):
         """Use everything: it goes to the part it is for, or to the box of the folder while that is open."""
         self._take()
         self.inner.handle(event)
-        self.help = self.inner.help
+        self.help = self.inner.help or HELP["window"]
         return True
 
     def draw(self, canvas: Canvas) -> None:
@@ -621,8 +636,8 @@ class Export(Widget):
         for row, word in enumerate(self.words()):
             canvas.text_in(word, at[f"word{row}"], theme.DIM)
         if tab == "render":
-            kind, name = self._seen[1] or (NOTHING, "")
-            canvas.text_in(f"{kind.upper()} {name}".strip(), at["picked"], theme.TEXT)
+            project, picked = self._seen
+            canvas.text_in(pick_words(picked, project.instruments), at["picked"], theme.TEXT)
         canvas.text_in(FOLDER, at["folder_word"], theme.DIM)
         canvas.box(at["folder"], theme.BACKGROUND)
         canvas.frame(at["folder"], theme.LINE)
@@ -631,7 +646,7 @@ class Export(Widget):
         words, colour = self.said()
         canvas.text_in(words, at["said"], colour)
         self.inner.draw(canvas)
-        self.help = self.inner.help
+        self.help = self.inner.help or HELP["window"]
 
     def _changed(self, _: object = None) -> None:
         """Take a setting that was changed: the plan is another, and how the last write ended is said no longer."""

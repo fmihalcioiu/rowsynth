@@ -161,8 +161,9 @@ class List(Widget):
 
     A click on a row picks it, and `changed` is called with its key, also when it was picked already. A click on a
     heading folds the rows under it away, and another brings them back: a picked row that is folded away stays
-    picked. The up, down, home and end keys move the pick, past headings and folded rows. The wheel scrolls, and
-    so does the bar that stands at the right edge while the rows do not fit.
+    picked. The up, down, home and end keys move the pick, past headings and folded rows, and past dim rows as
+    well where `skips_dim` is set. The wheel scrolls, and so does the bar that stands at the right edge while the
+    rows do not fit.
 
     `rows` can be set at any time: the pick stays when its key is still there, and headings stay folded by their
     key. `glow` is from a key to a strength from 0 to 1, for the owner to set: the background of such a row has
@@ -171,6 +172,9 @@ class List(Widget):
     A press of the right button on a row that is no heading calls `asked` with the key of the row and the
     position, and picks nothing: the owner can open a menu there. `name_rect` is where the text of a row is
     drawn, for a box that is typed into to be put over. The list opens nothing itself.
+
+    `told` is for the owner to set: it is given the row the mouse is on, and gives the line of help of that row.
+    Where it gives none, and off the rows, the line is the one the list was made with.
     """
 
     def __init__(self, rect: Rect, rows: Iterable[Row] = (), picked: Hashable | None = None,
@@ -180,6 +184,8 @@ class List(Widget):
         self.picked: Hashable | None = picked
         self.changed = changed
         self.asked = asked
+        self.told: Callable[[Row], str] | None = None
+        self.skips_dim = False
         self.glow: dict[Hashable, float] = {}
         self.scroll = Scroll()
         self._folded: set[Hashable] = set()
@@ -188,6 +194,16 @@ class List(Widget):
         #: While the thumb is dragged: how far down the mouse took hold of it, and the offset there was then.
         self._grab: tuple[int, int] | None = None
         self.rows = rows
+
+    @property
+    def help(self) -> str:
+        """What `told` says of the row under the mouse, or the line the list was made with."""
+        row = None if self.told is None else self.at(self._mouse)
+        return (self.told(row) if row is not None else "") or self._help
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
 
     @property
     def rows(self) -> tuple[Row, ...]:
@@ -305,7 +321,8 @@ class List(Widget):
         and up to the last. The keys are not used while there is no row to pick.
         """
         keys = [row.key for row in self._rows if not row.head]
-        shown = {place.row.key for place in self._placed if not place.row.head}
+        shown = {place.row.key for place in self._placed
+                 if not place.row.head and not (self.skips_dim and place.row.dim)}
         if event.mods or event.key not in KEYS or not shown:
             return False
         here = keys.index(self.picked) if self.picked in keys else None

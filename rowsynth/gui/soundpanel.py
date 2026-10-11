@@ -223,8 +223,8 @@ class SoundPanel(Panel):
     them as they were, and the session says why. After a save the sound is played once, the variant that was
     changed where it has variants, unless the session's `audition` is off. While a gesture is under way in the
     view, or a knob of the bar is under the hand, nothing is read: what changed meanwhile, here or outside, is
-    shown when the hand has let go. A note that is placed, or moved to another key, is heard where its voice
-    names its instrument.
+    shown when the hand has let go. A note that is placed, or moved to another key, is heard, with the
+    instrument its voice names or has written in place.
 
     What kind of entry a sound is, and what belongs to the kind, is changed here as well, each change one save
     of the whole entry and one step. `kinds`, in the heading, shows the kind and opens a menu of the four: an

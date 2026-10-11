@@ -195,6 +195,19 @@ class Owned(unittest.TestCase):
             with self.subTest(message=message):
                 self.assertEqual(refusal(shared, *given), message)
 
+    def test_the_only_thing_in_a_song_s_table_made_shared_takes_the_table_with_it(self) -> None:
+        data = copy.deepcopy(DATA)
+        song = data["songs"]["own"]
+        song["instruments"] = {"buzz": {"wave": "saw", "vol": 9}}
+        song["channels"]["x"]["inst"] = song["channels"]["y"]["inst"] = "buzz"
+        changes = shared(data, "own", "buzz")
+        self.assertEqual(changes, [("instruments.buzz", {"wave": "saw", "vol": 9}), ("songs.own.instruments", NOTHING)])
+        made = applied(data, changes)
+        # No empty table is left in the song, which plays the instrument as the project's from then on.
+        self.assertEqual(("instruments" in made["songs"]["own"], list(made["instruments"])),
+                         (False, ["lead", "lead2", "thud", "buzz"]))
+        np.testing.assert_array_equal(heard(made, "song", "own"), heard(data, "song", "own"))
+
     def test_an_own_instrument_is_taken_out_of_its_song_unless_the_song_still_plays_it(self) -> None:
         data = with_buzz()
         # The song plays its own lead by the name the project has for another: only its own uses are found.
