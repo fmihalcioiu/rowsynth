@@ -1,15 +1,17 @@
-"""The piano roll: one channel of one pattern as bars on a grid of rows and keys, and the sums that place them."""
+"""The piano roll: one channel of one pattern as bars on a grid of rows and keys, its sums, and its gestures."""
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
 from ..song import _NAMES
-from . import songview, theme
+from . import noteedit, songview, theme
 from .font import Font
 from .layout import Rect
+from .noteedit import Picked
 from .songview import Channel, Note, Pattern
 from .theme import Colour
 from .ui import NOWHERE, Event, Pos, Ui, Widget, inside
@@ -51,6 +53,22 @@ WHEEL_PX = 36
 LIGHTER = 0.45
 DARKER = 0.4
 GHOST = 0.6
+#: How many pixels at the right end of the bar of a note are for stretching it. A press further left moves it.
+END_W = 3
+#: How many pixels the mouse may stray from where it was pressed, to any side, and not have dragged: a click wobbles.
+SLACK = 2
+#: How many rows long the note is that a click places, until one has been placed by a drag or stretched.
+LENGTH = 4.0
+
+#: What a press can begin, as `begins` calls it.
+PLACE, MOVE, STRETCH, PICK, BOX, REMOVE, LEVEL = "place", "move", "stretch", "pick", "box", "remove", "level"
+#: What the help line says anywhere on a pattern that has a note the rows cannot say.
+OFF_GRID = "this pattern has lengths the grid does not hold: it is shown and not changed"
+
+# What was done to the notes by the gestures that are listed with a count of notes.
+_DONE = {PLACE: "placed", MOVE: "moved", STRETCH: "stretched", REMOVE: "removed"}
+_NO_MODS: frozenset[str] = frozenset()
+_CTRL = frozenset({"ctrl"})
 
 
 def _px(value: float) -> int:
@@ -77,6 +95,24 @@ def black(pitch: int) -> bool:
 def name(pitch: int) -> str:
     """A pitch as a channel's text spells it, flats as `transpose` spells them, with its octave: 60 is c4, 63 e-4."""
     return f"{_NAMES[pitch % 12]}{pitch // 12 - 1}"
+
+
+def counted(count: int, done: str) -> str:
+    """The few words that what was done to so many notes is listed with: `note moved`, `2 notes moved`."""
+    return f"note {done}" if count == 1 else f"{count} notes {done}"
+
+
+def path(start: Pos, end: Pos) -> list[Pos]:
+    """The pixels on the straight line from a position to another, the first left out: what the mouse passed."""
+    wide, high = end[0] - start[0], end[1] - start[1]
+    steps = max(abs(wide), abs(high))
+    return [(start[0] + _px(wide * step / steps), start[1] + _px(high * step / steps))
+            for step in range(1, steps + 1)]
+
+
+def _sounding(notes: Sequence[Note], row: float) -> int | None:
+    """Which of some notes sounds at a row: its index among them, or None where none does."""
+    return next((index for index, note in enumerate(notes) if note.row <= row < note.row + note.rows), None)
 
 
 @dataclass(frozen=True)
@@ -151,6 +187,28 @@ class Map:
         reach = level * (h - 4) // LEVELS
         return x, y + h - 2 - reach, min(w, LEVEL_W), reach
 
+    def level_at(self, y: int) -> int:
+        """The level whose bar in the lane reaches up to a y and no higher: 0 at its foot, and `LEVELS` at its top."""
+        _, top, _, h = self.lane
+        return min(max(math.ceil((top + h - 2 - y) * LEVELS / (h - 4)), 0), LEVELS)
+
+    def note_at(self, notes: Sequence[Note], pos: Pos) -> int | None:
+        """Which of some notes has its bar under a position on the grid: its index among them, or None for none."""
+        if inside(self.grid, pos):
+            # The last is drawn on top of the others.
+            for index in reversed(range(len(notes))):
+                if inside(self.note(notes[index].row, notes[index].rows, notes[index].pitch), pos):
+                    return index
+        return None
+
+    def moved(self, start: Pos, pos: Pos, grid: float = 1.0) -> tuple[float, int]:
+        """How many rows and how many pitches a drag from a position to another has moved by.
+
+        The rows are from the step of a grid that the drag began in to the step it is in now: whole steps of it.
+        """
+        return (noteedit.snapped(self.row_at(pos[0]), grid) - noteedit.snapped(self.row_at(start[0]), grid),
+                self.pitch_at(pos[1]) - self.pitch_at(start[1]))
+
     def rows(self) -> range:
         """The whole rows of which at least a pixel is on the grid."""
         x, _, w, _ = self.grid
@@ -181,17 +239,164 @@ class Map:
         return replace(self, row=min(max(self.row, -float(bar_rows)), last), top=top)
 
 
+def begins(seen: Map, notes: Sequence[Note], rows: float, pos: Pos, button: int = 1,
+           mods: frozenset[str] = _NO_MODS) -> tuple[str, int | None]:
+    """Which gesture a press at a position begins among some notes, in a pattern of `rows` rows, and on which note.
+
+    The left button in the lane sets levels: the note is the one that sounds at that row. On the grid the right
+    button removes. The left one on a note picks it with ctrl, and else moves it, or stretches it on the last
+    `END_W` pixels of its bar: a bar narrower than twice that is stretched at its last pixel only. Where no note
+    is, it draws a box with shift, and else places a note where the row is one of the pattern's and the key one of
+    the roll's. Any other press begins nothing: "" and None.
+    """
+    if button == 1 and inside(seen.lane, pos):
+        return LEVEL, _sounding(notes, seen.row_at(pos[0]))
+    if button not in (1, 3) or not inside(seen.grid, pos):
+        return "", None
+    index = seen.note_at(notes, pos)
+    if button == 3:
+        return REMOVE, index
+    if index is None:
+        if "shift" in mods:
+            return BOX, None
+        free = 0 <= seen.row_at(pos[0]) < rows and LOWEST <= seen.pitch_at(pos[1]) <= HIGHEST
+        return (PLACE if free else ""), None
+    if "ctrl" in mods:
+        return PICK, index
+    x, _, w, _ = seen.note(notes[index].row, notes[index].rows, notes[index].pitch)
+    return (STRETCH if pos[0] >= x + w - (END_W if w >= 2 * END_W else 1) else MOVE), index
+
+
+@dataclass
+class Gesture:
+    """A gesture that is under way: what a press began, among which notes, and where the mouse has been since.
+
+    kind is what `begins` called it, button the button that was pressed, and index the note it was pressed on, or
+    None. seen, notes, rows and grid are the sums of the roll, its notes, the rows of its pattern and the rows in
+    a step of its grid, all as they were at the press. picked is the picked notes as the press left them. new is
+    the note that a click here places. start is where the press was, and help what the help line said it does.
+    pos is where the mouse is now, and dragged whether it has been more than `SLACK` pixels from the press: until
+    then nothing is moved, stretched, made longer or boxed. passed has the notes it passed: for a removal those
+    under it, and for the levels those at its rows, each with the level its height gave last. heard is the pitch
+    at which the note under the press was heard last.
+    """
+
+    kind: str
+    button: int
+    index: int | None
+    seen: Map
+    notes: tuple[Note, ...]
+    rows: float
+    grid: float
+    picked: frozenset[int]
+    new: Note
+    start: Pos
+    help: str = ""
+    pos: Pos = field(init=False)
+    dragged: bool = field(default=False, init=False)
+    passed: dict[int, int] = field(default_factory=dict, init=False)
+    heard: float | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self.pos = self.start
+        self.heard = self.notes[self.index].pitch if self.index is not None else None
+        self._pass(self.start)
+
+    def to(self, pos: Pos) -> None:
+        """Take the mouse to another position, by way of every pixel between this one and that."""
+        for step in path(self.pos, pos):
+            self._pass(step)
+        self.pos = pos
+        self.dragged = self.dragged or max(abs(pos[0] - self.start[0]), abs(pos[1] - self.start[1])) > SLACK
+
+    def _pass(self, pos: Pos) -> None:
+        """Take note of what the mouse passes at a position: a note to remove, or a note and a level for it."""
+        left, _, wide, _ = self.seen.lane
+        index = None
+        if self.kind == REMOVE:
+            index = self.seen.note_at(self.notes, pos)
+        elif self.kind == LEVEL and left <= pos[0] < left + wide:
+            index = _sounding(self.notes, self.seen.row_at(pos[0]))
+        if index is not None:
+            # The note that was passed last is the last of them.
+            self.passed.pop(index, None)
+            self.passed[index] = self.seen.level_at(pos[1])
+
+    @property
+    def box(self) -> Rect | None:
+        """The box that is being drawn: from the pixel of the press to the pixel the mouse is on. None for no box."""
+        if self.kind != BOX or not self.dragged:
+            return None
+        (x, y), (now_x, now_y) = self.start, self.pos
+        return min(x, now_x), min(y, now_y), abs(now_x - x) + 1, abs(now_y - y) + 1
+
+    def gives(self) -> Picked:
+        """What a release where the mouse is now gives: the notes, and the indexes among them of the picked ones.
+
+        Each is what the rule of `noteedit` makes of it. A move or a stretch that has not dragged, or is back in
+        the step and on the key it began in, gives the notes there were.
+        """
+        seen, notes = self.seen, self.notes
+        by_rows, by_pitch = seen.moved(self.start, self.pos, self.grid) if self.dragged else (0.0, 0)
+        if self.kind == PLACE:
+            # Dragged, the note ends with the step of the grid the mouse is in, and is no shorter than a step.
+            rows = max(by_rows, 0.0) + self.grid if self.dragged else self.new.rows
+            return noteedit.place(notes, replace(self.new, rows=rows), self.rows), frozenset()
+        if self.kind == MOVE and (by_rows or by_pitch):
+            return noteedit.move(notes, self.picked, by_rows, by_pitch, self.rows, LOWEST, HIGHEST)
+        if self.kind == STRETCH and by_rows:
+            return noteedit.stretch(notes, self.picked, by_rows, self.rows, self.grid)
+        if self.kind == BOX:
+            if not self.dragged:
+                return notes, frozenset()
+            return notes, noteedit.boxed(notes, seen.row_at(self.start[0]), seen.row_at(self.pos[0]),
+                                         seen.pitch_at(self.start[1]), seen.pitch_at(self.pos[1]))
+        if self.kind == REMOVE and self.passed:
+            return noteedit.remove(notes, self.passed)
+        if self.kind == LEVEL:
+            for index, level in self.passed.items():
+                notes, _ = noteedit.with_level(notes, {index}, level)
+        return notes, self.picked
+
+    def grabbed(self) -> Note:
+        """The note under the press of a move or a stretch, as a release where the mouse is now leaves it."""
+        notes, picked = self.gives()
+        # The picked notes keep their order, so it has the place among them that it had.
+        return notes[sorted(picked)[sorted(self.picked).index(self.index)]]
+
+    @property
+    def label(self) -> str:
+        """The few words for what the gesture did to the notes, as a list of what can be undone has them."""
+        if self.kind == LEVEL:
+            return "level changed"
+        count = {PLACE: 1, REMOVE: len(self.passed)}.get(self.kind, len(self.picked))
+        return counted(count, _DONE[self.kind])
+
+
 class Roll(Widget):
     """The piano roll: the notes of one channel in one pattern as bars, between a strip of keys and a lane of levels.
 
-    It shows, and does not change a note. `ghosts` is whether the notes of the other channels that are not drums
-    are drawn dim behind. `playhead` is the row that is playing, which can be a fraction, or None: the owner sets it
-    each frame. `row`, `top` and `row_w` are the view, as a `Map` has them. `help`, while the mouse is on a note or
-    on the grid of the pattern, says what is there; anywhere else it is the line the roll was made with.
+    The mouse and the keys place, move, stretch and remove its notes, and it saves nothing. When a gesture ends
+    and the notes are others than they were, `edited` is called with the channel's new notes and a few words for
+    the list of what can be undone, and the roll goes on showing what `show` gave it last: its owner saves, and
+    shows it the result. `sounded` is called with a pitch and an instrument for the owner to let be heard: when a
+    note is placed, and each time the note that the mouse moves comes to another pitch. `grid` is the rows in a
+    step of the grid, a whole number of them: a placed note begins on a step, and notes are moved and stretched
+    by whole steps. `picked` is the picked notes, and `drawn` the notes as a gesture that is under way would
+    leave them. The owner hands a key on with `key`.
+
+    `ghosts` is whether the notes of the other channels that are not drums are drawn dim behind. `playhead` is the
+    row that is playing, which can be a fraction, or None: the owner sets it each frame. `row`, `top` and `row_w`
+    are the view, as a `Map` has them. `help`, while the mouse is where a press does something, says what; anywhere
+    else it is the line the roll was made with. A pattern that is not on the grid is shown and not changed.
     """
 
-    def __init__(self, rect: Rect, help: str = "") -> None:
+    def __init__(self, rect: Rect, help: str = "", edited: Callable[[tuple[Note, ...], str], object] | None = None,
+                 sounded: Callable[[float, str], object] | None = None) -> None:
         super().__init__(rect, help)
+        self.edited = edited
+        self.sounded = sounded
+        self.grid = 1.0
         self.pattern: Pattern | None = None
         self.channel = ""
         self.bar_rows = 16
@@ -201,11 +406,26 @@ class Roll(Widget):
         self.row, self.top, self.row_w = 0.0, 72.0, ROW_W
         self._own: Channel | None = None
         self._mouse: Pos = NOWHERE
+        self._mods = _NO_MODS
+        # Whether the pattern is on the grid, so that its notes can be changed.
+        self._open = False
+        self._picked: frozenset[int] = frozenset()
+        self._gesture: Gesture | None = None
+        # What the last edit gave, until other notes are shown: its notes, and the picked ones among them.
+        self._gave: Picked | None = None
+        self._clip: tuple[Note, ...] = ()
+        # How long the last note was that was placed by a drag or stretched, and the last level that was set.
+        self._length = LENGTH
+        self._level = LEVELS
 
     @property
     def help(self) -> str:
-        """What the mouse is on, in plain words, or the line the roll was made with."""
-        return self._tell(self._mouse) or self._help
+        """What a press where the mouse is would do, in plain words, or the line the roll was made with.
+
+        While a gesture is under way it is what the press did that began it.
+        """
+        told = self._gesture.help if self._gesture is not None else self._tell(self._mouse, self._mods)
+        return told or self._help
 
     @help.setter
     def help(self, line: str) -> None:
@@ -220,6 +440,20 @@ class Roll(Widget):
     def notes(self) -> tuple[Note, ...]:
         """The notes of the channel that is shown, in the order they are written in."""
         return self._own.notes if self._own else ()
+
+    @property
+    def picked(self) -> frozenset[int]:
+        """Which of the notes are picked: their indexes among `notes`."""
+        return self._picked
+
+    @property
+    def drawn(self) -> tuple[Note, ...]:
+        """The notes as they are drawn: while a gesture is under way, what a release where the mouse is gives."""
+        return self._now()[0]
+
+    def _now(self) -> Picked:
+        """The notes to draw and the picked ones among them: what the gesture under way gives, or what there is."""
+        return self._gesture.gives() if self._gesture is not None else (self.notes, self._picked)
 
     def _rows(self) -> float:
         """The rows of the pattern that is shown."""
@@ -236,6 +470,10 @@ class Roll(Widget):
         The view is fitted when the pattern or the channel is another than before, by their names. When the same
         ones are shown again, with other notes, the view stays. A channel the pattern does not have is refused,
         and so is a bar that is not four beats of whole rows.
+
+        What is picked stays picked while the notes are the ones there were. The notes that the last edit gave
+        are shown with what that edit left picked. With any other notes nothing is picked, and a gesture that is
+        under way is dropped.
         """
         own = next((found for found in pattern.channels if found.name == channel), None)
         if own is None:
@@ -243,7 +481,15 @@ class Roll(Widget):
         if bar_rows < 4 or bar_rows % 4:
             raise RowSynthError(f"a bar is four beats of whole rows, which {bar_rows} rows are not")
         another = self.pattern is None or (self.pattern.name, self.channel) != (pattern.name, channel)
+        same = not another and own.notes == self.notes
+        if not same or pattern.rows != self._rows():
+            self._gesture = None
+        if not same:
+            gave = None if another else self._gave
+            self._picked = gave[1] if gave is not None and gave[0] == own.notes else frozenset()
+            self._gave = None
         self.pattern, self.channel, self.bar_rows, self.colour, self._own = pattern, channel, bar_rows, colour, own
+        self._open = songview.on_grid(pattern)
         if another:
             self.fit()
         else:
@@ -257,36 +503,53 @@ class Roll(Widget):
 
     def note_at(self, pos: Pos) -> int | None:
         """Which of the channel's notes has its bar under a position: its index among them, or None for none."""
-        seen = self.map
-        if inside(seen.grid, pos):
-            notes = self.notes
-            # The last is drawn on top of the others.
-            for index in reversed(range(len(notes))):
-                if inside(seen.note(notes[index].row, notes[index].rows, notes[index].pitch), pos):
-                    return index
-        return None
+        return self.map.note_at(self.notes, pos)
 
-    def _tell(self, pos: Pos) -> str:
-        """What is at a position, in plain words: a note, or a place on the grid of the pattern. Else no words."""
-        index = self.note_at(pos)
-        if index is not None:
-            note = self.notes[index]
-            rows = round(note.rows, 2)
-            line = f"{name(round(note.pitch))}, {rows:g} {'row' if rows == 1 else 'rows'}, level {note.level}"
-            return line if note.inst == self._own.inst else f"{line}, instrument {note.inst}"
-        seen = self.map
-        row = math.floor(seen.row_at(pos[0]))
-        if not inside(seen.grid, pos) or not 0 <= row < self._rows():
+    def _tell(self, pos: Pos, mods: frozenset[str] = _NO_MODS, button: int = 1) -> str:
+        """What a press at a position would do, in plain words. No words where it would do nothing."""
+        if self.pattern is None:
             return ""
-        return f"{name(seen.pitch_at(pos[1]))}, bar {row // self.bar_rows + 1}, row {row % self.bar_rows + 1}"
+        seen = self.map
+        kind, index = begins(seen, self.notes, self._rows(), pos, button, mods)
+        if not kind or not self._open:
+            return OFF_GRID if kind else ""
+        named = name(round(self.notes[index].pitch)) if index is not None else ""
+        if kind == PLACE:
+            row = noteedit.snapped(seen.row_at(pos[0]), self.grid)
+            return (f"place a note at {name(seen.pitch_at(pos[1]))}, bar {int(row // self.bar_rows) + 1}, "
+                    f"row {row % self.bar_rows + 1:g}")
+        if kind == BOX:
+            return "pick the notes that a box touches"
+        if kind == PICK:
+            return f"leave {named} out of the picked notes" if index in self._picked else f"pick {named} as well"
+        if kind == LEVEL:
+            return f"set the level of {named} to {seen.level_at(pos[1])}" if named else ""
+        return f"{kind} {named}" if named else ""
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Note where the mouse is, and use the wheel: it scrolls the keys, with shift the rows, with ctrl it zooms."""
+        """Note where the mouse is, begin a gesture at a press and carry it on to its release, and use the wheel.
+
+        The wheel scrolls the keys, with shift the rows, and with ctrl it zooms: not while a gesture is under way.
+        A press is used when it begins a gesture, and the owner is told of no edit before its release. No key is
+        used: the owner hands one on with `key`.
+        """
         if event.kind == "key":
             return False
-        self._mouse = event.pos
-        if event.kind != "wheel":
-            return False
+        self._mouse, self._mods = event.pos, event.mods
+        if event.kind == "down":
+            # A press while another button is held begins nothing.
+            return ui.held is None and self._press(event)
+        gesture = self._gesture
+        if event.kind == "wheel":
+            return gesture is None and self._wheel(event)
+        if gesture is not None:
+            self._drag(event.pos)
+            if event.kind == "up" and event.button == gesture.button:
+                self._release()
+        return False
+
+    def _wheel(self, event: Event) -> bool:
+        """Scroll the keys by a step of the wheel, with shift the rows, and with ctrl zoom. It is always used."""
         seen = self.map
         if "ctrl" in event.mods:
             seen = seen.zoomed(seen.row_w + event.wheel, max(event.pos[0], seen.grid[0]))
@@ -297,15 +560,136 @@ class Roll(Widget):
         self._see(seen)
         return True
 
+    def _press(self, event: Event) -> bool:
+        """Begin the gesture that a press begins, and say whether it began one. A press on a note picks first.
+
+        The note is picked alone unless it was picked already. With ctrl it joins the picked ones, or leaves them.
+        """
+        self._gesture = None
+        if not self._open:
+            return False
+        seen, pos = self.map, event.pos
+        kind, index = begins(seen, self.notes, self._rows(), pos, event.button, event.mods)
+        if not kind:
+            return False
+        told = self._tell(pos, event.mods, event.button)
+        if kind == PICK:
+            self._picked ^= {index}
+        elif kind in (MOVE, STRETCH) and index not in self._picked:
+            self._picked = frozenset({index})
+        new = Note(noteedit.snapped(seen.row_at(pos[0]), self.grid), self._length, seen.pitch_at(pos[1]),
+                   self._level, self._own.inst)
+        self._gesture = Gesture(kind, event.button, index, seen, self.notes, self._rows(), self.grid, self._picked,
+                                new, pos, told)
+        return True
+
+    def _drag(self, pos: Pos) -> None:
+        """Take the gesture to where the mouse is, and tell of the note that is being moved at each new pitch."""
+        gesture = self._gesture
+        gesture.to(pos)
+        if gesture.kind == MOVE:
+            note = gesture.grabbed()
+            if note.pitch != gesture.heard:
+                gesture.heard = note.pitch
+                self._sound(note)
+
+    def _release(self) -> None:
+        """End the gesture: other notes than there were are handed on, and the same notes are picked as it leaves them.
+
+        The length of a note that was placed by a drag or stretched is kept for the next click, and the level that
+        was set last for the next note. A note that was placed is told of, to be heard.
+        """
+        gesture, self._gesture = self._gesture, None
+        notes, picked = gesture.gives()
+        if gesture.kind == LEVEL and gesture.passed:
+            self._level = list(gesture.passed.values())[-1]
+        if notes == gesture.notes:
+            self._picked = picked
+            return
+        placed = next(note for note in notes if note.row == gesture.new.row) if gesture.kind == PLACE else None
+        if placed is not None and gesture.dragged:
+            self._length = placed.rows
+        elif gesture.kind == STRETCH:
+            self._length = gesture.grabbed().rows
+        self._give(notes, picked, gesture.label)
+        if placed is not None:
+            self._sound(placed)
+
+    def _give(self, notes: tuple[Note, ...], picked: frozenset[int], label: str) -> None:
+        """Hand an edit on to the owner, and keep what it leaves picked for when its notes are shown."""
+        self._gave = (notes, picked)
+        if self.edited is not None:
+            self.edited(notes, label)
+
+    def _sound(self, note: Note) -> None:
+        """Tell the owner of a note to let be heard."""
+        if self.sounded is not None:
+            self.sounded(note.pitch, note.inst)
+
+    def key(self, event: Event) -> bool:
+        """Take a key that the owner hands on, and say whether it is one of the roll's.
+
+        Delete and backspace remove the picked notes. Up and down move them a semitone, with shift an octave, and
+        left and right a step of the grid. Ctrl and a picks all, ctrl and c copies the picked ones, and ctrl and
+        v pastes them at the row under the mouse, or at the first row in view when the mouse is off the grid.
+        Escape drops the gesture that is under way, or else what is picked. While a gesture is under way no
+        other key is the roll's, and on a pattern that is not on the grid none is.
+        """
+        if not self._open:
+            return False
+        pressed, mods = event.key, event.mods
+        if pressed == "escape" and not mods:
+            if self._gesture is None:
+                self._picked = frozenset()
+            self._gesture = None
+            return True
+        if self._gesture is not None:
+            return False
+        notes, picked, rows = self.notes, self._picked, self._rows()
+        if pressed in ("delete", "backspace") and not mods:
+            self._made(noteedit.remove(notes, picked), counted(len(picked), "removed"))
+        elif pressed in ("up", "down") and mods <= {"shift"}:
+            semis = (12 if mods else 1) * (1 if pressed == "up" else -1)
+            self._made(noteedit.shifted(notes, picked, semis, LOWEST, HIGHEST), counted(len(picked), "moved"))
+        elif pressed in ("left", "right") and not mods:
+            by_rows = self.grid if pressed == "right" else -self.grid
+            self._made(noteedit.move(notes, picked, by_rows, 0, rows, LOWEST, HIGHEST),
+                       counted(len(picked), "moved"))
+        elif pressed == "a" and mods == _CTRL:
+            self._picked = frozenset(range(len(notes)))
+        elif pressed == "c" and mods == _CTRL:
+            self._clip = noteedit.copied(notes, picked) if picked else self._clip
+        elif pressed == "v" and mods == _CTRL:
+            seen = self.map
+            at_row = seen.row_at(self._mouse[0] if inside(seen.grid, self._mouse) else seen.grid[0])
+            if self._clip:
+                made = noteedit.pasted(notes, self._clip, noteedit.snapped(max(at_row, 0.0), self.grid), rows)
+                self._made(made, counted(len(made[1]), "pasted"))
+        else:
+            return False
+        return True
+
+    def _made(self, made: Picked, label: str) -> None:
+        """Take what a key made of the notes: other notes are handed on, and the same ones picked as it leaves them."""
+        notes, picked = made
+        if notes == self.notes:
+            self._picked = picked
+        else:
+            self._give(notes, picked, label)
+
     def draw(self, canvas: Canvas) -> None:
-        """Draw the keys, the grid, the notes, the lane of the levels and the playhead: all of it in the rectangle."""
+        """Draw the keys, the grid, the notes, the lane of the levels and the playhead: all of it in the rectangle.
+
+        While a gesture is under way, the notes are drawn as its release would leave them.
+        """
         seen = self.map
+        notes, picked = self._now()
         with canvas.clip(self.rect):
             canvas.box(self.rect, theme.PANEL)
             self._draw_keys(canvas, seen)
             self._draw_grid(canvas, seen)
-            self._draw_notes(canvas, seen)
-            self._draw_lane(canvas, seen)
+            self._draw_notes(canvas, seen, notes, picked)
+            self._draw_lane(canvas, seen, notes)
             if self.playhead is not None:
                 _, y, _, h = self.rect
                 with canvas.clip((seen.grid[0], y, seen.grid[2], h)):
@@ -348,8 +732,11 @@ class Roll(Widget):
                 number = (seen.x(bar * self.bar_rows) + 2, seen.ruler[1], self.bar_rows * seen.row_w - 3, RULER_H)
                 canvas.text_in(str(bar + 1), number, theme.DIM)
 
-    def _draw_notes(self, canvas: Canvas, seen: Map) -> None:
-        """The ghosts, each in the colour its channel takes by its place in the song, and over them the notes."""
+    def _draw_notes(self, canvas: Canvas, seen: Map, notes: Sequence[Note], picked: frozenset[int]) -> None:
+        """The ghosts, each in the colour its channel takes by its place in the song, and over them the notes.
+
+        A picked note has a bright outline, and so has the box that a gesture is drawing.
+        """
         with canvas.clip(seen.grid):
             for index, channel in enumerate(self.pattern.channels if self.pattern and self.ghosts else ()):
                 if channel is self._own or channel.drums:
@@ -359,10 +746,12 @@ class Roll(Widget):
                     x, y, w, h = seen.note(note.row, note.rows, note.pitch)
                     canvas.box((x, y + GHOST_INSET, w, h - 2 * GHOST_INSET), colour)
             light, dark = mix(self.colour, theme.TEXT, LIGHTER), mix(self.colour, theme.BACKGROUND, DARKER)
-            for note in self.notes:
+            for index, note in enumerate(notes):
                 bar = x, y, w, h = seen.note(note.row, note.rows, note.pitch)
                 canvas.box(bar, self.colour)
-                if w > 2:
+                if index in picked:
+                    canvas.frame(bar, theme.TEXT)
+                elif w > 2:
                     canvas.hline(x, y, w, light)
                     canvas.hline(x, y + h - 1, w, dark)
                     canvas.vline(x + w - 1, y, h, dark)
@@ -373,13 +762,16 @@ class Roll(Widget):
                 label = name(round(note.pitch))
                 if w >= Font.width(label) + 5:
                     canvas.text_in(label, (x + 3, y, w - 5, h), theme.BACKGROUND)
+            box = self._gesture.box if self._gesture is not None else None
+            if box is not None:
+                canvas.frame(box, theme.TEXT)
 
-    def _draw_lane(self, canvas: Canvas, seen: Map) -> None:
+    def _draw_lane(self, canvas: Canvas, seen: Map, notes: Sequence[Note]) -> None:
         """The lane under the grid, with its name beside it and in it a bar for the level of each note."""
         x, y, w, h = seen.lane
         canvas.text_in("LEVEL", (self.rect[0], y, KEYS_W - 5, h), theme.DIM, "right")
         canvas.box(seen.lane, theme.BACKGROUND)
         with canvas.clip((x + 1, y + 1, w - 2, h - 2)):
-            for note in self.notes:
+            for note in notes:
                 canvas.box(seen.level(note.row, note.rows, note.level), self.colour)
         canvas.frame(seen.lane, theme.LINE)

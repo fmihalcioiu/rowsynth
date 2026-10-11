@@ -1,4 +1,4 @@
-"""Tests for rowsynth.gui.roll: the sums of the piano roll, its view under the wheel, and what it draws."""
+"""Tests for rowsynth.gui.roll: the sums of the piano roll, its view, its gestures and keys, and what it draws."""
 from __future__ import annotations
 
 import math
@@ -10,8 +10,9 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
-from rowsynth.gui.roll import (DARKER, GHOST, HIGHEST, KEY_H, LIGHTER, LOWEST, ROW_W_MAX, ROW_W_MIN, Map, Roll, black,
-                               mix, name)
+from rowsynth.gui.roll import (BOX, DARKER, END_W, GHOST, HIGHEST, KEY_H, LEVEL, LEVELS, LIGHTER, LOWEST, MOVE,
+                               OFF_GRID, PICK, PLACE, REMOVE, ROW_W_MAX, ROW_W_MIN, SLACK, STRETCH, Map, Roll, begins,
+                               black, mix, name, path)
 from rowsynth.gui.songview import Channel, Note, Pattern
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -47,6 +48,8 @@ def note(row: float, rows: float, pitch: int, level: int = 15, inst: str = "lead
 
 #: Two notes of the same pitch in a row, one that plays with another instrument, and a short low one of no level.
 LEAD = (note(0, 4, 64, 12), note(4, 2, 64), note(8, 4, 67, 8, "pluck"), note(14, 1, 60, 0))
+#: Four notes for a hand to change, each on a key of its own: e4, f4, g4 and c4. They are shown in the same view.
+TUNE = (note(0, 4, 64), note(4, 2, 65), note(8, 4, 67), note(14, 2, 60))
 
 
 def pattern(lead: tuple[Note, ...] = LEAD, called: str = "p", rows: float = 32.0) -> Pattern:
@@ -131,6 +134,74 @@ class Sums(unittest.TestCase):
         self.assertEqual([mix((0, 0, 0), (200, 100, 50)), mix((0, 0, 0), (200, 100, 50), 0.25)],
                          [(100, 50, 25), (50, 25, 13)])
         self.assertEqual((mix(theme.SONG, theme.TEXT, 0), mix(theme.SONG, theme.TEXT, 1)), (theme.SONG, theme.TEXT))
+
+
+class Hands(unittest.TestCase):
+    def begun(self, pos: tuple[int, int], button: int = 1, *mods: str, rows: float = 32.0) -> tuple[str, int | None]:
+        """What a press at a position begins among the notes of the tune, in the view a roll first has of them."""
+        return begins(Map(RECT), TUNE, rows, pos, button, frozenset(mods))
+
+    def test_a_press_on_a_note_moves_it_or_at_its_end_stretches_it_and_with_ctrl_picks_it(self) -> None:
+        # e4 is from row 0 for 4 rows: its bar is (51, 118, 35, 10), and the last three pixels of it are from x 83.
+        self.assertEqual(END_W, 3)
+        self.assertEqual([self.begun((x, 120)) for x in (51, 82, 83, 85)],
+                         [(MOVE, 0), (MOVE, 0), (STRETCH, 0), (STRETCH, 0)])
+        self.assertEqual([self.begun((85, 120), 1, "ctrl"), self.begun((60, 120), 1, "shift")],
+                         [(PICK, 0), (MOVE, 0)])
+        # A bar of three pixels is narrower than twice its end: only its last pixel stretches it.
+        narrow = Map(RECT, row_w=2)
+        self.assertEqual(narrow.note(4, 2, 65), (59, 107, 3, 10))
+        self.assertEqual([begins(narrow, TUNE, 32.0, (x, 110)) for x in (59, 60, 61)],
+                         [(MOVE, 1), (MOVE, 1), (STRETCH, 1)])
+
+    def test_a_press_where_no_note_is_places_one_in_the_pattern_and_with_shift_draws_a_box(self) -> None:
+        self.assertEqual([self.begun((60, 90)), self.begun((60, 90), 1, "shift"), self.begun((60, 90), 1, "ctrl")],
+                         [(PLACE, None), (BOX, None), (PLACE, None)])
+        # On the line before a note and on the line under one, no note is.
+        self.assertEqual([self.begun((50, 120)), self.begun((60, 128))], [(PLACE, None), (PLACE, None)])
+        # A pattern of 8 rows ends at x 122. Past it nothing is placed, and a box is still drawn.
+        self.assertEqual([self.begun((121, 90), rows=8.0), self.begun((122, 90), rows=8.0),
+                          self.begun((122, 90), 1, "shift", rows=8.0)], [(PLACE, None), ("", None), (BOX, None)])
+        # Two rows before the pattern are in view: it begins at x 68.
+        before = Map(RECT, row=-2.0)
+        self.assertEqual([begins(before, TUNE, 32.0, (x, 90)) for x in (67, 68)], [("", None), (PLACE, None)])
+
+    def test_the_right_button_removes_the_left_one_in_the_lane_sets_levels_and_any_other_press_begins_nothing(
+            self) -> None:
+        self.assertEqual([self.begun((60, 120), 3), self.begun((60, 90), 3), self.begun((60, 120), 3, "ctrl")],
+                         [(REMOVE, 0), (REMOVE, None), (REMOVE, 0)])
+        # In the lane it is the note that sounds at the row, whatever its key. No note sounds at row 20.
+        self.assertEqual([self.begun((60, 240)), self.begun((180, 227)), self.begun((230, 240)),
+                          self.begun((60, 240), 3)], [(LEVEL, 0), (LEVEL, 3), (LEVEL, None), ("", None)])
+        # The middle button, the keys, the ruler, and the gap between the grid and the lane.
+        self.assertEqual([self.begun((60, 120), 2), self.begun((20, 120)), self.begun((60, 25)), self.begun((60, 223))],
+                         [("", None)] * 4)
+
+    def test_a_drag_has_moved_by_the_steps_of_the_grid_and_the_keys_between_its_two_ends(self) -> None:
+        seen = Map(RECT)
+        # Row 1 is from x 59 to 67, and e4 from y 118 to 128.
+        self.assertEqual([seen.moved((60, 120), pos) for pos in ((60, 120), (67, 128), (59, 118))], [(0.0, 0)] * 3)
+        self.assertEqual([seen.moved((60, 120), pos) for pos in ((68, 117), (58, 129), (80, 100), (300, 31))],
+                         [(1.0, 1), (-1.0, -1), (2.0, 2), (26.0, 8)])
+        # With steps of 4 rows it has moved when it comes to another step: the second is from x 86.
+        self.assertEqual([seen.moved((60, 120), (x, 120), 4) for x in (85, 86, 150)],
+                         [(0.0, 0), (4.0, 0), (8.0, 0)])
+        # In another view: rows of 4 pixels from row 2.5, and half a key cut off at the top.
+        self.assertEqual(Map(RECT, row=2.5, top=80.5, row_w=4).moved((60, 120), (68, 98)), (2.0, 2))
+
+    def test_a_height_in_the_lane_is_the_level_whose_bar_reaches_it(self) -> None:
+        seen = Map(RECT)
+        for level in range(1, LEVELS + 1):
+            # Each bar is two pixels higher than the one of the level under it.
+            _, top, _, high = seen.level(0, 4, level)
+            self.assertEqual((high, seen.level_at(top), seen.level_at(top + 1)), (2 * level, level, level))
+        # Over the highest bar it is the highest level, and at the foot of the lane and under it, it is 0.
+        self.assertEqual([seen.level_at(y) for y in (0, 226, 228, 257, 258, 259, 400)], [15, 15, 15, 1, 0, 0, 0])
+
+    def test_the_mouse_passes_every_pixel_on_the_line_between_two_positions(self) -> None:
+        self.assertEqual((path((5, 5), (5, 5)), path((5, 5), (8, 5))), ([], [(6, 5), (7, 5), (8, 5)]))
+        self.assertEqual(path((0, 0), (4, -2)), [(1, 0), (2, -1), (3, -1), (4, -2)])
+        self.assertEqual(path((2, 9), (0, 3)), [(2, 8), (1, 7), (1, 6), (1, 5), (0, 4), (0, 3)])
 
 
 class View(unittest.TestCase):
@@ -256,25 +327,444 @@ class View(unittest.TestCase):
                          [1, 1, None])
         self.assertIsNone(Roll(RECT).note_at((60, 120)))
 
-    def test_the_help_line_says_what_note_or_what_place_of_the_grid_the_mouse_is_on(self) -> None:
+    def test_the_help_line_says_what_a_press_where_the_mouse_is_would_do(self) -> None:
         self.assertEqual((self.roll.help, self.ui.help), ("the notes of a channel", ""))
-        for pos, line in (((60, 120), "e4, 4 rows, level 12"),
-                          ((178, 165), "c4, 1 row, level 0"),
-                          ((130, 90), "g4, 4 rows, level 8, instrument pluck"),
-                          ((233, 87), "g4, bar 2, row 5"),
-                          ((86, 120), "e4, bar 1, row 5"),
-                          ((20, 90), "the notes of a channel"),
-                          ((60, 240), "the notes of a channel")):
-            self.ui.handle(Event("move", pos))
+        for pos, mods, line in (((60, 120), (), "move e4"),
+                                ((84, 120), (), "stretch e4"),
+                                ((60, 120), ("ctrl",), "pick e4 as well"),
+                                ((233, 87), (), "place a note at g4, bar 2, row 5"),
+                                ((86, 120), (), "place a note at e4, bar 1, row 5"),
+                                ((233, 87), ("shift",), "pick the notes that a box touches"),
+                                ((130, 240), (), "set the level of g4 to 9"),
+                                ((230, 240), (), "the notes of a channel"),
+                                ((20, 90), (), "the notes of a channel"),
+                                ((60, 224), (), "the notes of a channel")):
+            self.ui.handle(Event("move", pos, mods=frozenset(mods)))
             self.assertEqual(self.ui.help, line)
-        # A length that is no whole number of rows, and a place before the pattern.
-        self.roll.show(pattern((note(0, 8 / 3, 62),)), "lead", 16, theme.SONG)
-        self.ui.handle(Event("move", (60, 142)))
-        self.assertEqual(self.ui.help, "d4, 2.67 rows, level 15")
+        # With steps of 4 rows a note is placed where the step begins that the mouse is in.
+        self.roll.grid = 4
+        self.ui.handle(Event("move", (260, 87)))
+        self.assertEqual((int(self.roll.map.row_at(260)), self.ui.help), (23, "place a note at g4, bar 2, row 5"))
+        # Before the pattern a press places nothing, and with the shift of the wheel still held it draws a box.
         self.wheel(1, "shift", pos=(55, 87))
-        self.assertEqual((self.roll.row, self.ui.help), (-4.0, "the notes of a channel"))
+        self.assertEqual((self.roll.row, self.ui.help), (-4.0, "pick the notes that a box touches"))
+        self.ui.handle(Event("move", (55, 87)))
+        self.assertEqual(self.ui.help, "the notes of a channel")
         self.roll.help = "another line"
         self.assertEqual(self.ui.help, "another line")
+
+
+class Edits(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ui = Ui()
+        self.edits: list[tuple[tuple[Note, ...], str]] = []
+        self.heard: list[tuple[float, str]] = []
+        self.roll = self.ui.add(Roll(RECT, "the notes of a channel", self.save,
+                                     lambda pitch, inst: self.heard.append((pitch, inst))))
+        self.show(TUNE)
+
+    def show(self, notes: tuple[Note, ...]) -> None:
+        """Show the roll a pattern of 32 rows whose lead has some notes."""
+        self.roll.show(pattern(notes), "lead", 16, theme.SONG)
+
+    def save(self, notes: tuple[Note, ...], label: str) -> None:
+        """What an owner does with an edit: it is kept here, and the roll is shown the notes it gave."""
+        self.edits.append((notes, label))
+        self.show(notes)
+
+    def at(self, row: int, pitch: int) -> tuple[int, int]:
+        """A pixel in the middle of a row and of a key: on the bar of a note that sounds there, short of its end."""
+        seen = self.roll.map
+        return seen.x(row) + 4, seen.y(pitch) + 4
+
+    def end(self, index: int) -> tuple[int, int]:
+        """The last pixel of the bar of one of the notes."""
+        found = self.roll.notes[index]
+        x, y, w, _ = self.roll.map.note(found.row, found.rows, found.pitch)
+        return x + w - 1, y + 4
+
+    def mouse(self, kind: str, pos: tuple[int, int], button: int = 1, *mods: str) -> bool:
+        """Hand the Ui what the mouse did, some keys held. Whether it was used."""
+        return self.ui.handle(Event(kind, pos, button=0 if kind == "move" else button, mods=frozenset(mods)))
+
+    def drag(self, *stops: tuple[int, int], button: int = 1, mods: tuple[str, ...] = ()) -> None:
+        """Press at the first position, move to each of the others in turn, and release at the last."""
+        self.mouse("down", stops[0], button, *mods)
+        for stop in stops[1:]:
+            self.mouse("move", stop, button, *mods)
+        self.mouse("up", stops[-1], button, *mods)
+
+    def key(self, key: str, *mods: str) -> bool:
+        """Hand the roll a key, as its owner does. Whether it is one of the roll's."""
+        return self.roll.key(Event("key", key=key, mods=frozenset(mods)))
+
+    def test_a_click_on_the_empty_grid_places_a_note_of_four_rows_at_the_top_level_and_it_is_heard(self) -> None:
+        self.assertEqual((self.roll.row, self.roll.top, self.roll.row_w, self.roll.grid), (0.0, 72.0, 9, 1.0))
+        self.assertTrue(self.mouse("down", self.at(20, 62)))
+        self.assertEqual((self.roll.notes, self.edits, self.heard), (TUNE, [], []))
+        self.mouse("up", self.at(20, 62))
+        placed = (*TUNE, note(20, 4, 62))
+        self.assertEqual((self.edits, self.heard), ([(placed, "note placed")], [(62, "lead")]))
+        self.assertEqual((self.roll.notes, self.roll.picked), (placed, frozenset()))
+        # With the rows scrolled on by four, row 30 is in view: what a note has past the end of the pattern is cut off.
+        self.ui.handle(Event("wheel", (162, 100), wheel=-1, mods=frozenset({"shift"})))
+        self.drag(self.at(30, 62))
+        self.assertEqual(self.edits[1:], [((*placed, note(30, 2, 62)), "note placed")])
+
+    def test_a_click_places_a_note_as_long_as_the_last_one_dragged_or_stretched_at_the_last_level_set(self) -> None:
+        self.drag(self.at(18, 62), self.at(19, 62))
+        self.drag(self.at(22, 62))
+        self.assertEqual(self.roll.notes[4:], (note(18, 2, 62), note(22, 2, 62)))
+        # The second is stretched from its end in row 23 to row 26, and the first is set to level 9 in the lane.
+        self.drag(self.end(5), self.at(26, 62))
+        self.drag((self.at(18, 62)[0], self.roll.map.level(18, 2, 9)[1]))
+        self.drag(self.at(28, 70))
+        self.assertEqual(self.roll.notes[4:], (note(18, 2, 62, 9), note(22, 5, 62), note(28, 4, 70, 9)))
+        self.assertEqual([label for _, label in self.edits],
+                         ["note placed", "note placed", "note stretched", "level changed", "note placed"])
+        self.assertEqual(self.heard, [(62, "lead"), (62, "lead"), (70, "lead")])
+
+    def test_a_drag_places_a_longer_note_that_cuts_the_note_it_begins_in_and_removes_one_that_begins_in_it(
+            self) -> None:
+        # From row 2 to row 5: e4 sounds until row 4, where f4 begins.
+        self.drag(self.at(2, 62), self.at(5, 62))
+        self.assertEqual(self.edits, [((note(0, 2, 64), note(2, 4, 62), *TUNE[2:]), "note placed")])
+        # Dragged to the left, and to other keys, it is one step of the grid long on the key of the press.
+        self.drag(self.at(20, 62), self.at(17, 70))
+        self.assertEqual(self.roll.notes[4:], (note(20, 1, 62),))
+        # With steps of 4 rows it begins where its step does and ends with the step the mouse is in.
+        self.roll.grid = 4
+        self.drag(self.at(21, 70), self.at(26, 70))
+        self.assertEqual((self.roll.notes[4:], len(self.edits)), ((note(20, 8, 70),), 3))
+
+    def test_a_press_on_a_note_picks_it_alone_and_with_no_drag_changes_nothing(self) -> None:
+        self.assertTrue(self.mouse("down", self.at(0, 64)))
+        self.assertEqual(self.roll.picked, {0})
+        self.mouse("up", self.at(0, 64))
+        self.drag(self.at(8, 67))
+        self.assertEqual(self.roll.picked, {2})
+        self.drag(self.end(3))
+        self.assertEqual((self.roll.picked, self.roll.notes, self.edits, self.heard), ({3}, TUNE, [], []))
+
+    def test_a_drag_moves_a_note_by_rows_and_by_keys_and_it_stays_picked_where_it_now_is(self) -> None:
+        # c4 goes 11 rows back and 6 keys up: e4 still sounds where it begins, and f4 begins inside it.
+        self.mouse("down", self.at(14, 60))
+        self.mouse("move", self.at(3, 66))
+        self.assertEqual(self.ui.help, "move c4")
+        self.mouse("up", self.at(3, 66))
+        moved = (note(0, 3, 64), note(3, 2, 66), TUNE[2])
+        self.assertEqual(self.edits, [(moved, "note moved")])
+        self.assertEqual((self.roll.notes, self.roll.picked), (moved, {1}))
+
+    def test_picked_notes_move_together_and_stop_together_at_the_edges_of_the_pattern(self) -> None:
+        self.drag(self.at(8, 67), mods=("ctrl",))
+        self.drag(self.at(14, 60), mods=("ctrl",))
+        self.assertEqual(self.roll.picked, {2, 3})
+        # 19 rows on, where the pattern has 16 rows left after them, and 2 keys up.
+        self.drag(self.at(9, 67), self.at(28, 69))
+        self.assertEqual(self.edits, [((TUNE[0], TUNE[1], note(24, 4, 69), note(30, 2, 62)), "2 notes moved")])
+        self.assertEqual(self.roll.picked, {2, 3})
+        # Back past the start of the pattern, they stop at row 0 as far apart as they were.
+        self.drag(self.at(24, 69), (10, self.at(24, 69)[1]))
+        self.assertEqual(self.edits[1:], [((note(0, 4, 69), TUNE[1], note(6, 2, 62)), "2 notes moved")])
+        self.assertEqual(self.roll.picked, {0, 2})
+
+    def test_a_drag_from_the_end_of_a_note_stretches_the_picked_notes_and_none_is_shorter_than_a_step(self) -> None:
+        self.mouse("move", self.end(0))
+        self.assertEqual(self.ui.help, "stretch e4")
+        # From row 3, where e4 ends, to row 5: f4 begins in what it is stretched to.
+        self.drag(self.end(0), self.at(5, 60))
+        self.assertEqual(self.edits, [((note(0, 6, 64), *TUNE[2:]), "note stretched")])
+        self.assertEqual(self.roll.picked, {0})
+        self.drag(self.end(0), (5, 100))
+        self.assertEqual(self.roll.notes, (note(0, 1, 64), *TUNE[2:]))
+        # With g4 picked as well, both are a row longer.
+        self.drag(self.at(8, 67), mods=("ctrl",))
+        self.drag(self.end(1), self.at(12, 67))
+        self.assertEqual(self.edits[2:], [((note(0, 2, 64), note(8, 5, 67), TUNE[3]), "2 notes stretched")])
+        self.assertEqual(self.roll.picked, {0, 1})
+
+    def test_ctrl_adds_a_note_to_the_picked_ones_or_takes_it_out_and_moves_nothing(self) -> None:
+        self.drag(self.at(0, 64))
+        self.drag(self.at(8, 67), mods=("ctrl",))
+        self.assertEqual(self.roll.picked, {0, 2})
+        self.mouse("move", self.at(0, 64), 1, "ctrl")
+        self.assertEqual(self.ui.help, "leave e4 out of the picked notes")
+        self.drag(self.at(0, 64), self.at(3, 70), mods=("ctrl",))
+        self.assertEqual((self.roll.picked, self.roll.notes, self.edits), ({2}, TUNE, []))
+        # A press without ctrl on a picked note leaves the others picked.
+        self.drag(self.at(14, 60), mods=("ctrl",))
+        self.drag(self.at(8, 67))
+        self.assertEqual(self.roll.picked, {2, 3})
+
+    def test_shift_draws_a_box_that_picks_what_it_touches_and_a_click_with_shift_picks_nothing(self) -> None:
+        # From row 3 of a-4 to row 9 of e-4: e4, f4 and g4 sound in it, and c4 does not.
+        self.assertTrue(self.mouse("down", self.at(3, 68), 1, "shift"))
+        self.mouse("move", self.at(9, 63), 1, "shift")
+        self.assertEqual((self.roll.picked, self.roll.drawn, self.ui.help),
+                         (frozenset(), TUNE, "pick the notes that a box touches"))
+        self.mouse("up", self.at(9, 63), 1, "shift")
+        self.assertEqual((self.roll.picked, self.edits), ({0, 1, 2}, []))
+        # A box drawn from its other corner, over the rows and the keys of f4 alone.
+        self.drag(self.at(6, 66), self.at(4, 65), mods=("shift",))
+        self.assertEqual(self.roll.picked, {1})
+        self.drag(self.at(20, 62), mods=("shift",))
+        self.assertEqual((self.roll.picked, self.roll.notes, self.edits), (frozenset(), TUNE, []))
+
+    def test_the_right_button_removes_the_note_under_it(self) -> None:
+        self.drag(self.at(8, 67))
+        # Where no note is it removes none, and what is picked stays picked.
+        self.drag(self.at(20, 62), self.at(22, 64), button=3)
+        self.assertEqual((self.edits, self.roll.picked), ([], {2}))
+        self.assertTrue(self.mouse("down", self.at(4, 65), 3))
+        self.assertEqual((self.roll.drawn, self.edits, self.ui.help), ((TUNE[0], *TUNE[2:]), [], "remove f4"))
+        self.mouse("up", self.at(4, 65), 3)
+        self.assertEqual((self.edits, self.roll.picked), ([((TUNE[0], *TUNE[2:]), "note removed")], frozenset()))
+
+    def test_held_and_dragged_the_right_button_removes_every_note_it_passes_over_as_one_edit(self) -> None:
+        # From e4 to g4 in one move: the straight line between the two crosses the bar of f4.
+        self.mouse("down", self.at(1, 64), 3)
+        self.mouse("move", self.at(10, 67), 3)
+        self.assertEqual((self.roll.drawn, self.roll.notes, self.edits), (TUNE[3:], TUNE, []))
+        self.mouse("up", self.at(10, 67), 3)
+        self.assertEqual((self.edits, self.roll.notes), ([(TUNE[3:], "3 notes removed")], TUNE[3:]))
+
+    def test_a_drag_in_the_lane_sets_the_level_of_each_note_it_passes_from_its_height_as_one_edit(self) -> None:
+        # The bar of level 5 reaches up to y 248, and that of level 10 to y 238.
+        self.assertTrue(self.mouse("down", (60, 248)))
+        self.assertEqual((self.roll.drawn[0], self.ui.help), (note(0, 4, 64, 5), "set the level of e4 to 5"))
+        self.mouse("move", (60, 238))
+        self.mouse("move", (95, 238))
+        self.assertEqual((self.roll.notes, self.edits), (TUNE, []))
+        self.mouse("up", (95, 238))
+        levelled = (note(0, 4, 64, 10), note(4, 2, 65, 10), *TUNE[2:])
+        self.assertEqual(self.edits, [(levelled, "level changed")])
+        # Where no note sounds none is set, and a note that has the level already is not changed.
+        self.drag((230, 240))
+        self.drag((180, 240), (180, 100))
+        self.assertEqual(len(self.edits), 1)
+        self.drag((180, 240), (180, 300))
+        self.assertEqual(self.edits[1:], [((*levelled[:3], note(14, 2, 60, 0)), "level changed")])
+
+    def test_delete_and_backspace_remove_the_picked_notes(self) -> None:
+        self.assertTrue(self.key("delete"))
+        self.assertEqual(self.edits, [])
+        self.drag(self.at(0, 64))
+        self.drag(self.at(8, 67), mods=("ctrl",))
+        self.assertTrue(self.key("delete"))
+        self.assertEqual((self.edits, self.roll.picked), ([((TUNE[1], TUNE[3]), "2 notes removed")], frozenset()))
+        self.drag(self.at(4, 65))
+        self.assertTrue(self.key("backspace"))
+        self.assertEqual(self.edits[1:], [((TUNE[3],), "note removed")])
+
+    def test_up_and_down_move_the_picked_notes_a_semitone_and_with_shift_an_octave(self) -> None:
+        self.drag(self.at(0, 64))
+        self.drag(self.at(14, 60), mods=("ctrl",))
+        for key, mods, pitches in (("up", (), (65, 61)), ("down", ("shift",), (53, 49)), ("down", (), (52, 48)),
+                                   ("up", ("shift",), (64, 60))):
+            self.assertTrue(self.key(key, *mods))
+            notes, label = self.edits[-1]
+            self.assertEqual(((notes[0].pitch, notes[3].pitch), notes[1:3], label, self.roll.picked),
+                             (pitches, TUNE[1:3], "2 notes moved", {0, 3}))
+        self.assertEqual((self.roll.notes, len(self.edits)), (TUNE, 4))
+        # Where one of them would leave the keys of the roll, none moves.
+        self.show((note(0, 4, HIGHEST - 1), note(4, 4, 60)))
+        self.key("a", "ctrl")
+        self.key("up")
+        self.key("up")
+        self.assertEqual((self.roll.notes, len(self.edits)), ((note(0, 4, HIGHEST), note(4, 4, 61)), 5))
+
+    def test_left_and_right_move_the_picked_notes_a_step_of_the_grid(self) -> None:
+        self.drag(self.at(14, 60))
+        self.assertTrue(self.key("right"))
+        self.assertEqual(self.edits, [((*TUNE[:3], note(15, 2, 60)), "note moved")])
+        # With steps of 4 rows it comes to row 11, where g4 still sounds, and then to row 7, before g4 begins.
+        self.roll.grid = 4
+        self.assertTrue(self.key("left"))
+        self.assertEqual((self.roll.notes, self.roll.picked), ((*TUNE[:2], note(8, 3, 67), note(11, 2, 60)), {3}))
+        self.key("left")
+        self.assertEqual((self.roll.notes, self.roll.picked), ((*TUNE[:2], note(7, 2, 60)), {2}))
+        # It stops at row 0, and from there it does not move.
+        self.key("left")
+        self.key("left")
+        self.key("left")
+        self.assertEqual((self.roll.notes, self.roll.picked, len(self.edits)), ((note(0, 2, 60),), {0}, 5))
+
+    def test_ctrl_and_a_picks_all_escape_drops_the_picked_and_any_other_key_is_not_the_rolls(self) -> None:
+        self.assertTrue(self.key("a", "ctrl"))
+        self.assertEqual(self.roll.picked, {0, 1, 2, 3})
+        self.assertTrue(self.key("escape"))
+        self.assertEqual(self.roll.picked, frozenset())
+        for key, mods in (("a", ()), ("space", ()), ("z", ("ctrl",)), ("delete", ("ctrl",)), ("up", ("ctrl",)),
+                          ("left", ("shift",)), ("escape", ("shift",))):
+            self.assertFalse(self.key(key, *mods), (key, mods))
+        # The roll takes no key from the Ui: its owner hands one on.
+        self.key("a", "ctrl")
+        self.assertFalse(self.ui.handle(Event("key", key="delete")))
+        self.assertEqual((self.roll.picked, self.roll.notes, self.edits), ({0, 1, 2, 3}, TUNE, []))
+
+    def test_ctrl_and_c_copies_the_picked_notes_and_ctrl_and_v_pastes_them_at_the_row_under_the_mouse(self) -> None:
+        self.drag(self.at(0, 64))
+        self.drag(self.at(4, 65), mods=("ctrl",))
+        self.assertTrue(self.key("c", "ctrl"))
+        self.mouse("move", self.at(20, 70))
+        self.assertTrue(self.key("v", "ctrl"))
+        pasted = (*TUNE, note(20, 4, 64), note(24, 2, 65))
+        self.assertEqual((self.edits, self.roll.picked), ([(pasted, "2 notes pasted")], {4, 5}))
+        # With nothing picked, ctrl and c keeps what was copied.
+        self.key("escape")
+        self.key("c", "ctrl")
+        # The mouse is on the keys, off the grid, whose first row in view is row 4: f4 and g4 begin in what is pasted.
+        self.ui.handle(Event("wheel", (162, 100), wheel=-1, mods=frozenset({"shift"})))
+        self.mouse("move", (20, 100))
+        self.key("v", "ctrl")
+        self.assertEqual(self.roll.row, 4.0)
+        self.assertEqual(self.edits[1:], [((TUNE[0], note(4, 4, 64), note(8, 2, 65), *pasted[3:]), "2 notes pasted")])
+        self.assertEqual(self.roll.picked, {1, 2})
+
+    def test_escape_drops_a_gesture_that_is_under_way_and_its_release_changes_nothing(self) -> None:
+        self.mouse("down", self.at(14, 60))
+        self.mouse("move", self.at(16, 62))
+        self.assertEqual(self.roll.drawn, (*TUNE[:3], note(16, 2, 62)))
+        # No other key is the roll's while the gesture is under way.
+        self.assertEqual((self.key("delete"), self.key("escape")), (False, True))
+        self.assertEqual((self.roll.drawn, self.roll.picked), (TUNE, {3}))
+        self.mouse("move", self.at(18, 64))
+        self.mouse("up", self.at(18, 64))
+        self.assertEqual((self.roll.notes, self.roll.picked, self.edits, self.heard), (TUNE, {3}, [], [(62, "lead")]))
+        # The next press begins a gesture as any other, and escape with none under way drops what is picked.
+        self.drag(self.at(14, 60), self.at(15, 60))
+        self.assertEqual(len(self.edits), 1)
+        self.key("escape")
+        self.assertEqual(self.roll.picked, frozenset())
+
+    def test_a_release_where_the_press_was_changes_nothing_and_nothing_is_called(self) -> None:
+        for start in (self.at(14, 60), self.end(3)):
+            self.drag(start, self.at(20, 66), start)
+        # A drag that stays in the row and on the key of the press is no move.
+        x, y = self.at(14, 60)
+        self.drag((x, y), (x + 4, y + 5))
+        self.assertEqual((self.roll.notes, self.roll.picked, self.edits), (TUNE, {3}, []))
+
+    def test_a_click_in_which_the_mouse_strays_two_pixels_is_no_drag_and_three_pixels_are_one(self) -> None:
+        self.assertEqual(SLACK, 2)
+        # From the last pixel of row 14 and of c4 into row 15 and on to b3: the note is picked, and not moved.
+        x, y = self.at(14, 60)
+        self.drag((x + 4, y + 5), (x + 6, y + 7))
+        self.assertEqual((self.roll.map.moved((x + 4, y + 5), (x + 6, y + 7)), self.roll.picked, self.edits),
+                         ((1.0, -1), {3}, []))
+        # A note is placed as long as a click places it. With shift, from the line under it onto its bar, no box
+        # is drawn that would touch it: three pixels on, one is.
+        x, y = self.at(20, 62)
+        self.drag((x, y), (x - 2, y + 2))
+        self.drag((x, y + 6), (x + 2, y + 4), mods=("shift",))
+        self.assertEqual((self.edits, self.roll.picked), ([((*TUNE, note(20, 4, 62)), "note placed")], frozenset()))
+        self.drag((x, y + 6), (x + 3, y + 4), mods=("shift",))
+        self.assertEqual(self.roll.picked, {4})
+        # Three pixels on in the same row, the note that is placed on e4 is one step of the grid long.
+        self.drag((x + 18, y - 22), (x + 21, y - 22))
+        self.assertEqual(self.edits[1:], [((*TUNE, note(20, 2, 62), note(22, 1, 64)), "note placed")])
+
+    def test_what_is_drawn_during_a_drag_is_what_its_release_gives(self) -> None:
+        # A move, a stretch, a note placed by a drag, and three notes removed.
+        for stops, button in (((self.at(14, 60), self.at(3, 66)), 1), ((self.end(0), self.at(5, 60)), 1),
+                              ((self.at(2, 62), self.at(5, 62)), 1), ((self.at(1, 64), self.at(10, 67)), 3)):
+            with self.subTest(stops=stops):
+                self.show(TUNE)
+                self.edits.clear()
+                self.mouse("down", stops[0], button)
+                self.mouse("move", stops[1], button)
+                drawn = self.roll.drawn
+                self.assertNotEqual(drawn, TUNE)
+                self.assertEqual((self.roll.notes, self.edits), (TUNE, []))
+                self.mouse("up", stops[1], button)
+                self.assertEqual(([notes for notes, _ in self.edits], self.roll.drawn), ([drawn], drawn))
+
+    def test_the_picked_stay_picked_when_the_notes_of_the_edit_are_shown_and_not_when_others_are(self) -> None:
+        # An owner that does not show the roll the edit at once: the roll goes on showing what it was given.
+        self.roll.edited = lambda notes, label: self.edits.append((notes, label))
+        self.drag(self.at(14, 60), self.at(3, 66))
+        moved = self.edits[0][0]
+        self.assertEqual((moved[1], self.roll.notes, self.roll.picked), (note(3, 2, 66), TUNE, {3}))
+        self.show(TUNE)
+        self.assertEqual(self.roll.picked, {3})
+        for _ in range(2):
+            self.show(moved)
+            self.assertEqual((self.roll.notes, self.roll.picked), (moved, {1}))
+        # The file changed outside: other notes are shown than the next edit gave. By then, what it gave is as
+        # any other notes.
+        self.drag(self.at(8, 67), self.at(8, 70))
+        self.assertEqual((len(self.edits), self.roll.picked), (2, {2}))
+        self.show(TUNE)
+        self.assertEqual(self.roll.picked, frozenset())
+        self.drag(self.at(0, 64))
+        self.show(self.edits[1][0])
+        self.assertEqual(self.roll.picked, frozenset())
+        # Another channel that has the notes that are shown is not the channel they were picked in.
+        self.drag(self.at(0, 64))
+        self.assertEqual(self.roll.picked, {0})
+        self.roll.show(Pattern("p", 32.0, tuple(Channel(called, "lead", False, self.roll.notes, 32.0, True)
+                                                for called in ("lead", "bass"))), "bass", 16, theme.SONG)
+        self.assertEqual((self.roll.notes, self.roll.picked), (self.edits[1][0], frozenset()))
+
+    def test_a_note_that_is_moved_is_heard_once_at_each_pitch_it_comes_to(self) -> None:
+        # e4 and the g4 that plays with pluck are picked, and the press is on g4: that is the note that is heard.
+        self.show(LEAD)
+        self.drag(self.at(0, 64), mods=("ctrl",))
+        self.drag(self.at(8, 67), mods=("ctrl",))
+        x, y = self.at(8, 67)
+        self.mouse("down", (x, y))
+        # g4 is from y 85 to 95: 5 pixels up is a-4, 19 are a4, and 18 pixels on are two rows.
+        for right, up in ((2, 0), (9, -1), (9, 5), (10, 6), (18, 8), (18, 19), (18, 8), (18, 0)):
+            self.mouse("move", (x + right, y - up))
+        self.mouse("up", (x, y))
+        self.assertEqual(self.heard, [(68, "pluck"), (69, "pluck"), (68, "pluck"), (67, "pluck")])
+        self.assertEqual((self.edits, self.roll.picked), ([], {0, 2}))
+
+    def test_a_pattern_that_is_not_on_the_grid_is_shown_and_not_changed_and_the_help_line_says_why(self) -> None:
+        triplets = (note(0, 8 / 3, 62), note(4, 4, 64))
+        self.show(triplets)
+        for pos, button, mods in ((self.at(4, 64), 1, ()), (self.at(4, 64), 1, ("ctrl",)), (self.at(10, 62), 1, ()),
+                                  (self.at(10, 62), 1, ("shift",)), (self.at(4, 64), 3, ()), ((90, 240), 1, ())):
+            self.assertFalse(self.mouse("down", pos, button, *mods))
+            self.mouse("move", self.at(12, 66), button, *mods)
+            self.mouse("up", self.at(12, 66), button, *mods)
+        self.assertEqual([self.key(key, *mods) for key, mods in (("a", ("ctrl",)), ("delete", ()), ("escape", ()))],
+                         [False] * 3)
+        self.assertEqual((self.roll.drawn, self.roll.picked, self.edits, self.heard), (triplets, frozenset(), [], []))
+        for pos, line in ((self.at(4, 64), OFF_GRID), (self.at(10, 62), OFF_GRID), ((90, 240), OFF_GRID),
+                          ((20, 100), "the notes of a channel")):
+            self.mouse("move", pos)
+            self.assertEqual(self.ui.help, line)
+        self.assertEqual(OFF_GRID, "this pattern has lengths the grid does not hold: it is shown and not changed")
+
+    def test_the_wheel_is_used_while_no_gesture_is_under_way_and_not_during_one(self) -> None:
+        def wheel(*mods: str) -> None:
+            self.ui.handle(Event("wheel", (50, 100), wheel=1, mods=frozenset(mods)))
+
+        self.drag(self.at(0, 64))
+        for mods in ((), ("ctrl",), ("shift",)):
+            wheel(*mods)
+        view = (self.roll.row, self.roll.top, self.roll.row_w)
+        self.assertEqual((view, self.roll.picked), ((-3.6, 74.0, 10), {0}))
+        self.mouse("down", self.at(2, 64))
+        for mods in ((), ("ctrl",), ("shift",)):
+            wheel(*mods)
+        self.assertEqual((self.roll.row, self.roll.top, self.roll.row_w), view)
+        self.mouse("up", self.at(2, 64))
+        wheel()
+        self.assertEqual((self.roll.top, self.edits), (76.0, []))
+
+    def test_other_notes_shown_during_a_gesture_drop_it_and_the_same_notes_do_not(self) -> None:
+        self.mouse("down", self.at(14, 60))
+        self.mouse("move", self.at(16, 62))
+        self.show(TUNE)
+        self.assertEqual(self.roll.drawn, (*TUNE[:3], note(16, 2, 62)))
+        other = (*TUNE[:3], note(14, 2, 60, 9))
+        self.show(other)
+        self.assertEqual((self.roll.drawn, self.roll.picked), (other, frozenset()))
+        self.mouse("up", self.at(16, 62))
+        self.assertEqual((self.roll.notes, self.edits), (other, []))
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -406,6 +896,53 @@ class Drawn(unittest.TestCase):
         self.assertEqual(self.where(theme.INSTRUMENT, seen.grid),
                          {(123, 85), (124, 85), (125, 85), (123, 86), (124, 86), (123, 87)})
         self.assertEqual((self.at(126, 85), self.at(123, 88), self.at(51, 118)), (LIGHT, LIGHT, LIGHT))
+
+    def test_a_picked_note_has_a_bright_outline_in_place_of_its_light_and_its_dark_edges(self) -> None:
+        self.roll.show(pattern((note(4, 1, 64), note(8, 2, 64))), "lead", 16, theme.SONG)
+        self.roll.ghosts = False
+        for kind in ("down", "up"):
+            self.ui.handle(Event(kind, (90, 120), button=1))
+        seen = self.draw()
+        # The bar of the first note is (87, 118, 8, 10): its outline is the pixels along its four sides.
+        bar = {(x, y) for x in range(87, 95) for y in range(118, 128)}
+        inner = {(x, y) for x in range(88, 94) for y in range(119, 127)}
+        self.assertEqual((self.roll.picked, self.where(theme.TEXT, seen.grid)), ({0}, bar - inner))
+        self.assertEqual(self.where(theme.SONG, (87, 118, 8, 10)), inner)
+        # The other note, from x 123 to 139, has the edges it had.
+        self.assertEqual((self.at(123, 118), self.at(139, 127)), (LIGHT, DARK))
+
+    def test_the_note_that_a_drag_would_place_is_drawn_during_the_drag_and_is_gone_when_it_is_dropped(self) -> None:
+        self.roll.show(pattern((note(4, 1, 64),)), "lead", 16, theme.SONG)
+        self.roll.ghosts = False
+        # Pressed on d4 in row 8 and dragged into row 9: its bar would be (123, 140, 17, 10).
+        self.ui.handle(Event("down", (125, 145), button=1))
+        self.ui.handle(Event("move", (134, 150)))
+        seen = self.draw()
+        self.assertEqual((self.roll.notes, self.roll.drawn), ((note(4, 1, 64),), (note(4, 1, 64), note(8, 2, 62))))
+        self.assertEqual((seen.note(8, 2, 62), self.at(123, 140), self.at(139, 149), self.at(124, 145)),
+                         ((123, 140, 17, 10), LIGHT, DARK, theme.SONG))
+        self.assertEqual(self.where(theme.TEXT, seen.grid), set())
+        self.roll.key(Event("key", key="escape"))
+        self.draw()
+        self.assertEqual(self.colours((123, 140, 17, 10)), {theme.RAISED, theme.PANEL})
+
+    def test_a_box_is_drawn_while_it_is_dragged_and_the_notes_it_touches_are_outlined(self) -> None:
+        self.roll.ghosts = False
+        shift = frozenset({"shift"})
+        # From row 2 of g-4 to row 10 of e-4: the two e4 sound in it, and the g4 is over it.
+        self.ui.handle(Event("down", (70, 100), button=1, mods=shift))
+        self.ui.handle(Event("move", (140, 130), mods=shift))
+        self.draw()
+        self.assertEqual([self.at(*pos) for pos in ((70, 100), (140, 100), (70, 130), (140, 130), (105, 100),
+                                                    (105, 130), (70, 110), (140, 110))], [theme.TEXT] * 8)
+        self.assertNotIn(theme.TEXT, self.colours((71, 101, 69, 16)) | self.colours((141, 99, 20, 33)))
+        # The outline of the first e4 is bright, and the g4 has its light edge.
+        self.assertEqual((self.roll.picked, self.at(51, 118), self.at(85, 127), self.at(126, 85)),
+                         (frozenset(), theme.TEXT, theme.TEXT, LIGHT))
+        self.ui.handle(Event("up", (140, 130), button=1, mods=shift))
+        self.draw()
+        self.assertEqual((self.roll.picked, self.at(140, 100), self.at(105, 100), self.at(51, 118)),
+                         ({0, 1}, theme.PANEL, theme.BACKGROUND, theme.TEXT))
 
     def test_the_keys_are_white_and_black_as_on_a_piano_and_each_c_is_named(self) -> None:
         seen = self.draw()
