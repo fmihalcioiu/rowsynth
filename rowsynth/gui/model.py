@@ -2,11 +2,12 @@
 from __future__ import annotations
 
 import copy
+import json
 import math
 import os
 import threading
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from numbers import Real
 from pathlib import Path
 from typing import TypeVar
@@ -16,7 +17,7 @@ import numpy as np
 from .. import checks
 from ..bank import render_entry
 from ..commands import mono
-from ..edit import NOTHING, change_file, change_file_many
+from ..edit import NOTHING, change_file, change_file_many, delete_in, set_in, steps
 from ..errors import RowSynthError
 from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
@@ -26,6 +27,8 @@ from ..song import mix_stems, pan_gains, render_stems
 
 # What a write to the file answers.
 _Told = TypeVar("_Told")
+# Changes to whole things of a project, each as (where, was, now), with NOTHING for a thing that is not there.
+_Changes = list[tuple[str, object, object]]
 
 # The sections of the listing in the order they are shown, and the kind of the things each one holds.
 KINDS = {"songs": "song", "sounds": "sound", "instruments": "instrument"}
@@ -82,12 +85,18 @@ def _first(project: Project) -> tuple[str, str] | None:
     return None
 
 
-def _differ(old: Project, new: Project) -> list[tuple[str, str, object, object]]:
+def _tables(project: Project) -> dict[str, dict]:
+    """The tables of a project by their names: the tables themselves, and no copies of them."""
+    return {table: getattr(project, table) for table in _TABLES}
+
+
+def _differ(old: Mapping[str, dict], new: Mapping[str, dict]) -> list[tuple[str, str, object, object]]:
     """What two projects do not share, as the changes that make the first of them into the second.
 
-    Each is (table, name, was, now) for one whole thing: a song, a sound, an instrument or a chord that only one
-    of the two has, or that changed. NOTHING is for a thing that is not there. With the chords every table of a
-    project is looked at, so two projects that differ in nothing here are the same project.
+    Each project is given as its tables by their names, and a table that is not among them holds nothing.
+    Each change is (table, name, was, now) for one whole thing: a song, a sound, an instrument or a chord that
+    only one of the two has, or that changed. NOTHING is for a thing that is not there. With the chords every
+    table of a project is looked at, so two projects that differ in nothing here are the same project.
 
     The changes come in an order they can be made in one at a time, the project holding after each, and taken
     back in from the last to the first: the instruments and chords that are new or changed, then the songs and
@@ -96,12 +105,78 @@ def _differ(old: Project, new: Project) -> list[tuple[str, str, object, object]]
     """
     found = []
     for table in _TABLES:
-        before, after = getattr(old, table), getattr(new, table)
+        before, after = old.get(table, {}), new.get(table, {})
         for name in [*before, *(name for name in after if name not in before)]:
             was, now = before.get(name, NOTHING), after.get(name, NOTHING)
             if was != now:
                 found.append((table, name, was, now))
     return sorted(found, key=lambda change: (2 if change[3] is NOTHING else 0) if change[0] in _NAMED else 1)
+
+
+def _unmade(data: dict, told: Sequence[dict]) -> dict:
+    """The data of a project as it was before changes that are in it were made: each is unmade, the last first.
+
+    `told` is what `change_file_many` answered for the changes. Each place gets what was there as its change
+    came to it, and holds nothing again where nothing was. What was taken out of a list is put in where it sat.
+    """
+    for one in reversed(told):
+        path = steps(one["where"])
+        try:
+            held = data
+            for step in path[:-1]:
+                held = held[step]
+            if "was" not in one:
+                del held[path[-1]]
+            elif "now" in one or isinstance(held, dict):
+                # The data has a value of its own, so that unmaking an earlier change in it leaves this one be.
+                held[path[-1]] = copy.deepcopy(one["was"])
+            else:
+                held.insert(path[-1], copy.deepcopy(one["was"]))
+        except (LookupError, TypeError):
+            # The place is not as the change left it: another program wrote the file again since. It stays.
+            pass
+    return data
+
+
+def _outside(old: Project, new: Project, told: Sequence[dict]) -> tuple[_Changes, _Changes]:
+    """What another program changed in a file between the last look at it and a write made to it here.
+
+    `old` is the project as the last look gave it, `new` the one the file holds after the write, and `told`
+    what `change_file_many` answered for the write. The things changed outside are those that differ between
+    `old` with the write made to it and `new`. A place the write went over is no part of that: there the
+    write has the last word, whatever the file held.
+
+    They are given twice, each time as (where, was, now) for each whole thing, in the order of `_differ`.
+    First as they came before the write: each thing from what `old` has to what the file had as the write
+    came to it, which is what a look made just before the write would have found. Then as they come after
+    it: each from what the write alone would have left to what `new` has.
+    """
+    meant = old.to_dict()
+    for one in told:
+        try:
+            if "now" in one:
+                # The value as a file holds it, and as `new` so has it: a tuple is a list there.
+                set_in(meant, one["where"], json.loads(json.dumps(one["now"])))
+            else:
+                delete_in(meant, one["where"])
+        except RowSynthError:
+            # A place the project here did not have. The thing it is in was changed outside, and is found below.
+            pass
+    found = _differ(meant, _tables(new))
+    if not found:
+        return [], []
+    looked, came = _tables(old), _unmade(new.to_dict(), told)
+    return ([(f"{table}.{name}", looked[table].get(name, NOTHING), came.get(table, {}).get(name, NOTHING))
+             for table, name, _, _ in found],
+            [(f"{table}.{name}", was, now) for table, name, was, now in found])
+
+
+def things(changes: Iterable[tuple[str, object, object]]) -> set[tuple[str, str]]:
+    """The things that changes to whole things are made to, each as (kind, name), the kind of a chord "chord".
+
+    The changes are (where, was, now) as `Model.changes` holds them, with a place such as "sounds.zap".
+    """
+    return {(_TABLES[table], name) for table, name in (where.split(".", 1) for where, _, _ in changes)}
 
 
 def _look(path: Path) -> tuple[int, int] | None:
@@ -336,8 +411,12 @@ class Model:
         # What kept the last look at the file from going well, or None when it went well.
         self.problem: str | None = None
         # What the last look found changed outside, each whole thing as (where, was, now), in an order the changes
-        # can be made in one at a time. NOTHING is for a thing that is not there.
-        self.changes: list[tuple[str, object, object]] = []
+        # can be made in one at a time. NOTHING is for a thing that is not there. A write made here reads the file
+        # too, and leaves here what another program changed since the look before, as it came before the write.
+        self.changes: _Changes = []
+        # After a write made here, the same things as they come after the write: each from what the write alone
+        # would have left to what the file holds.
+        self.changes_after: _Changes = []
         self._wait = wait
         # The file is looked at before it is read, so that a change made while it is read shows at the next look.
         # A file that cannot be looked at cannot be read either, and the reading says what is wrong with it.
@@ -605,23 +684,38 @@ class Model:
         change that is refused is refused here, and then the file and the model are as they were. A file that
         another program has open cannot be written: the change is tried again after each wait of `SAVE_WAITS`,
         and refused when the last try fails too.
+
+        The write reads the file as it is, so what another program changed since the last look is taken in
+        with it. `changes` then holds those things as `poll` leaves them, and none where there are none: each
+        whole thing in which something differs that this write did not go over, from what it was at the last
+        look to what the file had as the write came to it. `changes_after` holds the same things from what
+        the write alone would have left to what the file holds now. The first are for a write that is a step
+        of its own, to come before it, and the second for one that is not, to come after it.
         """
-        told = self._saved(lambda: change_file(self.path, where, value, delete))
-        if not told.get("same"):
-            self._load(_look(self.path))
-        return told
+        return self._write(lambda: [change_file(self.path, where, value, delete)])[0]
 
     def change_many(self, changes: Iterable[tuple[str, object]]) -> list[dict]:
         """Makes several changes to the file as one, as `change_file_many` makes them, and takes the file in.
 
         Each change is (where, value), with NOTHING for what is taken out. The answer is the one
         `change_file_many` gives. It is one write and one load, and everything else is as in `change`: what is
-        refused leaves the file and the model as they were, and a file another program has open is waited for.
+        refused leaves the file and the model as they were, a file another program has open is waited for,
+        and what was changed outside since the last look is in `changes` and `changes_after`.
         """
         changes = list(changes)
-        told = self._saved(lambda: change_file_many(self.path, changes))
-        if not all(one.get("same") for one in told):
-            self._load(_look(self.path))
+        return self._write(lambda: change_file_many(self.path, changes))
+
+    def _write(self, write: Callable[[], list[dict]]) -> list[dict]:
+        """Makes a write to the file and takes the file in as it then is. What the write answers is given.
+
+        A write that left the file as it was is followed by no load. After any other, `changes` and
+        `changes_after` hold what another program changed since the last look, as `_outside` tells the two.
+        """
+        self.changes, self.changes_after = [], []
+        told = self._saved(write)
+        old = self._project
+        if not all(one.get("same") for one in told) and self._load(_look(self.path)):
+            self.changes, self.changes_after = _outside(old, self._project, told)
         return told
 
     def _saved(self, write: Callable[[], _Told]) -> _Told:
@@ -652,7 +746,7 @@ class Model:
         except (OSError, RowSynthError) as error:
             self.problem = f"{self.path}: {error.strerror}" if isinstance(error, OSError) else str(error)
             return []
-        found = _differ(self._project, project)
+        found = _differ(_tables(self._project), _tables(project))
         channels = _channels(self._project, self._picked)
         with self._lock:
             self._project = project

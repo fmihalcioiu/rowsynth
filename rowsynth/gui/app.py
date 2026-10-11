@@ -307,9 +307,13 @@ class App:
                 pass
 
     def _words(self) -> tuple[str, int]:
-        """What there is to say, and how many times there was something: the session's, or with none the app's."""
+        """What there is to say, and how many times there was something: the session's, or with none the app's.
+
+        The session's is its status line: its message, or a notice of what another program did while that has
+        its time.
+        """
         if self.session is not None:
-            return self.session.message, self.session.messages
+            return self.session.status, self.session.messages
         return self._own, self._owns
 
     def place(self, size: tuple[int, int]) -> None:

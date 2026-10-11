@@ -21,7 +21,7 @@ from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model
+from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model, things
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
 from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems
@@ -935,6 +935,32 @@ class ChangeTest(ModelCase):
         self.assertTrue(model.change(where, "l4 c e g a")["same"])
         self.assertIs(model.project, project)
         self.assertIs(model.render(), made)
+
+    def test_a_change_leaves_what_another_program_changed_since_the_last_look_but_for_the_place_it_went_over(self):
+        model = self.opened()
+        # Outside, beep gets a wave and ping another note. Here, an item is taken out of the volume of beep.
+        self.write(changed(instruments={"beep": {"vol": [15, 12, 9, 6], "wave": "saw"}},
+                           sounds={"ping": {"def": sound("b4")}}))
+        model.change("instruments.beep.vol[1]", delete=True)
+        self.assertEqual(self.held()["instruments"]["beep"], {"vol": [15, 9, 6], "wave": "saw"})
+        ping = ("sounds.ping", PROJECT["sounds"]["ping"], {"def": sound("b4")})
+        # As they came before the change, each from what the last look gave, and as they come after it.
+        self.assertEqual(model.changes, [
+            ("instruments.beep", {"vol": [15, 12, 9, 6]}, {"vol": [15, 12, 9, 6], "wave": "saw"}), ping])
+        self.assertEqual(model.changes_after, [
+            ("instruments.beep", {"vol": [15, 9, 6]}, {"vol": [15, 9, 6], "wave": "saw"}), ping])
+        self.assertEqual(things(model.changes), {("instrument", "beep"), ("sound", "ping")})
+        self.assertEqual([model.poll(), model.changes], [set(), []])
+        # What another program wrote at the very place is gone over, and is none of them.
+        where = "songs.tune.patterns.a.tune"
+        data = self.held()
+        data["songs"]["tune"]["patterns"]["a"]["tune"] = "l8 c d e f"
+        self.write(data)
+        self.assertEqual(model.change(where, "l2 c e")["was"], "l8 c d e f")
+        self.assertEqual([model.changes, model.changes_after], [[], []])
+        # Neither is a value that the file holds in another form than it was given in, as a list for a tuple.
+        model.change("sounds.ping.meta", {"tags": ("a", "b")})
+        self.assertEqual([self.held()["sounds"]["ping"]["meta"], model.changes], [{"tags": ["a", "b"]}, []])
 
     def test_a_delete_takes_a_thing_out_of_the_file_and_a_picked_thing_that_is_gone_is_picked_no_longer(self):
         model = self.opened()

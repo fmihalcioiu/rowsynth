@@ -5,6 +5,7 @@ import copy
 import math
 import re
 import time
+from collections import deque
 from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING
 
@@ -14,7 +15,7 @@ from ..edit import NOTHING, delete_in, get_in, set_in
 from ..errors import RowSynthError
 from ..sound import tick_sample
 from .history import Change, History, same
-from .model import KINDS, Model
+from .model import KINDS, Model, things
 
 if TYPE_CHECKING:
     from .audio import Player
@@ -25,6 +26,9 @@ POLL_EVERY = 0.25
 GLOW_TIME = 1.5
 # How many of the things that changed outside a message names before it counts the rest.
 NAMED = 3
+# Seconds a notice of what another program did has the status line for, whatever is picked or said meanwhile.
+# It is the time the status bar gives a message.
+NOTICE_TIME = 3.0
 # What is said where there is no player: at the first tick, and each time something is to play.
 NO_SOUND = "no sound output"
 # What is said, after what it is called, of a thing another program changed in the moment it was changed here.
@@ -113,6 +117,15 @@ class Session:
         # The last thing there was to say, and how many times there has been something to say.
         self._said = ""
         self._messages = 0
+        # The notice of what another program did that has the status line, "" for none, and the moment it has
+        # had its time by.
+        self._notice = ""
+        self._until = 0.0
+        # The notices that wait for their turn: words, or the things that changed outside, which are named as
+        # their turn comes.
+        self._notices: deque[str | set[tuple[str, str]]] = deque()
+        # Whether what was said last has yet to have the status line: it was said while a notice had it.
+        self._unshown = False
         # The moment each thing that changed outside began to glow at.
         self._lit: dict[tuple[str, str], float] = {}
         # The moment of the last look at the file, or None before the first.
@@ -153,11 +166,29 @@ class Session:
         return self.model.problem or self._said
 
     @property
+    def status(self) -> str:
+        """The one line for a status bar, "" for nothing: `message`, but for the notices of what another program did.
+
+        Two things said are such notices: the things that changed outside, and that a change made here took
+        the place of one made outside at the same moment. A notice has the line for `NOTICE_TIME` seconds
+        from the moment it is given, whatever is picked, said or cleared meanwhile. One that comes while
+        another has the line waits, and they have their turns one after the other, each for as long. Those
+        that wait to name what changed outside are one notice, which names it all. With the notices through,
+        the line is `message` again, as it is by then. What keeps the file from being read comes before
+        any notice.
+        """
+        return self.model.problem or self._notice or self._said
+
+    @property
     def messages(self) -> int:
         """How many times there has been something to say: one more each time `message` is given words.
 
         Words that are the same as the last are counted as well, so whoever shows the message can tell that it
         was said again. What keeps the file from being read counts once for as long as it lasts.
+
+        It is one more as well each time `status` is given something that had to wait for it: a notice whose
+        turn has come, and what was said while the notices had the line, once they are through. So whoever
+        shows `status` and gives a line its time from when this last grew shows each of them for that time.
         """
         return self._messages
 
@@ -229,6 +260,7 @@ class Session:
         if self._looked is None or now - self._looked >= POLL_EVERY:
             first, self._looked = self._looked is None, now
             self._look(now, first)
+        self._notify(now)
         picked = self.model.picked is not None
         if not self._taken and picked and self.model.render_ready():
             self._take()
@@ -263,6 +295,7 @@ class Session:
         self._said = words
         if words:
             self._messages += 1
+        self._unshown = bool(words and self._notice)
 
     def change(self, where: str, value: object, label: str, key: object = None) -> bool:
         """Puts a value at a place in the project and in its file, as a step that can be taken back.
@@ -273,9 +306,13 @@ class Session:
         the message is the refusal, and no step is kept.
 
         The picked thing is rendered again and the checks are run again, as after a change from outside, and
-        nothing glows. Where another program changed the same place a moment before, so that the file did not
-        hold what the project here did, the change is made all the same and the message says so: taking the step
-        back brings back what the other program wrote.
+        nothing of the change glows. Where another program changed the same place a moment before, so that the
+        file did not hold what the project here did, the change is made all the same and the message says so:
+        taking the step back brings back what the other program wrote.
+
+        What another program changed elsewhere since the last look at the file comes in with the change, and
+        is taken up as a look takes it up: it glows, it is named in the message, and it is a step of its own.
+        That step comes before this one, so this change is taken back first and the other program's after it.
         """
         before = self.model.picked
         held = self._held(where)
@@ -592,15 +629,62 @@ class Session:
         if first and self.player is None:
             self.say(NO_SOUND)
         before, problem = self.model.picked, self.model.problem
-        changed = self.model.poll()
+        self.model.poll()
         if self.model.problem and self.model.problem != problem:
             self._messages += 1
-        if changed:
-            self._lit.update((thing, now) for thing in changed)
-            self.say(_told(changed))
-            self._history.add(self.model.changes, self._said)
-        if changed or first:
+        if self._outside(self.model.changes, now) or first:
             self._renew(before)
+
+    def _outside(self, changes: Sequence[Change], now: float) -> bool:
+        """Takes up what the model found that another program changed, at a look or as a write here read the file.
+
+        Each thing glows from `now`, they are named in a notice, and they are a step that can be taken back,
+        called what the notice says. False where there is nothing to take up.
+        """
+        if not changes:
+            return False
+        changed = things(changes)
+        self._lit.update((thing, now) for thing in changed)
+        self._history.add(changes, _told(changed))
+        self._tell(changed)
+        return True
+
+    def _tell(self, notice: str | set[tuple[str, str]]) -> None:
+        """Gives notice of what another program did: words, or the things that changed outside, to be named.
+
+        It is said as `say` says anything, and it has the status line as well: at once where no notice has
+        it, and else when its turn comes. Things that changed outside are added to those that wait already,
+        where they are the last to wait.
+        """
+        words = notice if isinstance(notice, str) else _told(notice)
+        self.say(words)
+        self._unshown = False
+        now = self._clock()
+        self._notify(now)
+        if not self._notice:
+            self._notice, self._until = words, now + NOTICE_TIME
+        elif self._notices and isinstance(notice, set) and isinstance(self._notices[-1], set):
+            self._notices[-1] |= notice
+        else:
+            self._notices.append(notice)
+
+    def _notify(self, now: float) -> None:
+        """Gives the status line to the next notice once the one that has it has had its time, at the moment `now`.
+
+        With no notice left to wait, the line is the message again. A notice whose turn comes is one more of
+        `messages`, and so is the message where it was said while the notices had the line.
+        """
+        if not self._notice or now < self._until:
+            return
+        if self._notices:
+            notice = self._notices.popleft()
+            self._notice, self._until = notice if isinstance(notice, str) else _told(notice), now + NOTICE_TIME
+            self._messages += 1
+        else:
+            self._notice = ""
+            if self._unshown:
+                self._messages += 1
+            self._unshown = False
 
     def _renew(self, before: tuple[str, str] | None) -> None:
         """Starts the render of the picked thing and the checks, at the first look and after a change to the project.
@@ -639,18 +723,20 @@ class Session:
         """Takes up changes the model has made as one: `told` is what it answered for each, in their order.
 
         They are kept as one step, unless every one of them left its place as it was. `held` is what the
-        project here had at each place, and where the file had something else, the message says so. `before`
-        is what was picked before the changes.
+        project here had at each place, and where the file had something else, a notice says so. `before`
+        is what was picked before the changes. What the write found changed outside in other places is
+        taken up first, so that its step comes before this one.
         """
         self.say("")
         if all(one.get("same") for one in told):
             return
+        self._outside(self.model.changes, self._clock())
         # The step has values of its own, whatever becomes of those that were handed in.
         step = [(one["where"], one.get("was", NOTHING), copy.deepcopy(one["now"]) if "now" in one else NOTHING)
                 for one in told]
         self._history.add(step, label, key)
         if not all(same(had, was) for had, (_, was, _) in zip(held, step)):
-            self.say(f"{label} {BOTH}")
+            self._tell(f"{label} {BOTH}")
         self._renew(before)
 
     def _replay(self, changes: Iterable[Change] | None, back: Callable[[], object]) -> bool:
@@ -658,6 +744,9 @@ class Session:
 
         `back` moves the step to where it was. Where the changes are refused none of them is made, the step is
         moved back, the message is the refusal and the answer is false.
+
+        What the write found changed outside in other places is taken up as after a look: it is a step on
+        top of the one that was moved, and with it there is no step left to make again.
         """
         if changes is None:
             return False
@@ -669,6 +758,7 @@ class Session:
             self.say(str(error))
             return False
         self.say("")
+        self._outside(self.model.changes_after, self._clock())
         self._renew(before)
         return True
 

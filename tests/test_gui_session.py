@@ -19,7 +19,7 @@ from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import KINDS, Model
-from rowsynth.gui.session import GLOW_TIME, HOLD, POLL_EVERY, Session, joined, piano
+from rowsynth.gui.session import BOTH, GLOW_TIME, HOLD, NOTICE_TIME, POLL_EVERY, Session, joined, piano
 from rowsynth.project import Project
 from rowsynth.song import mix_stems, render_stems
 
@@ -198,6 +198,11 @@ class SessionCase(unittest.TestCase):
     def looked(self, session: Session) -> None:
         """A tick at which the file is looked at again."""
         self.later(POLL_EVERY)
+        session.tick()
+
+    def through(self, session: Session) -> None:
+        """A tick by which a notice that was the message has had its time. The file is looked at again as well."""
+        self.later(NOTICE_TIME)
         session.tick()
 
     def held(self) -> threading.Event:
@@ -803,6 +808,76 @@ class ChangeTest(SessionCase):
         self.assertEqual(self.data(), outside)
         self.assertEqual([session.message, session.can_undo], ["", False])
 
+    def test_another_thing_changed_outside_just_before_a_change_made_here_glows_and_is_a_step_before_it(self):
+        session = self.opened()
+        session.tick()
+        outside = changed(sounds={"pop": {"def": sound("d5")}})
+        self.write(outside)
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertEqual(self.data(), changed(sounds=outside["sounds"], songs={"tune": song("l2 c e")}))
+        # The other program's thing glows and is named, and the thing changed here does neither.
+        self.assertEqual([session.glows(), session.message], [{("sound", "pop"): 1.0}, "changed outside: pop"])
+        # It was taken up with the change, so the next look finds nothing more in it.
+        self.looked(session)
+        self.assertEqual([set(session.glows()), session.undo_label], [{("sound", "pop")}, TUNE_LABEL])
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.undo_label], [outside, "changed outside: pop"])
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.can_undo], [PROJECT, False])
+
+    def test_other_things_changed_outside_just_before_several_changes_made_as_one_are_a_step_before_theirs(self):
+        session = self.opened()
+        session.tick()
+        # Outside, pop goes over to an instrument that is new.
+        outside = changed(instruments={"bell": {"wave": "saw"}}, sounds={"pop": {"def": sound("c5", "bell")}})
+        self.write(outside)
+        air = "songs.air.patterns.a.tune"
+        self.assertTrue(session.change_many([(TUNE, "l2 c e"), (air, "l2 g e")], "two tunes"))
+        after = copy.deepcopy(outside)
+        after["songs"] = {"tune": song("l2 c e"), "air": song("l2 g e")}
+        self.assertEqual(self.data(), after)
+        self.assertEqual(session.glows(), {("instrument", "bell"): 1.0, ("sound", "pop"): 1.0})
+        self.assertEqual([session.message, session.undo_label], ["changed outside: bell, pop", "two tunes"])
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.undo_label], [outside, "changed outside: bell, pop"])
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.can_undo], [PROJECT, False])
+
+    def test_another_place_of_the_same_thing_changed_outside_is_put_back_by_taking_its_step_back(self):
+        session = self.opened()
+        session.tick()
+        outside = copy.deepcopy(PROJECT)
+        outside["songs"]["tune"]["channels"]["tune"]["gain"] = 0.5
+        self.write(outside)
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        after = copy.deepcopy(outside)
+        after["songs"]["tune"]["patterns"]["a"]["tune"] = "l2 c e"
+        self.assertEqual(self.data(), after)
+        # The place changed here held what the project here had, so there is nothing to say of it.
+        self.assertEqual([session.glows(), session.message], [{("song", "tune"): 1.0}, "changed outside: tune"])
+        # Each step is taken back and made again alone: the one made here first, and the other program's after it.
+        for step, wanted in ((session.undo, outside), (session.undo, PROJECT), (session.redo, outside),
+                             (session.redo, after)):
+            self.assertTrue(step())
+            self.assertEqual(self.data(), wanted)
+
+    def test_what_changed_outside_just_before_a_step_is_taken_back_is_a_step_on_top_of_it(self):
+        session = self.opened()
+        session.tick()
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        outside = changed(songs={"tune": song("l2 c e")})
+        outside["songs"]["tune"]["channels"]["tune"]["gain"] = 0.5
+        self.write(outside)
+        self.assertTrue(session.undo())
+        back = copy.deepcopy(PROJECT)
+        back["songs"]["tune"]["channels"]["tune"]["gain"] = 0.5
+        self.assertEqual(self.data(), back)
+        self.assertEqual([session.glows(), session.message], [{("song", "tune"): 1.0}, "changed outside: tune"])
+        self.assertEqual([session.undo_label, session.can_redo], ["changed outside: tune", False])
+        # Taking the other program's step back leaves the step that was taken back before it as it is.
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.can_undo], [PROJECT, False])
+
     def test_an_undo_that_is_refused_writes_nothing_and_keeps_its_step(self):
         hum = {"hum": {"wave": "tri"}}
         session = self.opened(changed(instruments=hum, sounds={"zap": {"def": sound("a4", "hum")}}))
@@ -1101,6 +1176,64 @@ class MuteTest(SessionCase):
         session.tick()
         self.assert_swapped(session.model.render())
         self.assertIs(session.numbers(), numbers)
+
+
+class NoticeTest(SessionCase):
+    def test_a_pick_does_not_wipe_a_notice_from_the_status_line_and_the_next_notice_has_its_turn_after_it(self):
+        session = self.opened()
+        session.tick()
+        self.write(changed(songs={"tune": song("l8 c d e f")}))
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        notice = f"{TUNE_LABEL} {BOTH}"
+        self.assertEqual([session.message, session.status], [notice, notice])
+        # Another thing changes outside while that notice has its time, and then a thing is picked.
+        self.write(changed(songs={"tune": song("l2 c e")}, sounds={"pop": None}))
+        self.looked(session)
+        said = session.messages
+        session.pick("song", "air")
+        # The pick clears the message as it did before, and the status line keeps the notice.
+        self.assertEqual([session.message, session.status, session.messages], ["", notice, said])
+        self.later(NOTICE_TIME - POLL_EVERY)
+        session.tick()
+        self.assertEqual([session.status, session.messages], ["changed outside: pop", said + 1])
+        # With the notices through, the line is the message, which the pick cleared.
+        self.through(session)
+        self.assertEqual([session.status, session.messages], ["", said + 1])
+
+    def test_notices_in_a_row_have_the_status_line_in_turn_and_those_that_wait_name_what_changed_as_one(self):
+        session = self.opened()
+        session.tick()
+        # Outside, a thing more is removed before each of three looks: pop, then zap, then air.
+        for sounds, songs in (({"pop": None}, {}), ({"pop": None, "zap": None}, {}),
+                              ({"pop": None, "zap": None}, {"air": None})):
+            self.write(changed(sounds=sounds, songs=songs))
+            self.looked(session)
+        # Each is the message as it comes, and the first has the status line for its time.
+        self.assertEqual([session.message, session.status, session.messages],
+                         ["changed outside: air", "changed outside: pop", 3])
+        self.through(session)
+        self.assertEqual([session.status, session.messages], ["changed outside: air, zap", 4])
+        # Each look is a step of its own all the same. With the notices through, the line is the message.
+        self.through(session)
+        self.assertEqual([session.status, session.messages, session.undo_label],
+                         ["changed outside: air", 4, "changed outside: air"])
+
+    def test_what_is_said_while_a_notice_has_the_status_line_has_it_after_the_notice_and_else_at_once(self):
+        session = self.opened()
+        session.tick()
+        session.say("one")
+        session.say("two")
+        self.assertEqual([session.message, session.status, session.messages], ["two", "two", 2])
+        self.write(changed(sounds={"pop": None}))
+        self.looked(session)
+        session.say("three")
+        session.say("four")
+        self.assertEqual([session.message, session.status, session.messages], ["four", "changed outside: pop", 5])
+        # The line is then what was said last, which is new to it: it is counted once more.
+        self.through(session)
+        self.assertEqual([session.message, session.status, session.messages], ["four", "four", 6])
+        session.say("five")
+        self.assertEqual([session.status, session.messages], ["five", 7])
 
 
 class StateTest(SessionCase):
