@@ -124,6 +124,22 @@ def echo_colour(colour: Colour, strength: float) -> Colour:
     return mix(theme.BACKGROUND, colour, ECHO_SHARE * math.sqrt(min(max(strength, 0.0), 1.0)))
 
 
+def joined(ends: Sequence[tuple[int, int]]) -> list[tuple[int, int]]:
+    """The columns of a wave made to meet: each is stretched to touch the one before, where a gap lay between.
+
+    Each is the y of a column's upper end and of its lower end. Zoomed in far, a column holds few samples, and the
+    next can begin well above or below where it ended: left as they are, the wave is strokes and not a line.
+    """
+    met: list[tuple[int, int]] = []
+    for at, (upper, lower) in enumerate(ends):
+        if at:
+            before_upper, before_lower = ends[at - 1]
+            upper = min(upper, before_lower + 1)
+            lower = max(lower, before_upper - 1)
+        met.append((upper, lower))
+    return met
+
+
 @dataclass(frozen=True)
 class Map:
     """Where the seconds and the pitches of a sound fall in the rectangle of its view, and back.
@@ -461,15 +477,19 @@ class SoundView(Widget):
                 canvas.text_in(label.upper(), (left + 3, y, max(0, room), h), theme.TEXT)
 
     def _draw_wave(self, canvas: Canvas, seen: Map) -> None:
-        """The box of the wave with its name beside it, the line at zero, and a column for each pixel with samples."""
+        """The box of the wave with its name beside it, the line at zero, and a column for each pixel with samples.
+
+        The columns are made to meet, so the wave is one line at any zoom.
+        """
         x, y, w, h = seen.wave
         canvas.text_in("WAVE", (self.rect[0], y, KEYS_W - GAP, h), theme.DIM, "right")
         canvas.box(seen.wave, theme.BACKGROUND)
         left, columns = self.columns()
         with canvas.clip((x + 1, y + 1, w - 2, h - 2)):
             canvas.hline(x, seen.zero, w, theme.LINE)
-            for column, (lowest, highest) in enumerate(columns.tolist()):
-                upper, lower = seen.column(lowest, highest)
+            spans = columns.tolist()
+            ends = joined([seen.column(lowest, highest) for lowest, highest in spans])
+            for column, ((lowest, highest), (upper, lower)) in enumerate(zip(spans, ends)):
                 clipped = max(highest, -lowest) >= FULL
                 canvas.vline(left + column, upper, lower - upper + 1, theme.FAULT if clipped else self.colour)
         canvas.frame(seen.wave, theme.LINE)

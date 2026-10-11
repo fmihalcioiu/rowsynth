@@ -17,8 +17,8 @@ from rowsynth.gui.font import Font
 from rowsynth.gui.roll import DARKER, LIGHTER, mix
 from rowsynth.gui.soundview import Bar, Shape
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import (VARIANT_GAP, ZOOM_MOST, Map, SoundView, echo_colour, keys, places, ruler_step,
-                               voice_colour)
+from rowsynth.gui.wave import (VARIANT_GAP, ZOOM_MOST, Map, SoundView, echo_colour, joined, keys, places,
+                               ruler_step, voice_colour)
 from rowsynth.project import Project
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -116,6 +116,13 @@ class Sums(unittest.TestCase):
         self.assertEqual((first[0] + first[2], second[0]), (seen.x(0.5), seen.x(0.5) + 1))
         self.assertEqual((seen.bar(0.5, 0.001, 72), replace(seen, key_h=1).bar(0.5, 0.25, 72)),
                          ((259, 30, 1, 10), (259, 30, 99, 1)))
+
+    def test_columns_with_a_gap_between_them_are_stretched_to_meet_and_the_others_are_left(self) -> None:
+        # The second lies under the first with a gap, the third over the second, the fourth overlaps the third.
+        self.assertEqual(joined([(10, 12), (20, 22), (5, 6), (6, 9)]), [(10, 12), (13, 22), (5, 19), (6, 9)])
+        # A neighbour that already touches stays as it is, the one after it is brought down to meet it.
+        self.assertEqual(joined([(10, 12), (13, 14), (9, 9)]), [(10, 12), (13, 14), (9, 12)])
+        self.assertEqual((joined([(4, 4)]), joined([])), ([(4, 4)], []))
 
     def test_a_column_of_the_wave_ends_where_its_highest_and_its_lowest_sample_fall(self) -> None:
         seen = Map(RECT)
