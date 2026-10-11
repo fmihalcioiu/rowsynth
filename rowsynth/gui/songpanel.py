@@ -1,7 +1,7 @@
 """The middle of the window for a song: its order, its channels, and a pattern as the roll of a channel or its drums."""
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
@@ -14,8 +14,9 @@ from .panels import Panel, within
 from .roll import Roll
 from .songview import Block, Channel, Pattern
 from .steps import Lane, Steps, lanes
+from .strips import SongStrip
 from .theme import Colour
-from .ui import Choice, Label, Toggle, Ui, share
+from .ui import Label, Toggle, Ui
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -24,7 +25,10 @@ if TYPE_CHECKING:
 
 #: From the sides of the panel to its parts, and from one part to the next.
 MARGIN = 4
-#: How high a small button is: the row of the order is one such button high, and so are the toggles over the view.
+#: How high the song strip is. Under the names of its blocks that leaves 54 pixels for the lanes of the channels:
+#: 3 for each of 18 channels, the least at which a note has three heights and two drum channels stand apart.
+STRIP_H = 74
+#: How high a small button is: the toggles over the view are such buttons.
 BUTTON_H = 13
 #: How wide the list of the channels is, its frame counted. The view takes what is left beside it.
 CHANNELS_W = 128
@@ -88,16 +92,16 @@ def channel_rows(channels: Sequence[Channel]) -> list[Row]:
 def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
-    "order" runs along the top. Under it "channels" stands at the left, `CHANNELS_W` wide, with "list" inside its
-    frame. "view" takes the rest: "follow" and "ghosts" side by side at its top, and under them "body", which is
-    where the roll or the steps go.
+    "strip" runs along the top, `STRIP_H` high. Under it "channels" stands at the left, `CHANNELS_W` wide, with
+    "list" inside its frame. "view" takes the rest: "follow" and "ghosts" side by side at its top, and under them
+    "body", which is where the roll or the steps go.
     """
     x, y, w, h = rect
-    top, high = y + 2 * MARGIN + BUTTON_H, h - 3 * MARGIN - BUTTON_H
+    top, high = y + 2 * MARGIN + STRIP_H, h - 3 * MARGIN - STRIP_H
     left, wide = x + 2 * MARGIN + CHANNELS_W, w - 3 * MARGIN - CHANNELS_W
     follow, ghosts = (Font.width(text) + 2 * theme.PAD for text in (FOLLOW, GHOSTS))
     placed = {
-        "order": (x + MARGIN, y + MARGIN, w - 2 * MARGIN, BUTTON_H),
+        "strip": (x + MARGIN, y + MARGIN, w - 2 * MARGIN, STRIP_H),
         "channels": (x + MARGIN, top, CHANNELS_W, high),
         "list": (x + MARGIN + INSET, top + INSET, CHANNELS_W - 2 * INSET, high - 2 * INSET),
         "view": (left, top, wide, high),
@@ -108,54 +112,23 @@ def arrange(rect: Rect) -> dict[str, Rect]:
     return {part: within(place, rect) for part, place in placed.items()}
 
 
-class Order(Choice):
-    """The order of a song as a row of small buttons, one for each place in it, with the name of the pattern there.
-
-    The picked place is lit. `pick` says which place that is, and `changed` is called with a place whenever
-    another one becomes the picked one, by `pick` or by a click. The buttons stand from the left, each as wide as
-    its name asks. Where they would be wider than the rectangle, they share it.
-    """
-
-    def __init__(self, rect: Rect, changed: Callable[[int], object] | None = None, help: str = "") -> None:
-        # A choice is made with an option, and the row has no place to show before it is shown a song.
-        super().__init__(rect, ("",), 0, changed, help)
-        self.options = ()
-
-    def show(self, names: Sequence[str], picked: int = 0) -> None:
-        """Take the names of the patterns in the order they play, and which place is picked. Nothing is told."""
-        self.options, self.picked = tuple(names), picked
-
-    def cells(self) -> list[Rect]:
-        """The rectangle of each place, side by side from the left."""
-        x, y, w, h = self.rect
-        widths = [Font.width(name) + 2 * theme.PAD for name in self.options]
-        if sum(widths) > w:
-            widths = share(w, widths)
-        cells = []
-        for width in widths:
-            cells.append((x, y, width, h))
-            x += width
-        return cells
-
-
 class SongPanel(Panel):
     """The middle of the window: the picked song as its order, its channels, and one pattern of it.
 
-    `order.picked` is the picked place in the order, and `channel` the name of the picked channel. A tuned channel
-    is shown in `roll`. With a drum channel picked, `steps` shows the drums of the pattern from all its drum
-    channels together, the picked one's labels lit. One of the two is seen at a time. While a sound, an instrument
-    or nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the
-    refusal's words. The song is read when another thing is picked and when the model has loaded its file again,
-    and at no other time.
+    `strip` is the order as blocks. `strip.picked` is the picked place in it, which the panel keeps nowhere else:
+    it is None for a song with no order. `channel` is the name of the picked channel. A tuned channel is shown in
+    `roll`. With a drum channel picked, `steps` shows the drums of the pattern from all its drum channels
+    together, the picked one's labels lit. One of the two is seen at a time. While a sound, an instrument or
+    nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the refusal's
+    words. The song is read, and the strip shown it, when another thing is picked and when the model has loaded
+    its file again, and at no other time.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
         nowhere = (0, 0, 0, 0)
-        # The row of the order is this one widget. Another that shows the order takes its place with the same
-        # three things: `show` for the names, `pick` for the picked place, and `changed` for when it is another.
-        self.order = self.add(Order(nowhere, changed=lambda place: self._view(),
-                                    help="the patterns in the order they play: a click shows one"))
+        self.strip = self.add(SongStrip(nowhere, changed=lambda place: self._view(),
+                                        help="the patterns in the order they play: a click shows one"))
         self.list = self.add(List(nowhere, changed=self._pick))
         self.follow = self.add(Toggle(nowhere, FOLLOW, on=True,
                                       help="the pattern that is shown goes along with the playing"))
@@ -170,7 +143,7 @@ class SongPanel(Panel):
         self._project: Project | None = None
         # The song that is shown, or None while none is, and what the views need of it.
         self._song: dict | None = None
-        self._blocks: list[Block] = []
+        self._blocks: tuple[Block, ...] = ()
         self._patterns: dict[str, Pattern] = {}
         self._lanes: list[Lane] = []
         self._bar_rows = 16
@@ -188,7 +161,7 @@ class SongPanel(Panel):
         """Take the panel's rectangle, and lay the widgets out in it as `arrange` has them."""
         super().place(rect)
         self._parts = parts = arrange(rect)
-        self.order.rect, self.list.rect = parts["order"], parts["list"]
+        self.strip.rect, self.list.rect = parts["strip"], parts["list"]
         self.follow.rect, self.ghosts.rect = parts["follow"], parts["ghosts"]
         self.roll.rect = self.steps.rect = parts["body"]
         self.fault.rect = rect
@@ -229,15 +202,18 @@ class SongPanel(Panel):
         """Take a song as it was read, and show it. Whatever the engine refuses in it is refused.
 
         `fresh` is for another song than before: it starts at the first place in its order, with the channel
-        `first_channel` gives. A song read again keeps its place and its channel where it still has them.
+        `first_channel` gives. A song read again keeps its channel where it still has it. Its place is the strip's
+        to keep: it stays while the order is as it was, and an order that is another starts at its first place,
+        so the place is never past the end of an order that came back shorter.
         """
-        blocks, _ = songview.blocks(song)
+        self.strip.show(song)
+        blocks = self.strip.map.blocks
+        if fresh:
+            self.strip.picked, self.strip.offset = (0 if blocks else None), 0
         self._patterns = {block.name: songview.pattern(song, block.name) for block in blocks}
         self._lanes = lanes(self._patterns.values(), songview.drum_rows(song))
         self._bar_rows = songview.bar_rows(song)
         self._blocks = blocks
-        place = 0 if fresh or self.order.picked >= len(blocks) else self.order.picked
-        self.order.show([block.name for block in blocks], place)
         if fresh or self.channel not in song["channels"]:
             self.channel = first_channel(self._channels())
         self._song = song
@@ -245,7 +221,7 @@ class SongPanel(Panel):
 
     def _channels(self) -> tuple[Channel, ...]:
         """The channels of the song as the pattern at the picked place has them. A song with no order has none."""
-        return self._patterns[self._blocks[self.order.picked].name].channels if self._blocks else ()
+        return self._patterns[self._blocks[self.strip.picked].name].channels if self._blocks else ()
 
     def _pick(self, channel: str) -> None:
         """Pick a channel of the song by its name, and show it."""
@@ -263,7 +239,7 @@ class SongPanel(Panel):
         place = next((place for place, held in enumerate(channels) if held.name == self.channel), None)
         self._drums = None if place is None else channels[place].drums
         if place is not None:
-            pattern = self._patterns[self._blocks[self.order.picked].name]
+            pattern = self._patterns[self._blocks[self.strip.picked].name]
             if self._drums:
                 self.steps.show(pattern, self._lanes, self._bar_rows, self._bar_rows // 4)
                 self.steps.picked = self.channel
@@ -272,23 +248,27 @@ class SongPanel(Panel):
         self._seen()
 
     def _play(self) -> None:
-        """Set the playhead of the views, and with FOLLOW on have the picked place go along with the playing.
+        """Set the playheads, and with FOLLOW on have the picked place go along with the playing.
 
-        The playhead is there while the song plays and the pattern that plays is the one that is shown, at
+        While the song plays, the playhead of the strip is the row of the whole song that plays. That of the views
+        is the row of the pattern, and it is there only while the pattern that plays is the one that is shown, at
         whatever place in the order it plays.
         """
         at = None
         if self._song is not None and self.session.playing:
             at = place_at(self.session.position(), self._song["row_ticks"], self._blocks)
-        if at is not None and self.follow.is_on:
-            self.order.pick(at[0])
-        shown = at is not None and self._blocks[at[0]].name == self._blocks[self.order.picked].name
+        if at is not None and self.follow.is_on and at[0] != self.strip.picked:
+            self.strip.picked = at[0]
+            self._view()
+        shown = at is not None and self._blocks[at[0]].name == self._blocks[self.strip.picked].name
         self.roll.playhead = self.steps.playhead = at[1] if shown else None
+        # The row of the song is the row its place starts at and the row of the pattern there, put together again.
+        self.strip.playhead = None if at is None else self._blocks[at[0]].row + at[1]
 
     def _seen(self) -> None:
         """Have each widget seen or not: by whether the panel is on the window, and by what there is to show."""
         song = self.shown and self._song is not None
-        for widget in (self.order, self.list, self.follow):
+        for widget in (self.strip, self.list, self.follow):
             widget.visible = song
         self.roll.visible = self.ghosts.visible = song and self._drums is False
         self.steps.visible = song and self._drums is True

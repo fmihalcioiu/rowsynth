@@ -79,7 +79,8 @@ class Shown(unittest.TestCase):
     def test_a_song_picked_is_shown_in_the_song_panel_with_the_sound_panel_off_the_window(self) -> None:
         self.assertEqual((self.model.picked, self.middle.fits, self.seen()), (("song", "walk"), SONG, [SONG]))
         self.assertEqual((self.song.shown, self.sound.shown), (True, False))
-        self.assertEqual((self.song.order.options, self.song.channel, self.sound.heading), (("a",), "air", None))
+        names = tuple(block.name for block in self.song.strip.map.blocks)
+        self.assertEqual((names, self.song.channel, self.sound.heading), (("a",), "air", None))
         # Both have the whole rectangle, the one that is off the window too.
         self.assertEqual((self.middle.rect, self.song.rect, self.sound.rect), (RECT, RECT, RECT))
 

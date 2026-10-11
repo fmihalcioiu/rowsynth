@@ -16,8 +16,9 @@ from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.model import Model
-from rowsynth.gui.songpanel import Order, SongPanel, arrange, channel_rows, colour_of, first_channel, place_at
+from rowsynth.gui.songpanel import SongPanel, arrange, channel_rows, colour_of, first_channel, place_at
 from rowsynth.gui.songview import Block, Channel, Note
+from rowsynth.gui.strips import SongStrip
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
 
@@ -103,6 +104,16 @@ def middle(rect: layout.Rect) -> tuple[int, int]:
     return rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
 
 
+def order(panel: SongPanel) -> list[str]:
+    """The names of the blocks of a panel's strip, in the order they stand."""
+    return [block.name for block in panel.strip.map.blocks]
+
+
+def block(panel: SongPanel, place: int) -> tuple[int, int]:
+    """The pixel in the middle of the block of a place in the order, in a panel's strip."""
+    return middle(panel.strip.map.block(place))
+
+
 def spot(rows: List, key: Hashable) -> tuple[int, int]:
     """The top-left corner of the row of a key, as the list is scrolled now."""
     x, y, _, h = rows.rect
@@ -179,22 +190,6 @@ class Listed(unittest.TestCase):
             ["tuned", "beat", "mute", "still", None])
 
 
-class Placed(unittest.TestCase):
-    def test_the_buttons_of_the_order_are_as_wide_as_their_names_ask_and_share_a_row_too_narrow(self) -> None:
-        told: list[int] = []
-        row = Order((10, 5, 100, 13), changed=told.append)
-        self.assertEqual(row.cells(), [])
-        row.show(["a", "long", "b"], 1)
-        self.assertEqual(row.cells(), [(10, 5, 13, 13), (23, 5, 31, 13), (54, 5, 13, 13)])
-        # Showing tells nothing, and neither does picking the place that is picked.
-        row.pick(1)
-        self.assertEqual(told, [])
-        row.pick(2)
-        self.assertEqual((row.picked, told), (2, [2]))
-        row.rect = (10, 5, 30, 13)
-        self.assertEqual(row.cells(), [(10, 5, 7, 13), (17, 5, 16, 13), (33, 5, 7, 13)])
-
-
 class Shown(unittest.TestCase):
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -218,12 +213,12 @@ class Shown(unittest.TestCase):
 
     def seen(self) -> list[str]:
         """Which of the panel's widgets are seen, by what the panel calls them."""
-        return [name for name in ("order", "list", "follow", "ghosts", "roll", "steps", "fault")
+        return [name for name in ("strip", "list", "follow", "ghosts", "roll", "steps", "fault")
                 if getattr(self.panel, name).visible]
 
     def test_at_the_start_the_first_place_and_the_first_tuned_channel_with_notes_are_picked(self) -> None:
         panel = self.panel
-        self.assertEqual((panel.order.options, panel.order.picked), (("a", "b", "a"), 0))
+        self.assertEqual((order(panel), panel.strip.picked), (["a", "b", "a"], 0))
         # The first channel of the song has no text in the first pattern.
         self.assertEqual((panel.channel, panel.list.picked), ("air", "air"))
         self.assertEqual((panel.roll.pattern.name, panel.roll.channel, panel.roll.colour), ("a", "air", theme.SOUND))
@@ -231,15 +226,19 @@ class Shown(unittest.TestCase):
         self.assertEqual(panel.list.rows, tuple(channel_rows(panel.roll.pattern.channels)))
         self.assertEqual((panel.follow.is_on, panel.ghosts.is_on), (True, True))
 
-    def test_a_click_on_a_button_of_the_order_picks_that_place(self) -> None:
+    def test_a_click_on_a_block_of_the_strip_picks_that_place_and_the_views_show_the_pattern_there(self) -> None:
         panel = self.panel
-        click(self.ui, middle(panel.order.cells()[1]))
-        self.assertEqual((panel.order.picked, panel.roll.pattern.name), (1, "b"))
+        click(self.ui, block(panel, 1))
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name), (1, "b"))
         self.assertEqual([note.pitch for note in panel.roll.notes], [67, 65, 64, 62])
         # The list is of the channels as that pattern has them.
         self.assertEqual([row.key for row in panel.list.rows if row.dim], ["low"])
-        click(self.ui, middle(panel.order.cells()[2]))
-        self.assertEqual((panel.order.picked, panel.roll.pattern.name), (2, "a"))
+        click(self.ui, block(panel, 2))
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name), (2, "a"))
+        # With a drum channel picked, it is the steps that show the pattern of the block.
+        click(self.ui, spot(panel.list, "kit"))
+        click(self.ui, block(panel, 1))
+        self.assertEqual((panel.strip.picked, panel.steps.visible, panel.steps.grid.rows), (1, True, 8))
 
     def test_a_click_on_a_channel_picks_it(self) -> None:
         panel = self.panel
@@ -249,14 +248,14 @@ class Shown(unittest.TestCase):
 
     def test_a_drum_channel_is_shown_as_the_steps_and_a_tuned_one_as_the_roll(self) -> None:
         panel = self.panel
-        self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
         click(self.ui, spot(panel.list, "kit"))
-        self.assertEqual(self.seen(), ["order", "list", "follow", "steps"])
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "steps"])
         # A lane for each letter the drum channel plays, and a square for each row of the pattern.
         self.assertEqual((panel.steps.grid.drums, panel.steps.grid.rows, panel.steps.grid.beat_rows), (2, 16, 4))
         self.assertEqual((panel.steps.rect, panel.steps.picked), (panel.roll.rect, "kit"))
         click(self.ui, spot(panel.list, "air"))
-        self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
 
     def test_either_of_two_drum_channels_picked_shows_the_drums_of_both_with_its_own_labels_lit(self) -> None:
         self.path.write_text(json.dumps({"instruments": INSTRUMENTS, "songs": {"pair": PAIR}}), encoding="utf-8")
@@ -277,7 +276,7 @@ class Shown(unittest.TestCase):
         # The lanes are those of the whole song: another pattern has the same ones, with its own hits in them.
         ui.handle(Event("move", steps.grid.square(1, 4)[:2]))
         self.assertEqual(ui.help, "k in top, bar 1, step 5: empty")
-        click(ui, middle(panel.order.cells()[1]))
+        click(ui, block(panel, 1))
         self.assertEqual((steps.picked, steps.grid.drums, steps.grid.rows), ("top", 3, 16))
         ui.handle(Event("move", steps.grid.square(1, 8)[:2]))
         self.assertEqual(ui.help, "k in top, bar 1, step 9: hit, level 15")
@@ -289,43 +288,45 @@ class Shown(unittest.TestCase):
     def test_the_channel_stays_picked_when_the_pattern_changes(self) -> None:
         panel = self.panel
         click(self.ui, spot(panel.list, "low"))
-        click(self.ui, middle(panel.order.cells()[1]))
+        click(self.ui, block(panel, 1))
         # The second pattern has no text for it: it is shown with no notes, and its row is dim.
         self.assertEqual((panel.channel, panel.list.picked), ("low", "low"))
         self.assertEqual((panel.roll.pattern.name, panel.roll.channel, panel.roll.notes), ("b", "low", ()))
         self.assertTrue(next(row for row in panel.list.rows if row.key == "low").dim)
-        self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
 
-    def test_the_playhead_is_shown_only_while_the_pattern_that_plays_is_the_one_on_screen(self) -> None:
+    def test_the_playhead_of_the_strip_is_the_row_of_the_song_and_a_view_has_one_only_while_its_pattern_plays(
+            self) -> None:
         panel = self.panel
         click(self.ui, middle(panel.follow.rect))
-        self.assertEqual((panel.roll.playhead, panel.steps.playhead), (None, None))
+        self.assertEqual((panel.strip.playhead, panel.roll.playhead, panel.steps.playhead), (None, None, None))
         shown = []
-        # Half a second in is row 5 of the first pattern, and 2 seconds in is the second pattern. At 3 seconds the
-        # first is played again, as the third place in the order: it is the pattern on screen all the same.
+        # Half a second in is row 5 of the first pattern. Two seconds in is row 20 of the song, which is row 4 of
+        # the second pattern. At 3 seconds the first is played again, as the third place in the order: it is the
+        # pattern on screen all the same.
         for seconds in (0.5, 2.0, 3.0):
             self.play(seconds)
-            shown.append((panel.order.picked, panel.roll.playhead, panel.steps.playhead))
-        self.assertEqual(shown, [(0, 5.0, 5.0), (0, None, None), (0, 6.0, 6.0)])
+            shown.append((panel.strip.picked, panel.strip.playhead, panel.roll.playhead, panel.steps.playhead))
+        self.assertEqual(shown, [(0, 5.0, 5.0, 5.0), (0, 20.0, None, None), (0, 30.0, 6.0, 6.0)])
         self.stand.playing = False
         panel.update()
-        self.assertIsNone(panel.roll.playhead)
+        self.assertEqual((panel.strip.playhead, panel.roll.playhead), (None, None))
 
-    def test_follow_moves_the_picked_place_along_with_the_playing_and_not_when_it_is_off(self) -> None:
+    def test_follow_moves_the_picked_block_along_with_the_playing_and_not_when_it_is_off(self) -> None:
         panel = self.panel
         self.play(2.0)
-        self.assertEqual((panel.order.picked, panel.roll.pattern.name, panel.roll.playhead), (1, "b", 4.0))
-        self.assertEqual(panel.channel, "air")
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name, panel.roll.playhead), (1, "b", 4.0))
+        self.assertEqual((panel.channel, panel.strip.playhead), ("air", 20.0))
         self.play(3.0)
-        self.assertEqual((panel.order.picked, panel.roll.playhead), (2, 6.0))
+        self.assertEqual((panel.strip.picked, panel.roll.playhead, panel.strip.playhead), (2, 6.0, 30.0))
         # A song that does not play moves nothing, wherever its position is said to be.
         self.stand.playing, self.stand.at = False, 2.0
         panel.update()
-        self.assertEqual(panel.order.picked, 2)
+        self.assertEqual((panel.strip.picked, panel.strip.playhead), (2, None))
         click(self.ui, middle(panel.follow.rect))
         self.assertFalse(panel.follow.is_on)
         self.play(2.0)
-        self.assertEqual((panel.order.picked, panel.roll.playhead), (2, None))
+        self.assertEqual((panel.strip.picked, panel.roll.playhead, panel.strip.playhead), (2, None, 20.0))
 
     def test_the_ghosts_toggle_turns_the_ghosts_of_the_roll_off_and_on(self) -> None:
         panel = self.panel
@@ -337,30 +338,35 @@ class Shown(unittest.TestCase):
 
     def test_a_sound_or_an_instrument_picked_shows_nothing_and_the_song_picked_again_starts_anew(self) -> None:
         panel, model = self.panel, self.stand.model
+        # In a panel this narrow the 40 rows of the song do not fit the strip, and the wheel moves its view.
+        panel.place((124, 22, 40, 300))
+        self.ui.handle(Event("wheel", middle(panel.strip.rect), wheel=-1))
         click(self.ui, spot(panel.list, "low"))
-        click(self.ui, middle(panel.order.cells()[1]))
+        click(self.ui, block(panel, 1))
+        self.assertEqual((panel.strip.picked, panel.strip.offset, panel.channel), (1, 8, "low"))
         for thing in (("sound", "ping"), ("instrument", "tone")):
             model.pick(*thing)
             self.play(2.0)
-            self.assertEqual((self.seen(), panel.roll.playhead), ([], None))
+            self.assertEqual((self.seen(), panel.roll.playhead, panel.strip.playhead), ([], None, None))
         model.pick("song", "walk")
         self.stand.playing = False
         panel.update()
-        self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
-        self.assertEqual((panel.order.picked, panel.channel), (0, "air"))
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
+        self.assertEqual((panel.strip.picked, panel.strip.offset, panel.channel), (0, 0, "air"))
 
     def test_a_song_with_no_order_and_no_channels_shows_the_headings_and_no_view(self) -> None:
         panel = self.panel
         self.stand.model.pick("song", "bare")
         self.play(1.0)
-        self.assertEqual(self.seen(), ["order", "list", "follow"])
-        self.assertEqual((panel.order.options, panel.list.rows, panel.channel), ((), HEADINGS, None))
-        self.assertEqual((panel.roll.playhead, panel.steps.playhead), (None, None))
+        self.assertEqual(self.seen(), ["strip", "list", "follow"])
+        self.assertEqual((order(panel), panel.strip.picked, panel.list.rows, panel.channel),
+                         ([], None, HEADINGS, None))
+        self.assertEqual((panel.strip.playhead, panel.roll.playhead, panel.steps.playhead), (None, None, None))
 
     def test_the_song_is_read_again_when_the_file_changed_with_the_view_where_it_was_and_at_no_other_time(
             self) -> None:
         panel = self.panel
-        click(self.ui, middle(panel.order.cells()[1]))
+        click(self.ui, block(panel, 1))
         fitted = panel.roll.top
         self.ui.handle(Event("wheel", middle(panel.roll.rect), wheel=1))
         view = (panel.roll.row, panel.roll.top, panel.roll.row_w)
@@ -374,20 +380,60 @@ class Shown(unittest.TestCase):
                 panel.update()
             self.assertEqual(read.call_count, 1)
         self.assertEqual([note.pitch for note in panel.roll.notes], [67, 65, 64, 62, 60])
-        self.assertEqual((panel.order.picked, panel.channel), (1, "air"))
+        self.assertEqual((panel.strip.picked, panel.channel), (1, "air"))
         self.assertEqual((panel.roll.row, panel.roll.top, panel.roll.row_w), view)
-        # A song that lost the picked place and the picked channel outside is shown from its start.
-        short = copy.deepcopy(PROJECT)
-        song = short["songs"]["walk"]
-        song["order"] = ["a"]
+        # A song that lost the picked channel outside shows the first one its pattern has notes for, where it was.
+        less = copy.deepcopy(PROJECT)
+        song = less["songs"]["walk"]
         del song["channels"]["air"], song["patterns"]["a"]["air"], song["patterns"]["b"]["air"]
+        self.outside(less)
+        panel.update()
+        self.assertEqual((order(panel), panel.strip.picked, panel.channel), (["a", "b", "a"], 1, "hush"))
+
+    def test_the_strip_is_shown_the_song_when_it_is_read_and_not_every_frame(self) -> None:
+        with mock.patch.object(SongStrip, "show", autospec=True, side_effect=SongStrip.show) as shown:
+            panel = SongPanel(self.stand, Ui())
+            panel.place(RECT)
+            for seconds in (0.0, 0.5, 2.0):
+                self.stand.playing, self.stand.at = True, seconds
+                panel.update()
+            self.assertEqual((shown.call_count, panel.strip.picked), (1, 1))
+            self.outside(changed("b", "air", "o4 l8 g f e d c"))
+            for _ in range(3):
+                panel.update()
+            self.assertEqual(shown.call_count, 2)
+            # A sound is not the strip's to show, and the song picked again is.
+            self.stand.model.pick("sound", "ping")
+            panel.update()
+            self.stand.model.pick("song", "walk")
+            for _ in range(3):
+                panel.update()
+            self.assertEqual(shown.call_count, 3)
+        self.assertEqual((order(panel), [note.pitch for note in panel.roll.notes]),
+                         (["a", "b", "a"], [67, 65, 64, 62, 60]))
+
+    def test_an_order_that_came_back_shorter_has_the_picked_place_inside_it(self) -> None:
+        panel = self.panel
+        click(self.ui, block(panel, 2))
+        click(self.ui, spot(panel.list, "low"))
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name), (2, "a"))
+        short = copy.deepcopy(PROJECT)
+        short["songs"]["walk"]["order"] = ["a", "b"]
         self.outside(short)
         panel.update()
-        self.assertEqual((panel.order.options, panel.order.picked, panel.channel), (("a",), 0, "low"))
+        # An order that is another starts at its first block, and the channel that is still there stays.
+        self.assertEqual((order(panel), panel.strip.picked, panel.roll.pattern.name, panel.channel),
+                         (["a", "b"], 0, "a", "low"))
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
+        # The playing goes through the order as it is now: 3 seconds in, the song of 24 rows has started again.
+        self.play(2.0)
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name, panel.strip.playhead), (1, "b", 20.0))
+        self.play(3.0)
+        self.assertEqual((panel.strip.picked, panel.strip.playhead, panel.roll.playhead), (0, 6.0, 6.0))
 
     def test_a_song_the_engine_refuses_shows_the_words_of_the_refusal_until_it_is_mended(self) -> None:
         panel = self.panel
-        click(self.ui, middle(panel.order.cells()[1]))
+        click(self.ui, block(panel, 1))
         broken = changed("b", "air", "o4 c ?")
         with self.assertRaises(RowSynthError) as refused:
             songview.blocks(Project.from_dict(broken).song("walk"))
@@ -400,27 +446,32 @@ class Shown(unittest.TestCase):
         self.assertIsNone(panel.roll.playhead)
         self.outside(PROJECT)
         panel.update()
-        self.assertEqual((self.seen(), panel.fault.text), (["order", "list", "follow", "ghosts", "roll"], ""))
-        self.assertEqual((panel.order.picked, panel.channel), (1, "air"))
+        self.assertEqual((self.seen(), panel.fault.text), (["strip", "list", "follow", "ghosts", "roll"], ""))
+        self.assertEqual((panel.strip.picked, panel.channel), (1, "air"))
 
-    def test_placed_at_two_sizes_every_widget_is_inside_the_panel(self) -> None:
+    def test_placed_at_two_sizes_every_widget_is_inside_the_panel_and_the_strip_is_above_the_rest(self) -> None:
         panel = self.panel
         self.assertEqual(arrange(RECT), {
-            "order": (128, 26, 654, 13), "channels": (128, 43, 128, 479), "list": (131, 46, 122, 473),
-            "view": (260, 43, 522, 479), "follow": (263, 46, 43, 13), "ghosts": (308, 46, 43, 13),
-            "body": (263, 63, 516, 456)})
+            "strip": (128, 26, 654, 74), "channels": (128, 104, 128, 418), "list": (131, 107, 122, 412),
+            "view": (260, 104, 522, 418), "follow": (263, 107, 43, 13), "ghosts": (308, 107, 43, 13),
+            "body": (263, 124, 516, 395)})
         self.assertEqual(len(panel.widgets), 7)
         self.assertEqual(self.ui.widgets, panel.widgets)
         for rect in (RECT, SMALL, (0, 0, 30, 5)):
             panel.place(rect)
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in panel.widgets), rect)
-            self.assertTrue(all(lies_in(part, rect) for part in arrange(rect).values()), rect)
-        # In the least panel the list of the channels is as wide as in any, and the view has what is left.
+            parts = arrange(rect)
+            self.assertTrue(all(lies_in(part, rect) for part in parts.values()), rect)
+            # The strip ends over the list of the channels and over the view.
+            foot = panel.strip.rect[1] + panel.strip.rect[3]
+            self.assertTrue(all(foot <= parts[part][1] for part in ("channels", "view")), rect)
+        # In the least panel the strip is as high as in any and the list of the channels as wide, and the view
+        # has what is left.
         panel.place(SMALL)
-        self.assertEqual((panel.order.rect, panel.list.rect, panel.follow.rect, panel.ghosts.rect),
-                         ((128, 26, 492, 13), (131, 46, 122, 269), (263, 46, 43, 13), (308, 46, 43, 13)))
+        self.assertEqual((panel.strip.rect, panel.list.rect, panel.follow.rect, panel.ghosts.rect),
+                         ((128, 26, 492, 74), (131, 107, 122, 208), (263, 107, 43, 13), (308, 107, 43, 13)))
         self.assertEqual((panel.roll.rect, panel.steps.rect, panel.fault.rect),
-                         ((263, 63, 354, 252), (263, 63, 354, 252), SMALL))
+                         ((263, 124, 354, 191), (263, 124, 354, 191), SMALL))
 
     def test_taken_off_the_window_nothing_is_seen_and_brought_back_only_what_was_shown(self) -> None:
         self.panel.show(False)
@@ -428,7 +479,7 @@ class Shown(unittest.TestCase):
         self.panel.update()
         self.assertEqual(self.seen(), [])
         self.panel.show(True)
-        self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
+        self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -444,7 +495,7 @@ class Drawn(unittest.TestCase):
         panel = SongPanel(Stand(Model(EXAMPLES / "piece.json")), self.ui)
         panel.place((0, 0, RECT[2], RECT[3]))
         panel.update()
-        panel.order.pick(panel.order.options.index("band"))
+        click(self.ui, block(panel, order(panel).index("band")))
         click(self.ui, spot(panel.list, "snare"))
         panel.draw(self.canvas)
         self.ui.draw(self.canvas)
@@ -473,7 +524,7 @@ class Drawn(unittest.TestCase):
         panel.update()
         panel.draw(self.canvas)
         self.ui.draw(self.canvas)
-        self.assertEqual((panel.order.options, panel.channel, panel.roll.colour), (("a", "b"), "lead", theme.SONG))
+        self.assertEqual((order(panel), panel.channel, panel.roll.colour), (["a", "b"], "lead", theme.SONG))
         first = panel.roll.notes[0]
         bar = panel.roll.map.note(first.row, first.rows, first.pitch)
         self.assertTrue(lies_in(bar, arrange(rect)["body"]))
@@ -482,6 +533,21 @@ class Drawn(unittest.TestCase):
         self.assertEqual(ink(self.surface, (bar[0], bar[1] - bar[3] - 1, bar[2], bar[3]), theme.SONG), 0)
         x, y, w, h = arrange(rect)["view"]
         self.assertEqual(ink(self.surface, (x, y, w, 1), theme.LINE), w)
+
+    def test_a_click_on_the_second_block_of_the_arcade_tune_draws_the_line_of_the_picked_one_under_it(self) -> None:
+        panel = SongPanel(Stand(Model(EXAMPLES / "arcade.json")), self.ui)
+        panel.place((0, 0, RECT[2], RECT[3]))
+        panel.update()
+        first, second = ((x, y + h, w, theme.STRIP) for x, y, w, h in map(panel.strip.map.block, range(2)))
+        self.assertTrue(lies_in(second, panel.strip.rect))
+        for picked, lines in ((0, [first[2] * theme.STRIP, 0]), (1, [0, second[2] * theme.STRIP])):
+            if picked:
+                click(self.ui, block(panel, picked))
+            panel.update()
+            panel.draw(self.canvas)
+            self.ui.draw(self.canvas)
+            self.assertEqual([ink(self.surface, line, theme.ACTIVE) for line in (first, second)], lines)
+        self.assertEqual((panel.strip.picked, panel.roll.pattern.name), (1, "b"))
 
 
 if __name__ == "__main__":
