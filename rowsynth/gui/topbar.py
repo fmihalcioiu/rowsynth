@@ -1,9 +1,10 @@
-"""The top bar: the file's name, play, stop and loop, where the playing is, and how many findings there are."""
+"""The top bar: the file's name, play, stop and loop, where the playing is and how loud, and the count of findings."""
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
 from . import theme
+from .dials import Meter
 from .font import Font
 from .layout import Rect
 from .panels import Panel, within
@@ -48,28 +49,37 @@ def arrange(rect: Rect, name: str) -> dict[str, Rect]:
     """Where the things of the bar go in its rectangle, each by what it is called.
 
     "found" stands at the right end. From the left stand "name", then "play", "stop" and "loop" side by side,
-    then "time". The name has the width of its text, or what the others leave it in a bar too narrow for that.
-    Every thing is cut to the bar.
+    then "time" and then "meter". A bar too narrow for them all has no meter, and one still too narrow has no
+    time either: what has gone has no width. The name has the width of its text, or what the others leave it
+    in a bar too narrow even for that. Every thing is cut to the bar.
     """
     x, y, w, h = rect
     wide, high = theme.ICON_BUTTON
     top = y + (h - high) // 2
     found = x + w - theme.BAR_MARGIN - theme.FOUND_W
-    time = Font.width(WIDEST) + 2 * theme.PAD
     left = x + theme.BAR_MARGIN
-    others = 3 * wide + 2 * theme.BUTTON_GAP + time + 3 * theme.GROUP_GAP
-    named = max(0, min(Font.width(name), found - left - others))
+    # What stands after the buttons, each with its width. The last of them is the first to go.
+    after = (("time", Font.width(WIDEST) + 2 * theme.PAD), ("meter", theme.BAR_METER_W))
+    room = found - left - 3 * wide - 2 * theme.BUTTON_GAP - 2 * theme.GROUP_GAP
+    stay = len(after)
+    while stay and Font.width(name) + sum(width + theme.GROUP_GAP for _, width in after[:stay]) > room:
+        stay -= 1
+    room -= sum(width + theme.GROUP_GAP for _, width in after[:stay])
+    named = max(0, min(Font.width(name), room))
     placed = {"name": (left, y, named, h), "found": (found, y, theme.FOUND_W, h)}
     left += named + theme.GROUP_GAP
     for button in ("play", "stop", "loop"):
         placed[button] = (left, top, wide, high)
         left += wide + theme.BUTTON_GAP
-    placed["time"] = (left - theme.BUTTON_GAP + theme.GROUP_GAP, top, time, high)
+    left += theme.GROUP_GAP - theme.BUTTON_GAP
+    for index, (thing, width) in enumerate(after):
+        placed[thing] = (left, top, width if index < stay else 0, high)
+        left += width + theme.GROUP_GAP
     return {thing: within(place, rect) for thing, place in placed.items()}
 
 
 class TopBar(Panel):
-    """The bar along the top: what is open, what plays it, how far the playing is, and what the checks found.
+    """The bar along the top: what is open, what plays it, how far and how loud, and what the checks found.
 
     `found` is how the findings are shown now, as `verdict` gives it.
     """
@@ -85,6 +95,9 @@ class TopBar(Panel):
         self.loop = ui.add(Toggle(nowhere, icon="loop", on=session.loop, changed=self._loop,
                                   help="a song goes round until it is stopped"))
         self.time = ui.add(Label(nowhere, timing(0, 0), theme.TEXT, "centre"))
+        # A bar for the left side and under it one for the right.
+        self.meter = ui.add(Meter(nowhere))
+        self.meter.levels = (0.0, 0.0)
         self.found = verdict(None)
         self._places = arrange(nowhere, self.name.text)
 
@@ -96,15 +109,22 @@ class TopBar(Panel):
         """Take the bar's rectangle, and lay the widgets out in it as `arrange` has them."""
         super().place(rect)
         self._places = arrange(rect, self.name.text)
-        for thing in ("name", "play", "stop", "loop", "time"):
+        for thing in ("name", "play", "stop", "loop", "time", "meter"):
             getattr(self, thing).rect = self._places[thing]
+        # A meter that has gone has no width, and is not drawn.
+        self.meter.visible = self._places["meter"][2] > 0
 
-    def update(self) -> None:
-        """Show what plays, whether a song goes round, the time, and the findings as the session has them now."""
+    def update(self, passed: float = 0.0) -> None:
+        """Show what plays, whether a song goes round, the time, how loud it is, and the findings, as they are now.
+
+        `passed` is the seconds since the frame before: the kept lines of the meter fall for that long.
+        """
         session = self.session
         self.play.is_on = session.playing
         self.loop.is_on = session.loop
         self.time.text = timing(session.position(), session.seconds)
+        self.meter.levels = session.level()
+        self.meter.fall(passed)
         self.found = verdict(session.finding_count())
 
     def draw(self, canvas: Canvas) -> None:

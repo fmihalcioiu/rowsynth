@@ -54,7 +54,7 @@ class Browser(Panel):
         # The panel's line runs down its right side.
         self.list.rect = within((x + pad, y + top, w - 2 * pad - 1, h - top - pad), rect)
 
-    def update(self) -> None:
+    def update(self, passed: float = 0.0) -> None:
         """Show the project as it is now: its rows made again if the listing changed, the pick, and the glows."""
         model = self.session.model
         listing = model.listing()

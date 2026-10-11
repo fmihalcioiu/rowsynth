@@ -70,7 +70,7 @@ def value_at(place: int, low: float, high: float, run: int) -> float:
 
 
 def db_height(db: float) -> float:
-    """How far up a meter a level in decibels is, from 0 at the floor to 1 at 0 dB."""
+    """How far up a meter a level in decibels is, from 0 at the floor to 1 at 0 dB. Lying, that is how far along."""
     return min(1.0, max(0.0, 1 - db / theme.METER_FLOOR_DB))
 
 
@@ -80,19 +80,31 @@ def meter_height(level: float) -> float:
 
 
 def zones(rows: int) -> list[tuple[Colour, int, int]]:
-    """The colours of a bar `rows` pixels high, from its foot: each with its first row and the one after its last."""
+    """The colours of a bar `rows` pixels long, from its low end: each with its first pixel and the one after its last.
+
+    The low end is the foot of a bar that stands and the left of one that lies.
+    """
     warm, hot = (_whole(db_height(db) * rows) for db in (theme.METER_WARM_DB, theme.METER_HOT_DB))
     return [(theme.GOOD, 0, warm), (theme.MUSTARD, warm, hot), (theme.FAULT, hot, rows)]
 
 
-def bars(rect: Rect, count: int) -> list[Rect]:
-    """The rectangle of each of a meter's bars: side by side inside its outline, with a gap between two."""
+def bars(rect: Rect, count: int, lying: bool = False) -> list[Rect]:
+    """The rectangle of each of a meter's bars inside its outline, with a gap between two.
+
+    They stand side by side from the left. In a meter that lies they are one above the other, from the top.
+    """
     x, y, w, h = rect
-    cells, left = [], x + 1
-    for width in share(w - 2 - (count - 1) * theme.METER_GAP, [1] * count):
-        cells.append((left, y + 1, width, h - 2))
-        left += width + theme.METER_GAP
+    cells, at = [], 1
+    for thick in share((h if lying else w) - 2 - (count - 1) * theme.METER_GAP, [1] * count):
+        cells.append((x + 1, y + at, w - 2, thick) if lying else (x + at, y + 1, thick, h - 2))
+        at += thick + theme.METER_GAP
     return cells
+
+
+def stretch(bar: Rect, first: int, end: int, lying: bool = False) -> Rect:
+    """The part of a bar from its pixel `first` to the one before `end`, counted from its low end as `zones` does."""
+    x, y, w, h = bar
+    return (x + first, y, end - first, h) if lying else (x, y + h - end, w, end - first)
 
 
 def lit_marks(value: float, low: float, high: float, marks: int = theme.KNOB_MARKS) -> int:
@@ -311,20 +323,28 @@ class Slider(Dial):
 
 
 class Meter(Widget):
-    """One bar or two side by side that show a level each, even in decibels. It takes nothing from the mouse.
+    """One bar or two that show a level each, even in decibels. It takes nothing from the mouse.
+
+    It stands when its rectangle is taller than wide, its bars side by side and rising from the foot. Otherwise
+    it lies, its bars one above the other and growing from the left.
 
     `levels` is one number or two from 0 to 1, set by whoever owns the meter, each frame. The highest a bar has
     been is kept as a thin line that falls back slowly: the owner calls `fall` with the time that has passed.
     A bar is green, mustard in its upper part and red at the very top. `limits` are levels drawn as lines
-    across the meter.
+    across the meter. Lying, the upper part is the right one, and the kept lines and the limits are upright.
     """
 
     def __init__(self, rect: Rect, limits: Sequence[float] = ()) -> None:
         super().__init__(rect)
         self.limits = tuple(limits)
         self._levels: tuple[float, ...] = (0.0,)
-        #: How far up the meter the kept line of each bar is, from 0 to 1.
+        #: How far along its bar the kept line of each is, from 0 at the low end to 1.
         self.tops = [0.0]
+
+    @property
+    def upright(self) -> bool:
+        """Whether it stands: its rectangle is taller than wide."""
+        return self.rect[3] > self.rect[2]
 
     @property
     def levels(self) -> tuple[float, ...]:
@@ -353,18 +373,21 @@ class Meter(Widget):
     def draw(self, canvas: Canvas) -> None:
         """Draw the bars in their colours, the kept line of each, and the limits across them all."""
         x, y, w, h = self.rect
+        lying = not self.upright
+        # How long a bar is, inside the outline.
+        rows = (w if lying else h) - 2
         canvas.box(self.rect, theme.BACKGROUND)
         canvas.frame(self.rect, theme.LINE)
-        for (left, top, width, rows), level, kept_at in zip(bars(self.rect, len(self._levels)), self._levels,
-                                                            self.tops):
+        for bar, level, kept_at in zip(bars(self.rect, len(self._levels), lying), self._levels, self.tops):
             lit, line = _whole(meter_height(level) * rows), _whole(kept_at * rows)
             for colour, first, end in zones(rows):
                 if lit > first:
-                    canvas.box((left, top + rows - min(lit, end), width, min(lit, end) - first), colour)
+                    canvas.box(stretch(bar, first, min(lit, end), lying), colour)
                 if first < line <= end:
-                    canvas.hline(left, top + rows - line, width, colour)
+                    canvas.box(stretch(bar, line - 1, line, lying), colour)
         for limit in self.limits:
-            canvas.hline(x + 1, y + h - 1 - max(1, _whole(meter_height(limit) * (h - 2))), w - 2, theme.TEXT)
+            at = max(1, _whole(meter_height(limit) * rows))
+            canvas.box(stretch((x + 1, y + 1, w - 2, h - 2), at - 1, at, lying), theme.TEXT)
 
 
 class Stepper(Widget):

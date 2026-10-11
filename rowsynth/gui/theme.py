@@ -132,6 +132,8 @@ ICON_BUTTON = (17, 16)
 BUTTON_GAP = 2
 GROUP_GAP = 12
 FOUND_W = 29
+# How wide the meter of the top bar is: its outline, and bars 60 pixels long. It is as high as a button.
+BAR_METER_W = 62
 # The left panel: from its sides and its foot to the list in it, the panel's line not counted, and from its top.
 BROWSER_PAD = 2
 BROWSER_TOP = 4

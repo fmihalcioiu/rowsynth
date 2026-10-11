@@ -51,6 +51,9 @@ class Shown(unittest.TestCase):
         self.panel.show(True)
         self.assertTrue(probe.visible)
 
+    def test_a_frame_of_a_panel_can_be_told_the_seconds_since_the_one_before_or_nothing(self) -> None:
+        self.assertEqual((self.panel.update(), self.panel.update(0.25)), (None, None))
+
 
 if __name__ == "__main__":
     unittest.main()

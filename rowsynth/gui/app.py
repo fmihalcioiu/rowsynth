@@ -89,11 +89,14 @@ class App:
         if happened is not None:
             self.ui.handle(happened)
 
-    def update(self) -> None:
-        """A frame's share of what is not drawing: the session's waiting work, then what each panel shows."""
+    def update(self, passed: float = 0.0) -> None:
+        """A frame's share of what is not drawing: the session's waiting work, then what each panel shows.
+
+        `passed` is the seconds since the frame before, which each panel is told.
+        """
         self.session.tick()
         for panel in self.panels.values():
-            panel.update()
+            panel.update(passed)
 
     def draw(self, art: pygame.Surface) -> None:
         """Draw one frame on the art surface: the parts of the frame as flat panels, each with its line.
@@ -140,17 +143,19 @@ class App:
         """
         clock = pygame.time.Clock()
         drawn = 0
+        # The seconds the frame before took, its wait for the next one counted.
+        passed = 0.0
         try:
             while frames is None or drawn < frames:
                 for event in pygame.event.get():
                     self.handle(event)
                 if self.closed:
                     break
-                self.update()
+                self.update(passed)
                 self.draw(self.screen.begin())
                 self.screen.present()
                 drawn += 1
-                clock.tick(FPS)
+                passed = clock.tick(FPS) / 1000
             if shot is not None:
                 Path(shot).parent.mkdir(parents=True, exist_ok=True)
                 # Given a file and not a path, pygame goes by the hint for the format and not by the path's ending.

@@ -21,6 +21,7 @@ from rowsynth.gui import layout, run, sprites, start, theme
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.browser import Browser, rows_of
 from rowsynth.gui.canvas import Canvas
+from rowsynth.gui.dials import bars
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.panels import within
@@ -40,6 +41,8 @@ NEEDS = "pygame is not installed"
 #: The top bar and the left panel on the art surface the layout is drawn for, and the two in a far smaller window.
 BAR, SIDE = (0, 0, 960, 22), (0, 22, 124, 504)
 SMALL_BAR, SMALL_SIDE = (40, 10, 200, 22), (40, 32, 60, 30)
+#: The level, from 0 to 1, that is 24 decibels under the top: half the way along a meter.
+HALF = 10 ** (-24 / 20)
 
 
 class Held:
@@ -66,6 +69,7 @@ class Stand:
         self.loop = True
         self.seconds = 0.0
         self.at = 0.0
+        self.loud = (0.0, 0.0)
         self.count: int | None = None
         self.lit: dict[tuple[str, str], float] = {}
 
@@ -81,6 +85,9 @@ class Stand:
 
     def position(self) -> float:
         return self.at
+
+    def level(self) -> tuple[float, float]:
+        return self.loud
 
     def finding_count(self) -> int | None:
         return self.count
@@ -223,21 +230,71 @@ class Top(unittest.TestCase):
             shown.append(bar.found)
         self.assertEqual(shown, [("", "...", theme.DIM), ("tick", "0", theme.GOOD), ("warn", "3", theme.FAULT)])
 
+    def test_the_meter_lies_with_a_bar_for_each_side_and_takes_their_levels_from_the_session(self) -> None:
+        stand, _, bar = bar_on()
+        self.assertEqual((bar.meter.upright, bar.meter.levels, bar.meter.tops), (False, (0.0, 0.0), [0.0, 0.0]))
+        for loud in ((0.5, 0.25), (0.0, 0.0)):
+            stand.loud = loud
+            bar.update()
+            self.assertEqual(bar.meter.levels, loud)
+
+    def test_the_kept_lines_of_the_meter_fall_by_the_seconds_passed_and_stay_when_none_did(self) -> None:
+        stand, _, bar = bar_on()
+        stand.loud = (1.0, HALF)
+        bar.update(0.5)
+        # Nothing plays any more. A line falls 12 decibels a second: an eighth of the meter in half a second.
+        stand.loud = (0.0, 0.0)
+        # A frame that is told no time, or nothing at all, leaves the lines where they are.
+        for passed, tops in (((0.5,), (0.875, 0.375)), ((0.0,), (0.875, 0.375)), ((), (0.875, 0.375)),
+                             ((1.0,), (0.625, 0.125)), ((60,), (0, 0))):
+            bar.update(*passed)
+            for top, there in zip(bar.meter.tops, tops, strict=True):
+                self.assertAlmostEqual(top, there)
+        self.assertEqual(bar.meter.levels, (0.0, 0.0))
+
+    def test_a_bar_wide_enough_has_the_meter_after_the_time_as_high_as_the_buttons(self) -> None:
+        places = arrange(BAR, "arcade.json")
+        self.assertEqual((places["time"], places["meter"], places["found"]),
+                         ((150, 3, 109, 16), (271, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
+        # At 380 pixels everything just fits: the meter ends a gap before the findings.
+        places = arrange((0, 0, 380, 22), "arcade.json")
+        self.assertEqual((places["meter"], places["found"]), ((271, 3, 62, 16), (345, 0, 29, 22)))
+
+    def test_a_bar_too_narrow_for_everything_has_no_meter_and_keeps_the_rest(self) -> None:
+        places = arrange((0, 0, 379, 22), "arcade.json")
+        self.assertEqual(places["meter"][2], 0)
+        self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "time", "found")],
+                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (121, 3, 17, 16), (150, 3, 109, 16),
+                          (344, 0, 29, 22)])
+        # The time stays down to the width at which it ends a gap before the findings.
+        self.assertEqual(arrange((0, 0, 306, 22), "arcade.json")["time"], (150, 3, 109, 16))
+
+    def test_a_bar_too_narrow_for_the_time_as_well_has_neither_and_keeps_the_buttons_and_the_findings(self) -> None:
+        places = arrange((0, 0, 305, 22), "arcade.json")
+        self.assertEqual((places["time"][2], places["meter"][2]), (0, 0))
+        self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "found")],
+                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (121, 3, 17, 16), (270, 0, 29, 22)])
+        # Only after the two have gone does the name give way, and the buttons keep their size.
+        self.assertEqual([arrange(SMALL_BAR, "arcade.json")[thing] for thing in ("name", "play")],
+                         [(46, 10, 65, 22), (123, 13, 17, 16)])
+        self.assertEqual([arrange((40, 10, 150, 22), "arcade.json")[thing] for thing in ("name", "play")],
+                         [(46, 10, 30, 22), (88, 13, 17, 16)])
+
     def test_placed_at_two_sizes_every_widget_is_inside_the_bar(self) -> None:
         _, ui, bar = bar_on()
         places = arrange(BAR, "arcade.json")
         self.assertEqual(places, {"name": (6, 0, 65, 22), "play": (83, 3, 17, 16), "stop": (102, 3, 17, 16),
-                                  "loop": (121, 3, 17, 16), "time": (150, 3, 109, 16), "found": (925, 0, 29, 22)})
-        self.assertEqual([bar.name.rect, bar.play.rect, bar.stop.rect, bar.loop.rect, bar.time.rect],
-                         [places[thing] for thing in ("name", "play", "stop", "loop", "time")])
-        for rect in (BAR, SMALL_BAR, (0, 0, 30, 5)):
+                                  "loop": (121, 3, 17, 16), "time": (150, 3, 109, 16), "meter": (271, 3, 62, 16),
+                                  "found": (925, 0, 29, 22)})
+        things = ("name", "play", "stop", "loop", "time", "meter")
+        self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
+        # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
+        for rect in (BAR, (0, 0, 379, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
-            self.assertEqual(len(ui.widgets), 5)
+            # A meter that has gone is not drawn at all.
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (6, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect, "arcade.json").values()), rect)
-        # In a bar too narrow for it the name gives way, and the buttons keep their size.
-        self.assertEqual([arrange(SMALL_BAR, "arcade.json")[thing] for thing in ("name", "play")],
-                         [(46, 10, 0, 22), (58, 13, 17, 16)])
 
 
 class Left(unittest.TestCase):
@@ -320,6 +377,26 @@ class Drawn(unittest.TestCase):
         self.assertGreater(ink(surface, places["time"], theme.TEXT), 0)
         self.assertEqual(ink(surface, places["time"], theme.BACKGROUND),
                          (w - 2) * (h - 2) - ink(surface, places["time"], theme.TEXT))
+
+    def test_the_bar_draws_the_left_side_in_the_upper_bar_of_the_meter_and_no_meter_that_has_gone(self) -> None:
+        rect = (0, 0, 400, theme.TOP_H)
+        surface = pygame.Surface(rect[2:])
+        canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
+        stand, ui, bar = bar_on(rect)
+        stand.loud = (1.0, 0.0)
+        meter = arrange(rect, "arcade.json")["meter"]
+        upper, lower = bars(meter, 2, lying=True)
+        shown = []
+        for wide in (400, 379):
+            bar.place((0, 0, wide, theme.TOP_H))
+            surface.fill(theme.PANEL)
+            bar.update()
+            bar.draw(canvas)
+            ui.draw(canvas)
+            shown.append((ink(surface, upper, theme.BACKGROUND), ink(surface, lower, theme.BACKGROUND),
+                          ink(surface, meter, theme.PANEL)))
+        # The upper bar is lit from end to end and the lower one is empty. A pixel narrower, there is no meter.
+        self.assertEqual(shown, [(0, lower[2] * lower[3], 0), (0, 0, meter[2] * meter[3])])
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -406,6 +483,16 @@ class InTheApp(unittest.TestCase):
         self.assertEqual((pygame.display.get_surface(), pygame.mixer.get_init()), (None, None))
         # The workers are still at it, and none of them keeps the process from ending.
         self.assertTrue(all(worker.is_alive() and worker.daemon for worker in workers))
+
+    def test_each_frame_tells_the_panels_the_seconds_the_frame_before_took(self) -> None:
+        self.held()
+        app = self.silent()
+        clock = mock.Mock()
+        clock.tick.return_value = 250
+        with mock.patch("pygame.time.Clock", return_value=clock), \
+                mock.patch.object(app.panels["top"], "update") as told:
+            self.assertEqual(app.run(frames=3), 3)
+        self.assertEqual(told.call_args_list, [mock.call(0.0), mock.call(0.25), mock.call(0.25)])
 
     def test_with_no_sound_output_the_session_has_no_player_and_says_so_when_asked_to_play(self) -> None:
         app = self.silent()

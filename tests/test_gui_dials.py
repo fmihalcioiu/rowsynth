@@ -8,7 +8,7 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.dials import (Knob, Meter, Slider, Stepper, around, bars, core, disc, dragged, handle_at, kept,
-                                knob_parts, lit_marks, meter_height, plain, value_at, wheeled, zones)
+                                knob_parts, lit_marks, meter_height, plain, stretch, value_at, wheeled, zones)
 from rowsynth.gui.font import Font
 from rowsynth.gui.ui import Event, Ui
 
@@ -79,6 +79,15 @@ class Sums(unittest.TestCase):
         self.assertEqual(zones(96), [(theme.GOOD, 0, 72), (theme.MUSTARD, 72, 90), (theme.FAULT, 90, 96)])
         self.assertEqual((bars((10, 20, 6, 50), 1), bars((10, 20, 11, 50), 2)),
                          ([(11, 21, 4, 48)], [(11, 21, 4, 48), (16, 21, 4, 48)]))
+
+    def test_the_bars_of_a_meter_that_lies_are_one_above_the_other_and_are_counted_from_the_left(self) -> None:
+        self.assertEqual((bars((10, 20, 50, 6), 1, lying=True), bars((10, 20, 50, 11), 2, lying=True)),
+                         ([(11, 21, 48, 4)], [(11, 21, 48, 4), (11, 26, 48, 4)]))
+        # The first twelve pixels of a bar and its last twelve: up from the foot of one that stands.
+        self.assertEqual((stretch((11, 21, 4, 48), 0, 12), stretch((11, 21, 4, 48), 36, 48)),
+                         ((11, 57, 4, 12), (11, 21, 4, 12)))
+        self.assertEqual((stretch((11, 21, 48, 4), 0, 12, lying=True), stretch((11, 21, 48, 4), 36, 48, lying=True)),
+                         ((11, 21, 12, 4), (47, 21, 12, 4)))
 
     def test_the_marks_of_a_knob_that_its_value_has_reached_are_lit(self) -> None:
         self.assertEqual([lit_marks(value, 0, 1) for value in (0, 0.09, 0.1, 0.3, 0.5, 0.99, 1)],
@@ -361,6 +370,55 @@ class Drawn(unittest.TestCase):
                          [theme.BACKGROUND, theme.GOOD, theme.BACKGROUND, theme.BACKGROUND, theme.GOOD])
         self.assertEqual([self.at(17, y) for y in (74, 75, 76, 98)],
                          [theme.BACKGROUND, theme.GOOD, theme.BACKGROUND, theme.BACKGROUND])
+
+    def lit(self, meter: Meter) -> set[tuple[int, int]]:
+        """The pixels of a meter that are in one of the colours of a bar."""
+        return set().union(*(self.ink(meter.rect, colour) for colour in (theme.GOOD, theme.MUSTARD, theme.FAULT)))
+
+    def test_a_bar_that_lies_is_as_long_as_one_that_stands_is_high(self) -> None:
+        standing = self.ui.add(Meter((2, 2, 6, 98)))
+        lying = self.ui.add(Meter((12, 2, 98, 6)))
+        self.assertEqual((standing.upright, lying.upright), (True, False))
+        for db, long in ((-48, 0), (-12, 72), (0, 96)):
+            standing.levels = lying.levels = (level(db),)
+            self.draw()
+            # The one that stands is lit up from its foot, at y 98, and the one that lies from its left, at x 13.
+            self.assertEqual(self.lit(standing), {(x, 98 - row) for x in range(3, 7) for row in range(long)})
+            self.assertEqual(self.lit(lying), {(13 + column, y) for column in range(long) for y in range(3, 7)})
+
+    def test_a_bar_that_lies_is_green_then_mustard_then_red_at_its_right_end(self) -> None:
+        meter = self.ui.add(Meter((10, 20, 98, 11)))
+        meter.levels = (1.0, level(-24))
+        self.draw()
+        # Inside the outline there are 96 columns, from x 11: the upper bar is the first, and is lit to the end.
+        self.assertEqual([self.at(11 + column, 22) for column in (0, 71, 72, 89, 90, 95)],
+                         [theme.GOOD, theme.GOOD, theme.MUSTARD, theme.MUSTARD, theme.FAULT, theme.FAULT])
+        self.assertEqual((self.at(50, 20), self.at(50, 25), self.at(107, 22)),
+                         (theme.LINE, theme.BACKGROUND, theme.LINE))
+        # The lower one is lit to the half.
+        self.assertEqual([self.at(x, 27) for x in (11, 58, 59, 106)],
+                         [theme.GOOD, theme.GOOD, theme.BACKGROUND, theme.BACKGROUND])
+
+    def test_the_line_kept_at_the_end_of_a_bar_that_lies_is_upright_and_falls_to_the_left(self) -> None:
+        meter = self.ui.add(Meter((10, 20, 98, 11)))
+        meter.levels = (1.0, level(-24))
+        meter.levels = (level(-24), 0.0)
+        meter.fall(1)
+        self.draw()
+        # A quarter of the meter in a second: the line of the upper bar is at 72 of 96, that of the lower at 24.
+        self.assertEqual(self.lit(meter) - {(x, y) for x in range(11, 59) for y in range(21, 25)},
+                         {(82, y) for y in range(21, 25)} | {(34, y) for y in range(26, 30)})
+        # It stops at the end of its bar, and with no bar it falls to nothing.
+        meter.fall(60)
+        self.draw()
+        self.assertEqual(self.lit(meter), {(x, y) for x in range(11, 59) for y in range(21, 25)})
+
+    def test_a_limit_of_a_meter_that_lies_is_an_upright_line_through_its_bars(self) -> None:
+        meter = self.ui.add(Meter((10, 20, 98, 11), limits=(level(-24), 0.0)))
+        meter.levels = (0.0, 0.0)
+        self.draw()
+        # At the half, and one at the floor is the first column inside the outline.
+        self.assertEqual(self.ink(meter.rect, theme.TEXT), {(x, y) for x in (58, 11) for y in range(21, 30)})
 
     def test_a_stepper_shows_its_option_between_two_arrows_and_the_arrow_at_an_end_is_dim(self) -> None:
         stepper = self.ui.add(Stepper((10, 10, 40, 13), (100, 128, 150), 1))
