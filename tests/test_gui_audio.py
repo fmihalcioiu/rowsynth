@@ -290,10 +290,69 @@ class PlayerTest(unittest.TestCase):
         self.assertEqual(self.player.position(), 0.0)
         self.player.close()
 
+    def test_also_plays_over_the_sound_that_plays_and_leaves_it_where_it_is(self) -> None:
+        main, note = [ramp(4.0)], [ramp(4.0, 0.5), ramp(4.0, 0.25)]
+        self.player.play(main, loop=True)
+        self.at(0.25)
+        self.player.also(note)
+        self.assertEqual(sounding(), [audio.to_pcm(main).tobytes(), audio.to_pcm(note).tobytes()])
+        self.assertEqual((self.player.playing, self.player.position()), (True, 0.25))
+
+    def test_the_position_and_the_level_know_nothing_of_what_also_plays(self) -> None:
+        self.player.also([np.ones(RATE, dtype=np.float32)])
+        self.at(0.25)
+        self.assertEqual((self.player.playing, self.player.position(), self.player.level()), (False, 0.0, (0.0, 0.0)))
+        self.player.play([np.full(RATE, 0.5, dtype=np.float32)])
+        self.player.also([np.ones(RATE, dtype=np.float32)])
+        self.at(0.5)
+        half = 16384 / 32767
+        self.assertEqual((self.player.position(), self.player.level()), (0.25, (half, half)))
+
+    def test_a_new_voice_is_one_that_has_ended_and_with_none_the_one_that_began_longest_ago(self) -> None:
+        self.assertEqual(audio.VOICES, 4)
+        # The second is short, and the six others outlast the test.
+        notes = [[ramp(1.0 if number == 1 else 4.0, (1 + number) / 8)] for number in range(7)]
+        first, _, third, fourth, fifth, sixth, seventh = (audio.to_pcm(note).tobytes() for note in notes)
+        for note in notes[:4]:
+            self.player.also(note)
+        # By the clock the second has ended, so its voice is free, and the first goes on though it is the oldest.
+        self.at(2.0)
+        self.player.also(notes[4])
+        self.assertEqual(sounding(), [first, fifth, third, fourth])
+        # With all four ringing, each new one takes the place of the one that began longest ago.
+        self.player.also(notes[5])
+        self.assertEqual(sounding(), [sixth, fifth, third, fourth])
+        self.player.also(notes[6])
+        self.assertEqual(sounding(), [sixth, fifth, seventh, fourth])
+
+    def test_stop_leaves_what_also_played_to_ring_and_close_ends_it(self) -> None:
+        note = [ramp(4.0)]
+        self.player.play([ramp(4.0, 0.5)], loop=True)
+        self.player.also(note)
+        self.player.stop()
+        self.assertEqual(sounding(), [audio.to_pcm(note).tobytes()])
+        self.player.close()
+        self.assertIsNone(pygame.mixer.get_init())
+
+    def test_stop_with_a_fade_has_the_mixer_bring_the_sound_down_and_is_through_with_it_at_once(self) -> None:
+        sides = [ramp(4.0)]
+        self.player.play(sides, loop=True)
+        self.at(0.25)
+        self.player.stop(fade=30.0)
+        self.assertEqual((self.player.playing, self.player.position(), self.player.level()), (False, 0.0, (0.0, 0.0)))
+        # It was not cut off: the mixer has it still, on its way down.
+        self.assertEqual(sounding(), [audio.to_pcm(sides).tobytes()])
+        # The mixer does not tell how long a sound takes to die away, so the channel is stood in for.
+        with mock.patch.object(self.player, "_channel") as channel:
+            self.player.stop(fade=0.25)
+            self.player.stop(fade=0.0001)
+            self.player.stop()
+        self.assertEqual(channel.method_calls, [mock.call.fadeout(250), mock.call.fadeout(1), mock.call.stop()])
+
     def test_sides_that_are_refused_leave_the_loop_playing(self) -> None:
         self.player.play([ramp()], loop=True)
         self.at(0.25)
-        for call in (self.player.play, self.player.swap):
+        for call in (self.player.play, self.player.swap, self.player.also):
             with self.assertRaises(RowSynthError):
                 call([])
         self.assertTrue(self.player.playing)

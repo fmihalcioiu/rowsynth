@@ -19,7 +19,7 @@ from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.model import SAVE_WAITS, Model
+from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
 from rowsynth.song import render_loop
@@ -77,6 +77,11 @@ UNREAD_SAID = "songs.odd: pattern 'a', channel 'tune': cannot read \"x9\" in a c
 
 # The checks themselves, for a test that has put something else in their place.
 RUN = checks.run
+
+# PROJECT with one song more, which has an instrument of its own under a name the project has too, and a name of
+# its own for an instrument of the project.
+MINE = {**song("l4 c e"), "instruments": {"beep": {"wave": "saw", "vol": 9}, "low": "hum"}}
+OWN = {**PROJECT, "songs": {**PROJECT["songs"], "mine": MINE}}
 
 
 def found_in(data: dict) -> list[checks.Finding]:
@@ -241,6 +246,103 @@ class RenderTest(ModelCase):
         # The song is long enough for its brightness to be read, so that number is not a zero for want of samples.
         model.pick("song", "tune")
         self.assertGreater(model.numbers()["centroid_hz"], 0)
+
+
+    def test_the_buffers_of_a_sound_are_all_its_entry_renders_to_and_the_sides_are_the_first_of_them(self):
+        model = self.opened()
+        project = Project.from_dict(PROJECT)
+        for name, count in (("ping", 1), ("blip", 3), ("crash", 1), ("drone", 3)):
+            with self.subTest(sound=name):
+                model.pick("sound", name)
+                made, wanted = model.render(), render_entry(project.sound(name), RATE)
+                self.assertEqual(len(made["buffers"]), count)
+                for buffer, want in zip(made["buffers"], wanted):
+                    np.testing.assert_array_equal(buffer, want)
+                self.assertIs(made["sides"][0], made["buffers"][0])
+                self.assert_render(made, wanted[:1], False)
+
+    def test_the_buffers_of_a_song_and_of_an_instrument_are_the_one_row_of_the_mean_of_the_sides(self):
+        model = self.opened()
+        for picked in (("song", "tune"), ("instrument", "beep")):
+            with self.subTest(picked=picked):
+                model.pick(*picked)
+                made = model.render()
+                self.assertEqual(len(made["buffers"]), 1)
+                np.testing.assert_array_equal(made["buffers"][0], np.mean(made["sides"], axis=0, dtype=np.float64))
+
+
+class ToneTest(ModelCase):
+    def note(self, inst: dict, pitch: float, ticks: float = TEST_TICKS) -> np.ndarray:
+        """One note of an instrument as the bank renders a sound of it."""
+        return render_entry({"def": {"voices": [{"inst": inst, "notes": [[0, pitch, ticks]]}]}}, RATE)[0]
+
+    def test_a_tone_of_the_test_note_is_the_render_of_the_instrument_and_any_other_is_levelled_as_that_is(self):
+        model = self.opened()
+        model.pick("instrument", "hum")
+        made = model.tone("hum", TEST_NOTE)
+        self.assertEqual([list(made), made["rate"], len(made["sides"])], [["sides", "rate"], RATE, 1])
+        np.testing.assert_array_equal(made["sides"][0], model.render()["sides"][0])
+        np.testing.assert_array_equal(model.tone("beep", "g4", 3)["sides"][0],
+                                      self.note(PROJECT["instruments"]["beep"], 67, 3))
+
+    def test_a_song_s_own_instrument_is_found_before_the_project_s_of_the_same_name(self):
+        model = self.opened(OWN)
+        own, shared = model.tone("beep", 60, song="mine"), model.tone("beep", 60)
+        np.testing.assert_array_equal(own["sides"][0], self.note(OWN["songs"]["mine"]["instruments"]["beep"], 60))
+        np.testing.assert_array_equal(shared["sides"][0], self.note(PROJECT["instruments"]["beep"], 60))
+        self.assertFalse(np.array_equal(own["sides"][0], shared["sides"][0]))
+        # A song with no such instrument of its own, and a song the project does not have, have the project's.
+        for song in ("tune", "nowhere"):
+            self.assertIs(model.tone("beep", 60, song=song), shared)
+        # A name the song gives to an instrument of the project is that instrument.
+        self.assertIs(model.tone("low", 60, song="mine"), model.tone("hum", 60))
+
+    def test_a_tone_is_made_once_for_the_same_instrument_pitch_and_ticks(self):
+        model = self.opened()
+        with mock.patch.object(gui_model, "render_entry", wraps=render_entry) as engine:
+            made = model.tone("hum", "c4", 6)
+            for pitch, ticks in (("c4", 6), (60, 6), (60.0, 6.0)):
+                self.assertIs(model.tone("hum", pitch, ticks), made)
+            self.assertEqual(engine.call_count, 1)
+            for asked in (("beep", 60, 6), ("hum", 61, 6), ("hum", 60, 7)):
+                self.assertIsNot(model.tone(*asked), made)
+            self.assertEqual(engine.call_count, 4)
+
+    def test_only_the_tones_asked_for_last_are_kept(self):
+        model = self.opened()
+        with mock.patch.object(gui_model, "TONES", 2):
+            first, second = model.tone("hum", 60), model.tone("hum", 62)
+            self.assertIs(model.tone("hum", 60), first)
+            model.tone("hum", 64)
+            # The second was asked for longest ago, so it is the one that was let go of.
+            self.assertIs(model.tone("hum", 60), first)
+            self.assertIsNot(model.tone("hum", 62), second)
+
+    def test_the_tones_are_dropped_when_the_file_is_loaded_again_with_something_changed(self):
+        model = self.opened()
+        made = model.tone("hum", 60)
+        self.write(PROJECT)
+        self.assertEqual(model.poll(), set())
+        self.assertIs(model.tone("hum", 60), made)
+        after = changed(instruments={"hum": {"wave": "saw", "vol": 12}})
+        self.write(after)
+        self.assertEqual(model.poll(), {("instrument", "hum")})
+        np.testing.assert_array_equal(model.tone("hum", 60)["sides"][0], self.note(after["instruments"]["hum"], 60))
+        self.assertFalse(np.array_equal(model.tone("hum", 60)["sides"][0], made["sides"][0]))
+
+    def test_a_tone_that_cannot_be_made_is_refused(self):
+        model = self.opened()
+        for said, asked in (
+            ("no instrument named 'bell'", ("bell", 60)),
+            ("no instrument named {'wave': 'saw'}", ({"wave": "saw"}, 60)),
+            ("not a note: 'x9'", ("hum", "x9")),
+            ("the ticks of a note must be a number, not [6]", ("hum", 60, [6])),
+            ("def: voices[0].notes[0][2]: must be 0 or more, not -1", ("hum", 60, -1)),
+        ):
+            with self.subTest(asked=asked):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.tone(*asked)
+                self.assertEqual(str(refused.exception), said)
 
 
 class FindingsTest(ModelCase):

@@ -15,6 +15,8 @@ BUFFER = 512
 WINDOW = 0.03
 # Full scale in 16 bits, as in a WAV file.
 FULL = 32767.0
+# How many of the sounds `Player.also` plays can ring at once, over the one that plays.
+VOICES = 4
 
 
 def to_pcm(sides: Sequence[np.ndarray]) -> np.ndarray:
@@ -43,7 +45,10 @@ def to_pcm(sides: Sequence[np.ndarray]) -> np.ndarray:
 
 
 class Player:
-    """Plays one sound at a time, once or round and round, and says how far into it the clock is."""
+    """Plays one sound at a time, once or round and round, and says how far into it the clock is.
+
+    Short sounds can be played over it with `also`, a few at once. The clock and the level know nothing of them.
+    """
 
     def __init__(self, rate: int = 44100, clock: Callable[[], float] = time.perf_counter) -> None:
         """Opens the mixer at `rate`, 16-bit, two channels. `clock` gives the time in seconds."""
@@ -59,7 +64,12 @@ class Player:
             raise RowSynthError(f"the sound output cannot be opened at {rate} Hz: {error}") from None
         self._rate = int(rate)
         self._clock = clock
+        # One channel for the sound that plays, and one for each voice of `also`.
+        pygame.mixer.set_num_channels(1 + VOICES)
         self._channel = pygame.mixer.Channel(0)
+        # The voices: each a channel and the moment by the clock at which what it was given last has ended. The
+        # one that was given a sound longest ago comes first.
+        self._voices = [(pygame.mixer.Channel(1 + number), float("-inf")) for number in range(VOICES)]
         # The frames of the sound that was played, until it is stopped. The origin is the moment by the
         # clock at which it began, or would have begun had it always been the render it is now.
         self._frames: np.ndarray | None = None
@@ -68,7 +78,7 @@ class Player:
         self._origin = 0.0
 
     def close(self) -> None:
-        """Stops the sound and shuts the mixer down."""
+        """Stops the sound and every sound played over it, and shuts the mixer down."""
         self._frames = None
         pygame.mixer.quit()
 
@@ -87,10 +97,32 @@ class Player:
         self._length = len(frames) / self._rate
         self._origin = self._clock()
 
-    def stop(self) -> None:
-        """Stops the sound. The position goes back to 0."""
+    def also(self, sides: Sequence[np.ndarray]) -> None:
+        """Plays one side or two once, over the sound that plays, which goes on as it was.
+
+        `VOICES` of these can ring at once. A new one takes a voice whose sound has ended by the clock, and
+        with every voice still ringing it takes the place of the one that began longest ago. `stop` leaves
+        them to ring out, and `position`, `playing` and `level` are of the sound that plays alone.
+        """
+        frames = to_pcm(sides)
+        sound = pygame.mixer.Sound(buffer=frames.tobytes())
+        now = self._clock()
+        at = next((at for at, (_, ends) in enumerate(self._voices) if ends <= now), 0)
+        channel, _ = self._voices.pop(at)
+        channel.play(sound)
+        self._voices.append((channel, now + len(frames) / self._rate))
+
+    def stop(self, fade: float = 0.0) -> None:
+        """Stops the sound, at once or dying away over `fade` seconds. The position goes back to 0.
+
+        What `also` played is left to ring out.
+        """
         self._frames = None
-        self._channel.stop()
+        if fade > 0:
+            # The mixer brings the level down in a straight line, and counts in thousandths of a second.
+            self._channel.fadeout(max(1, round(fade * 1000)))
+        else:
+            self._channel.stop()
 
     @property
     def playing(self) -> bool:

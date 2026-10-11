@@ -6,7 +6,10 @@ import os
 import threading
 import time
 from collections.abc import Callable
+from numbers import Real
 from pathlib import Path
+
+import numpy as np
 
 from .. import checks
 from ..bank import render_entry
@@ -15,6 +18,7 @@ from ..edit import NOTHING, change_file
 from ..errors import RowSynthError
 from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
+from ..notes import midi
 from ..project import Project
 from ..song import render_loop
 
@@ -33,6 +37,9 @@ SAVE_WAITS = (0.02, 0.04, 0.06, 0.08)
 # The note an instrument is heard by when it is the picked thing, and the ticks that note is held for.
 TEST_NOTE = "c4"
 TEST_TICKS = 12
+
+# How many of the notes `Model.tone` made last are kept as sound.
+TONES = 32
 
 # The numbers of a render, in the order they are shown.
 NUMBERS = ("seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz")
@@ -97,22 +104,45 @@ def _look(path: Path) -> tuple[int, int] | None:
     return stat.st_mtime_ns, stat.st_size
 
 
+def _note(inst: dict, pitch: str | float, ticks: float, rate: int) -> np.ndarray:
+    """One note of an instrument as a buffer, at the level the bank gives a sound: a sound of that one note."""
+    voice = {"inst": copy.deepcopy(inst), "notes": [[0, pitch, ticks]]}
+    return render_entry({"def": {"voices": [voice]}}, rate)[0]
+
+
+def _instrument(project: Project, name: object, song: str | None) -> tuple[tuple[str | None, str], dict]:
+    """The instrument a name stands for, in a song or with no such song in the project: where it is, and it.
+
+    Where it is, is (song, name) for one of the song's own and (None, name) for one of the project's. A name
+    the song gives to an instrument of the project stands for that one. A name nobody has is refused.
+    """
+    own = project.songs.get(song, {}).get("instruments", {})
+    found = own.get(name, name) if isinstance(name, str) else None
+    if isinstance(found, dict):
+        return (song, name), found
+    if not isinstance(found, str) or found not in project.instruments:
+        raise RowSynthError(f"no instrument named {name!r}")
+    return (None, found), project.instruments[found]
+
+
 def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
     """One thing of a project as sound, and the numbers of that sound: {"render", "numbers"}."""
     if picked is None:
         raise RowSynthError("nothing is picked")
     kind, name = picked
+    buffers = None
     if kind == "song":
         played = render_loop(project.song(name), rate)
         sides = [played["left"], played["right"]]
     elif kind == "sound":
-        sides = render_entry(project.sound(name), rate)[:1]
+        buffers = render_entry(project.sound(name), rate)
+        sides = buffers[:1]
     else:
-        voice = {"inst": copy.deepcopy(project.instruments[name]), "notes": [[0, TEST_NOTE, TEST_TICKS]]}
-        sides = render_entry({"def": {"voices": [voice]}}, rate)[:1]
+        sides = [_note(project.instruments[name], TEST_NOTE, TEST_TICKS, rate)]
     row = mono(sides)
     told = {**measure(row, rate), **brightness(row, rate=rate)}
-    return {"render": {"sides": sides, "rate": rate, "loop": kind == "song", "seconds": len(row) / rate},
+    return {"render": {"sides": sides, "rate": rate, "loop": kind == "song", "seconds": len(row) / rate,
+                       "buffers": [row] if buffers is None else buffers},
             "numbers": {key: told[key] for key in NUMBERS}}
 
 
@@ -248,6 +278,9 @@ class Model:
         self._loads = 0
         # Held wherever the picked thing, the project or anything kept of them is read or changed.
         self._lock = threading.Lock()
+        # The notes `tone` made last, each by where its instrument is, its pitch and its ticks: the one asked
+        # for longest ago first. Only the thread that owns the model reads or changes them.
+        self._tones: dict[tuple, dict] = {}
         self._rendered = _Kept("rowsynth-render", self._lock, _make, self._render_job)
         self._found = _Kept("rowsynth-checks", self._lock, _check, self._findings_job)
 
@@ -280,15 +313,20 @@ class Model:
             self._picked = (kind, name)
 
     def render(self) -> dict:
-        """The picked thing as sound: {"sides", "rate", "loop", "seconds"}. Each side is a float32 array.
+        """The picked thing as sound: {"sides", "rate", "loop", "seconds", "buffers"}. Each side is a float32 array.
 
         A song is its seamless loop, in two sides, and "loop" is true. A sound is the first buffer of its entry.
         An instrument is one note of it, c4 held for 12 ticks, at the level the bank gives a sound. Those two
-        have one side, and "loop" is false. The render is kept for as long as its thing stays picked and the
-        project stays as it is, so asking twice costs one render. One that is on its way is waited for. With
-        nothing picked there is nothing to render, which is refused. A render that went wrong is tried once and
-        no more: what the engine refused is refused again each time it is asked for, and an error the engine
-        broke with is raised again as the error it was.
+        have one side, and "loop" is false. "seconds" is how long the sides are.
+
+        "buffers" are all the buffers `render_entry` makes of a sound, in its order: one for one sound and for
+        one of parts, one a variant, and for a held sound its start, its loop and its end. The first of them is
+        the one side. For a song and for an instrument it is one row, the mean of the sides.
+
+        The render is kept for as long as its thing stays picked and the project stays as it is, so asking twice
+        costs one render. One that is on its way is waited for. With nothing picked there is nothing to render,
+        which is refused. A render that went wrong is tried once and no more: what the engine refused is refused
+        again each time it is asked for, and an error the engine broke with is raised again as the error it was.
         """
         return self._rendered.take()["render"]
 
@@ -299,6 +337,31 @@ class Model:
         `measure` and `brightness` give them. They are made with the render and kept with it.
         """
         return self._rendered.take()["numbers"]
+
+    def tone(self, inst: str, pitch: str | float, ticks: float = TEST_TICKS, song: str | None = None) -> dict:
+        """One note of an instrument as sound: {"sides", "rate"}, one side, at the level the bank gives a sound.
+
+        `inst` is the name of an instrument: one of the song's own where `song` names a song of the project
+        that has it, and else one of the project's. `pitch` is a note, a name such as "c#4" or a number, and
+        it is held for `ticks`. With the test note and its ticks, the side is the render of the instrument.
+
+        The note is made at once, on the thread that asks. The last `TONES` asked for are kept, by instrument,
+        pitch and ticks, until the file is loaded again with something in it changed: one of them asked for
+        again is the same sound, and costs nothing. A name no instrument has is refused, and so is a pitch
+        that is no note, and whatever the engine refuses of the note.
+        """
+        where, found = _instrument(self._project, inst, song)
+        if isinstance(ticks, bool) or not isinstance(ticks, Real):
+            raise RowSynthError(f"the ticks of a note must be a number, not {ticks!r}")
+        key = (where, midi(pitch), ticks)
+        made = self._tones.pop(key, None)
+        if made is None:
+            made = {"sides": [_note(found, key[1], ticks, self.rate)], "rate": self.rate}
+        # Put in again at the end, the one asked for last is the last to be let go of.
+        self._tones[key] = made
+        if len(self._tones) > TONES:
+            del self._tones[next(iter(self._tones))]
+        return made
 
     def start_render(self) -> None:
         """Begins the render of the picked thing on a thread of its own, unless it is kept or already on its way."""
@@ -352,8 +415,8 @@ class Model:
         cannot be read just now, as when another program is part-way through saving it, is no error: the model
         keeps what it had, the set is empty, and `problem` holds the message until a later look goes well.
         After a load in which something differs, the picked thing stays picked if the project still has it, and
-        nothing is picked if it does not, and the kept render, numbers and findings are dropped. A file written
-        again with nothing in it changed drops none of them: only the order of its names is taken from it.
+        nothing is picked if it does not, and the kept render, numbers, findings and notes are dropped. A file
+        written again with nothing in it changed drops none of them: only the order of its names is taken from it.
 
         `changes` then holds the same things as changes to the file: (where, was, now) for each whole thing, as
         in ("sounds.zap", what the sound was, what it is now), with NOTHING for a thing that is not there. They
@@ -412,6 +475,7 @@ class Model:
                     self._picked = None
                 self._rendered.drop()
                 self._found.drop()
+                self._tones.clear()
         self._seen = seen
         self.problem = None
         return found

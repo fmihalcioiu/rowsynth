@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import tempfile
 import threading
@@ -11,11 +12,13 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 from rowsynth import checks
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import KINDS, Model
-from rowsynth.gui.session import GLOW_TIME, POLL_EVERY, Session
+from rowsynth.gui.session import GLOW_TIME, HOLD, POLL_EVERY, Session, joined, piano
 from rowsynth.project import Project
 
 RATE = 8000
@@ -45,6 +48,23 @@ PROJECT = {
 # A song the engine refuses to loop.
 STILL = {"row_ticks": 3, "channels": {}, "patterns": {}, "order": []}
 STILL_SAID = "the song has no rows, so there is nothing to loop"
+
+# The ticks a player takes to let the loop of the held sound below go, and the samples those come to.
+LET_GO = 3
+LET_GO_SAMPLES = 400
+
+# PROJECT with more to hear in it: a sound of three variants, a held sound, and a song with a drum and with an
+# instrument of its own under a name the project has too.
+HEARD = {
+    "instruments": {**PROJECT["instruments"], "hum": {"wave": "tri", "vol": 12}},
+    "sounds": {**PROJECT["sounds"],
+               "trio": {"defs": [sound("c5"), sound("e5"), sound("g5")]},
+               "drone": {"held": {"note": {"voices": [{"inst": "hum", "notes": [[0, "a3", 12]]}]}, "start": 2,
+                                  "loop": 6, "join": 1, "end": sound("a3", "hum"), "let_go": LET_GO}}},
+    "songs": {**PROJECT["songs"],
+              "beat": {**song("l4 c e"), "instruments": {"beep": {"wave": "saw"}},
+                       "drums": {"k": {"inst": "beep", "note": "c2"}}}},
+}
 
 # The place of the text the song "tune" plays, and what a change to it is called.
 TUNE = "songs.tune.patterns.a.tune"
@@ -86,13 +106,18 @@ class Speaker:
     def __init__(self) -> None:
         self.asked: list[tuple] = []
         self.playing = False
+        # The seconds into what plays, which a test can move.
+        self.at = 0.125
 
     def play(self, sides: Sequence, loop: bool = False) -> None:
         self.asked.append(("play", sides, loop))
         self.playing = True
 
-    def stop(self) -> None:
-        self.asked.append(("stop",))
+    def also(self, sides: Sequence) -> None:
+        self.asked.append(("also", sides))
+
+    def stop(self, fade: float = 0.0) -> None:
+        self.asked.append(("stop", fade) if fade else ("stop",))
         self.playing = False
 
     def swap(self, sides: Sequence) -> None:
@@ -102,7 +127,7 @@ class Speaker:
         self.asked.append(("loop", on))
 
     def position(self) -> float:
-        return 0.125 if self.playing else 0.0
+        return self.at if self.playing else 0.0
 
     def level(self) -> tuple[float, float]:
         return (0.5, 0.25) if self.playing else (0.0, 0.0)
@@ -277,6 +302,139 @@ class PlayTest(SessionCase):
         session.loop = True
         self.assertEqual(self.speaker.did("loop"), [(True,), (False,)])
         self.assert_played((tune, False), (zap, False))
+
+
+class HearTest(SessionCase):
+    def test_a_note_sounds_over_what_plays_in_the_instrument_its_song_has_by_that_name(self):
+        session = self.opened(HEARD)
+        tune = session.model.render()
+        session.play()
+        session.sound("beep", 64)
+        session.sound("beep", "e4", song="beat")
+        shared, own = session.model.tone("beep", 64), session.model.tone("beep", 64, song="beat")
+        self.assertIsNot(shared, own)
+        (first,), (second,) = self.speaker.did("also")
+        self.assertIs(first, shared["sides"])
+        self.assertIs(second, own["sides"])
+        # What plays goes on.
+        self.assert_played((tune, True))
+        self.assertEqual([self.speaker.did("stop"), session.playing, session.message], [[], True, ""])
+
+    def test_a_drum_letter_sounds_the_instrument_and_the_note_its_song_gives_it(self):
+        session = self.opened(HEARD)
+        session.drum("k", "beat")
+        ((sides,),) = self.speaker.did("also")
+        self.assertIs(sides, session.model.tone("beep", "c2", song="beat")["sides"])
+        for letter, name in (("s", "beat"), ("k", "tune"), ("k", "nowhere")):
+            session.drum(letter, name)
+            self.assertEqual(session.message, f"no drum {letter!r} in the song {name!r}")
+        self.assertEqual(len(self.speaker.did("also")), 1)
+
+    def test_with_no_player_a_note_and_a_drum_make_nothing_and_say_nothing(self):
+        session = self.opened(HEARD, player=False)
+        with mock.patch.object(session.model, "tone", wraps=session.model.tone) as tone:
+            session.sound("beep", 60)
+            session.drum("k", "beat")
+        self.assertEqual([tone.call_count, session.message], [0, ""])
+
+    def test_a_note_that_is_refused_does_not_sound_and_the_refusal_is_the_message(self):
+        session = self.opened(HEARD)
+        for said, asked in (("no instrument named 'bell'", ("bell", 60)), ("not a note: 'x9'", ("beep", "x9"))):
+            session.sound(*asked)
+            self.assertEqual(session.message, said)
+        self.assertEqual(self.speaker.asked, [])
+
+    def test_a_sound_with_variants_plays_them_in_turn_or_the_one_that_is_asked_for(self):
+        session = self.opened(HEARD)
+        session.audition = False
+        session.pick("sound", "trio")
+        made = session.model.render()
+        for which in (None, None, None, None, 2, None, 0, 4):
+            session.play(which)
+        # Picked again, it is played from its first variant again.
+        session.audition = True
+        session.pick("sound", "trio")
+        session.tick()
+        session.play()
+        played = self.speaker.did("play")
+        self.assertEqual([loop for _, loop in played], [False] * 10)
+        for (sides, _), at in zip(played, (0, 1, 2, 0, 2, 0, 0, 1, 0, 1)):
+            self.assertEqual(len(sides), 1)
+            self.assertIs(sides[0], made["buffers"][at])
+
+    def test_a_held_sound_is_played_through_once_or_held_until_it_is_let_go(self):
+        session = self.opened(HEARD)
+        session.audition = False
+        session.pick("sound", "drone")
+        start, loop, end = session.model.render()["buffers"]
+        session.play()
+        # Nothing holds it, so there is nothing to let go.
+        session.release()
+        session.hold()
+        self.assertTrue(session.playing)
+        self.assertEqual([asked[0] for asked in self.speaker.asked], ["stop", "play", "play"])
+        rounds = math.ceil(HOLD * RATE / len(loop))
+        for (sides, looped), held in zip(self.speaker.did("play"), (1, rounds)):
+            self.assertFalse(looped)
+            self.assertEqual(len(sides), 1)
+            np.testing.assert_array_equal(sides[0], joined(start, loop, end, LET_GO_SAMPLES, held))
+        self.assertGreaterEqual(rounds * len(loop), HOLD * RATE)
+        # Let go, its loop dies away over the ticks of its "let_go" while its end is played over it.
+        session.release()
+        self.assertEqual([asked[0] for asked in self.speaker.asked[3:]], ["stop", "also"])
+        self.assertEqual(self.speaker.asked[3][1], LET_GO / 60)
+        (ended,) = self.speaker.asked[4][1]
+        self.assertIs(ended, end)
+        self.assertFalse(session.playing)
+        # It is let go once. A hold that was stopped is not let go at all, and neither is one that went on until
+        # the sound was let go by itself.
+        session.release()
+        session.hold()
+        session.stop()
+        session.release()
+        session.hold()
+        self.speaker.at = HOLD + 1
+        session.release()
+        self.assertEqual([asked[0] for asked in self.speaker.asked[5:]], ["play", "stop", "play"])
+
+    def test_a_hold_that_is_let_go_before_its_render_is_there_plays_the_sound_through_once(self):
+        session = self.opened(HEARD)
+        session.audition = False
+        go = self.held()
+        session.pick("sound", "drone")
+        session.hold()
+        session.release()
+        self.assertTrue(session.playing)
+        go.set()
+        buffers = session.model.render()["buffers"]
+        session.tick()
+        ((sides, looped),) = self.speaker.did("play")
+        np.testing.assert_array_equal(sides[0], joined(*buffers, LET_GO_SAMPLES))
+        session.release()
+        self.assertEqual([looped, self.speaker.did("also")], [False, []])
+
+
+class JoinedTest(unittest.TestCase):
+    def test_the_end_is_laid_over_the_loop_as_it_dies_away_after_the_rounds_it_was_held_for(self):
+        start, loop, end = (np.array(row, dtype=np.float32) for row in ([1, 1], [2, 4], [8, 8, 8, 8, 8]))
+        self.assertEqual(joined(start, loop, end, 4).tolist(), [1, 1, 2, 4, 10, 11, 9, 9, 8])
+        self.assertEqual(joined(start, loop, end, 4, rounds=3).tolist(), [1, 1, 2, 4, 2, 4, 2, 4, 10, 11, 9, 9, 8])
+        # A letting go that is longer than the end runs on past it, and one of no length leaves the end as it is.
+        self.assertEqual(joined(start, loop, end[:1], 4).tolist(), [1, 1, 2, 4, 10, 3, 1, 1])
+        self.assertEqual(joined(start, loop, end, 0).tolist(), [1, 1, 2, 4, 8, 8, 8, 8, 8])
+        self.assertEqual(joined(start, loop, end, 4).dtype, np.float32)
+
+
+class PianoTest(unittest.TestCase):
+    def test_the_two_rows_of_keys_are_the_notes_from_c_up_and_the_upper_row_runs_on_past_its_octave(self):
+        self.assertEqual([piano(key) for key in "zsxdcvgbhnjm"], list(range(12)))
+        self.assertEqual([piano(key) for key in "q2w3er5t6y7u"], list(range(12, 24)))
+        self.assertEqual([piano(key) for key in "i9o0p"], list(range(24, 29)))
+
+    def test_a_key_that_plays_no_note_is_none(self):
+        for key in ("a", "1", "space", "", "Z", "zs", "[2]"):
+            with self.subTest(key=key):
+                self.assertIsNone(piano(key))
 
 
 class PickTest(SessionCase):

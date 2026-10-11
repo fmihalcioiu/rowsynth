@@ -2,13 +2,17 @@
 from __future__ import annotations
 
 import copy
+import math
 import re
 import time
-from collections.abc import Callable, Iterable
+from collections.abc import Callable, Iterable, Sequence
 from typing import TYPE_CHECKING
+
+import numpy as np
 
 from ..edit import NOTHING, get_in
 from ..errors import RowSynthError
+from ..sound import tick_sample
 from .history import Change, History, same
 from .model import KINDS, Model
 
@@ -26,8 +30,48 @@ NO_SOUND = "no sound output"
 # What is said, after what it is called, of a thing another program changed in the moment it was changed here.
 BOTH = "was changed outside at the same moment: this change stands, and undo brings the other back"
 
+# The seconds of its loop a held sound is given when `Session.hold` plays it. Held for longer, it is let go
+# by itself.
+HOLD = 10.0
+
 # A place that is an item of a list: the place of the list, and the number of the item.
 _ITEM = re.compile(r"(.+)\[([0-9]+)\]")
+
+# The keys of the computer that play notes, by the names pygame has for them, each with its note: the row
+# from z up and the keys above it are the twelve notes from c, as are the row from q up and the digits above
+# it an octave higher, which runs on into a third octave from i.
+_PIANO = {key: note for note, key in enumerate("zsxdcvgbhnjm" "q2w3er5t6y7u" "i9o0p")}
+
+
+def piano(key: str) -> int | None:
+    """The note a key of the computer plays, laid out as trackers lay a piano on the keys.
+
+    `key` is pygame's name of the key, such as "z". The note is in semitones above the c of a base octave:
+    0 to 11 for z s x d c v g b h n j m, 12 to 23 for q 2 w 3 e r 5 t 6 y 7 u, and 24 to 28 for i 9 o 0 p.
+    None for a key that plays no note.
+    """
+    return _PIANO.get(key)
+
+
+def joined(start: np.ndarray, loop: np.ndarray, end: np.ndarray, let_go: int, rounds: int = 1) -> np.ndarray:
+    """The three buffers of a held sound as one row: held for `rounds` of its loop, and then let go.
+
+    `let_go` is the samples the letting go takes. The row is the start, the loop `rounds` times over, and
+    then the end with the loop under it, going round once more and brought down to nothing over `let_go`.
+    """
+    # How the three are joined for the mixer, which plays one buffer and can have only the whole of it go
+    # round. A start played once before a loop that goes round cannot be asked of it, and a sound begun as
+    # another ends meets it up to a block out of step. So the sound is laid out as it is heard when it is
+    # held for a time and then let go, and that one row is played once: every join in it is to the sample.
+    # The end is laid over the loop and not after it. The end is played when the sound is let go, and
+    # "let_go" is the ticks a player takes to let the loop go: here the loop goes on round under the end,
+    # down to nothing in a straight line. Set after a loop cut off at its full level, the end would open
+    # with a step that is not heard in use.
+    going = np.resize(loop, let_go) * np.linspace(1.0, 0.0, let_go, endpoint=False)
+    tail = np.zeros(max(len(end), let_go), dtype=np.float32)
+    tail[:len(end)] = end
+    tail[:let_go] += going
+    return np.concatenate([start, np.tile(loop, rounds), tail])
 
 
 def _told(changed: set[tuple[str, str]]) -> str:
@@ -46,7 +90,8 @@ class Session:
     """A project that is open and the sound it is heard by: what plays, what changed outside, what there is to say.
 
     One thread owns a session and calls it, `tick` once a frame. Nothing here waits for a render or for the
-    checks: what is not ready is taken up by a later `tick`. What plays is always the picked thing.
+    checks: what is not ready is taken up by a later `tick`. What plays is always the picked thing, and single
+    notes can be sounded over it.
 
     The project is changed one thing at a time, with `change` and `remove`, and each change is in the file as
     soon as it is made. Every change is a step that `undo` takes back and `redo` makes again, and so is what
@@ -75,6 +120,15 @@ class Session:
         self._checked = False
         # Whether the picked thing is to play as soon as its render is ready.
         self._waiting = False
+        # How it is to play: the variant that was asked for, None for the one whose turn it is, and whether a
+        # held sound is to be held.
+        self._which: int | None = None
+        self._holding = False
+        # The variant of the picked sound whose turn it is next.
+        self._turn = 0
+        # What `release` lets a held sound go by while `hold` has it sounding: the seconds into what plays at
+        # which it is let go by itself, the seconds its loop takes to die away, and its end as the sides of a sound.
+        self._let: tuple[float, float, Sequence[np.ndarray]] | None = None
         # The steps made to the project, here and outside.
         self._history = History()
 
@@ -86,7 +140,8 @@ class Session:
         there is no sound output, said at the first tick and each time something is to play; the things that
         changed outside; what went wrong with the render of the picked thing; what went wrong with the checks;
         why a change, or a step taken back or made again, was refused; that a change made here took the place
-        of one made outside at the same moment. A pick clears it, and so does a change or a step that is made.
+        of one made outside at the same moment; why a single note did not sound. A pick clears it, and so does
+        a change or a step that is made.
         """
         return self.model.problem or self._said
 
@@ -225,23 +280,65 @@ class Session:
         """Makes again the step taken back last. False when there is none, and when it is refused, as in `undo`."""
         return self._replay(self._history.redo(), self._history.undo)
 
-    def play(self) -> None:
+    def play(self, which: int | None = None) -> None:
         """Plays the picked thing from its start: now if its render is ready, and else as soon as it is.
 
-        With no player nothing sounds, and the message says so. With nothing picked nothing happens.
+        A sound with variants plays one of them: the one `which` counts to, from 0 and round again past the
+        last, and with None the next one each time, so that playing again and again hears them all. A held
+        sound plays its start, its loop once, and its end as it is let go: see `joined`. For anything else
+        `which` changes nothing. With no player nothing sounds, and the message says so. With nothing picked
+        nothing happens.
+        """
+        self._begin(which, False)
+
+    def hold(self) -> None:
+        """Plays the picked thing as `play` does, and a held sound as it is while it is held, until `release`.
+
+        The held sound plays its start and then its loop, round and round. It is one row that is played, with
+        `HOLD` seconds of the loop in it: held for longer, the sound is let go by itself.
+        """
+        self._begin(None, True)
+
+    def release(self) -> None:
+        """Lets go of the held sound that `hold` has sounding: its loop dies away while its end is heard.
+
+        The loop takes the ticks of its "let_go", and the end is played over it at once. A hold that still
+        waits for its render becomes a play. With no held sound held, nothing happens, and nothing either once
+        the sound was held for so long that it was let go by itself.
+        """
+        let, self._let, self._holding = self._let, None, False
+        if let is not None and self._sounding() and self.player.position() < let[0]:
+            self.player.stop(let[1])
+            self.player.also(let[2])
+
+    def sound(self, inst: str, pitch: str | float, song: str | None = None) -> None:
+        """Sounds one note of an instrument at once, over whatever plays, which goes on.
+
+        `inst` is a name, looked for as `Model.tone` looks: among the instruments of `song` first, if it is a
+        song of the project. With no player nothing happens. A note that is refused, as one of an instrument
+        nobody has, does not sound, and the message is the refusal.
         """
         if self.player is None:
-            self._said = NO_SOUND
-        elif self.model.picked is not None:
-            self._waiting = True
-            if self.model.render_ready():
-                self._take()
-            else:
-                self.model.start_render()
+            return
+        try:
+            self.player.also(self.model.tone(inst, pitch, song=song)["sides"])
+        except RowSynthError as error:
+            self._said = str(error)
+
+    def drum(self, letter: str, song: str) -> None:
+        """Sounds what a drum letter plays in a song, as `sound` does: the instrument and the note its drums give it.
+
+        A letter the song has no drum for sounds nothing, and the message says so.
+        """
+        hit = self.model.project.songs.get(song, {}).get("drums", {}).get(letter)
+        if hit is None:
+            self._said = f"no drum {letter!r} in the song {song!r}"
+        else:
+            self.sound(hit["inst"], hit["note"], song)
 
     def stop(self) -> None:
-        """Stops what plays, and gives up a play that waited for its render."""
-        self._waiting = False
+        """Stops what plays, and gives up a play that waited for its render. What `sound` began rings out."""
+        self._waiting, self._which, self._holding, self._let = False, None, False, None
         if self.player is not None:
             self.player.stop()
 
@@ -306,6 +403,37 @@ class Session:
         self.stop()
         self._render = None
         self._taken = False
+        self._turn = 0
+
+    def _begin(self, which: int | None, holding: bool) -> None:
+        """Has the picked thing play as soon as its render is there, in the way `play` or `hold` asked for."""
+        if self.player is None:
+            self._said = NO_SOUND
+        elif self.model.picked is not None:
+            self._waiting, self._which, self._holding = True, which, holding
+            if self.model.render_ready():
+                self._take()
+            else:
+                self.model.start_render()
+
+    def _heard(self, made: dict) -> tuple[Sequence[np.ndarray], bool]:
+        """What the player is given of a render that is to play, and whether that is to go round."""
+        self._let = None
+        kind, name = self.model.picked
+        entry = self.model.project.sounds[name] if kind == "sound" else {}
+        buffers, rate = made["buffers"], made["rate"]
+        if "defs" in entry:
+            at = (self._turn if self._which is None else self._which) % len(buffers)
+            self._turn = at + 1
+            return buffers[at:at + 1], False
+        if "held" in entry:
+            let_go, rounds = tick_sample(entry["held"]["let_go"], rate), 1
+            if self._holding:
+                rounds = math.ceil(HOLD * rate / len(buffers[1]))
+                held = (len(buffers[0]) + rounds * len(buffers[1])) / rate
+                self._let = (held, let_go / rate, buffers[2:])
+            return [joined(*buffers, let_go, rounds)], False
+        return made["sides"], self._loop and made["loop"]
 
     def _look(self, now: float, first: bool) -> None:
         """Looks at the file and takes up what changed in it. `first` is for the first look there is.
@@ -403,7 +531,7 @@ class Session:
             return
         try:
             if play:
-                self.player.play(made["sides"], self._loop and made["loop"])
+                self.player.play(*self._heard(made))
             elif self._loop and made["loop"] and self._sounding():
                 self.player.swap(made["sides"])
         except RowSynthError as error:
