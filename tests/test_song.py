@@ -10,7 +10,7 @@ import numpy as np
 
 from rowsynth.errors import RowSynthError
 from rowsynth.note import render_note
-from rowsynth.song import lay, pan_gains, render_loop, render_song, render_stems
+from rowsynth.song import lay, mix_stems, pan_gains, render_loop, render_song, render_stems
 from rowsynth.sound import finish
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz, and the two sides run on for 4000 after the last.
@@ -752,6 +752,27 @@ class StereoLoopTest(unittest.TestCase):
             self.assertEqual(out[side].dtype, np.float32, side)
             self.assertTrue(np.array_equal(out[side], hand), side)
             self.assertGreater(float(np.abs(hand).max()), 0.3, side)
+
+    def test_mix_of_all_the_stems_is_the_loop_and_a_mix_of_some_has_only_those_channels_in_it(self):
+        played = render_stems(SONG, RATE)
+        tune, low, beat = played["stems"]
+        out = render_loop(SONG, RATE)
+        for side, mixed in zip(("left", "right"), mix_stems(played["stems"], played["loop_samples"])):
+            self.assertEqual(mixed.dtype, np.float32, side)
+            self.assertTrue(np.array_equal(mixed, out[side]), side)
+        # Two of them are their sum, worked out in doubles and rounded to float32 after each.
+        wanted = [np.zeros(9600, dtype=np.float32), np.zeros(9600, dtype=np.float32)]
+        for found in (tune, beat):
+            for side, gain in enumerate(pan_gains(found["pan"])):
+                wanted[side] = (wanted[side] + found["samples"].astype(np.float64) * gain).astype(np.float32)
+        for mixed, hand, whole in zip(mix_stems([tune, beat], 9600), wanted, (out["left"], out["right"])):
+            self.assertTrue(np.array_equal(mixed, hand))
+            self.assertFalse(np.array_equal(mixed, whole))
+        # None of them are silence, and a stem that is longer than the sides is cut where they end.
+        for silent, short, whole in zip(mix_stems([], 100), mix_stems([low], 100), mix_stems([low], 9600)):
+            self.assertEqual((silent.shape, bool(silent.any())), ((100,), False))
+            self.assertTrue(np.array_equal(short, whole[:100]))
+            self.assertTrue(short.any())
 
     def test_loop_opens_on_what_sounds_past_its_end_and_its_end_is_not_faded(self):
         # The one channel is all to the left, so the left side is its stem as it is: a note that starts half

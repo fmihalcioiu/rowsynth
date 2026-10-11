@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import copy
 import json
+import math
 import os
 import tempfile
 import threading
+import time
 import traceback
 import unittest
 from collections.abc import Callable
@@ -22,7 +24,9 @@ from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
-from rowsynth.song import render_loop
+from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems
+
+EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz, and a song of one bar is 6400: room for five of the
 # frames its brightness is read from.
@@ -83,6 +87,21 @@ RUN = checks.run
 MINE = {**song("l4 c e"), "instruments": {"beep": {"wave": "saw", "vol": 9}, "low": "hum"}}
 OWN = {**PROJECT, "songs": {**PROJECT["songs"], "mine": MINE}}
 
+# A song of one bar to listen into: a channel in the middle, one all to the left, one all to the right at half
+# its level, and a fourth that no pattern has text for, which so has no stem. With it a song of two channels
+# and a sound.
+TRIO = {"row_ticks": 3,
+        "channels": {"mid": {"inst": "beep"}, "port": {"inst": "hum", "pan": -1},
+                     "star": {"inst": "hum", "pan": 1, "gain": 0.5}, "spare": {"inst": "beep"}},
+        "patterns": {"a": {"mid": "l4 c e g > c", "port": "o3 c2 r2", "star": "o5 r2 g2"}}, "order": ["a"]}
+LISTEN = {"instruments": PROJECT["instruments"], "sounds": {"ping": PROJECT["sounds"]["ping"]},
+          "songs": {"trio": TRIO, "tune": song("l4 c e g > c")}}
+
+
+def stems_of(data: dict, name: str = "trio", rate: int = RATE) -> dict[str, dict]:
+    """The stems the engine makes of a song of a project, each under the name of its channel."""
+    return {stem["name"]: stem for stem in render_stems(Project.from_dict(data).song(name), rate)["stems"]}
+
 
 def found_in(data: dict) -> list[checks.Finding]:
     """What the checks find in a project."""
@@ -136,6 +155,10 @@ class ModelCase(unittest.TestCase):
         loop = render_loop(Project.from_dict(data).song(name), RATE)
         self.assertEqual(made["seconds"], loop["seconds"])
         self.assert_render(made, [loop["left"], loop["right"]], True)
+
+    def assert_mix(self, made: dict, stems: list[dict]) -> None:
+        """Holds a render of a song to the mix of some stems alone, sample for sample."""
+        self.assert_render(made, list(mix_stems(stems, len(stems[0]["samples"]))), True)
 
 
 class OpeningTest(ModelCase):
@@ -204,9 +227,21 @@ class RenderTest(ModelCase):
         note = {"def": {"voices": [{"inst": PROJECT["instruments"]["hum"], "notes": [[0, "c4", 12]]}]}}
         self.assert_render(model.render(), render_entry(note, RATE), False)
 
+    def test_the_render_of_a_song_is_sample_for_sample_the_loop_the_engine_makes_of_it(self):
+        # The song of the first example at the rate a model has unless it is told, the long one at a low rate.
+        for file, rate in (("arcade.json", 44100), ("piece.json", RATE)):
+            with self.subTest(file=file):
+                model = Model(EXAMPLES / file, rate)
+                made = model.render()
+                loop = render_loop(model.project.song(model.picked[1]), model.rate)
+                self.assertEqual([model.picked[0], made["loop"], made["seconds"]], ["song", True, loop["seconds"]])
+                for side, wanted in zip(made["sides"], (loop["left"], loop["right"]), strict=True):
+                    self.assertEqual(side.dtype, np.float32)
+                    np.testing.assert_array_equal(side, wanted)
+
     def test_a_render_is_made_once_for_as_long_as_its_thing_stays_picked(self):
         model = self.opened()
-        with mock.patch.object(gui_model, "render_loop", wraps=render_loop) as engine:
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
             made = model.render()
             model.numbers()
             model.pick("song", "tune")
@@ -225,7 +260,7 @@ class RenderTest(ModelCase):
 
     def test_a_render_the_engine_refuses_is_tried_once_and_refused_each_time_it_is_asked_for(self):
         model = self.opened(NO_ROWS)
-        with mock.patch.object(gui_model, "render_loop", wraps=render_loop) as engine:
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
             for ask in (model.render, model.numbers, model.render):
                 with self.assertRaises(RowSynthError) as refused:
                     ask()
@@ -269,6 +304,243 @@ class RenderTest(ModelCase):
                 made = model.render()
                 self.assertEqual(len(made["buffers"]), 1)
                 np.testing.assert_array_equal(made["buffers"][0], np.mean(made["sides"], axis=0, dtype=np.float64))
+
+
+class HearTest(ModelCase):
+    def test_one_channel_heard_is_the_mix_of_its_stem_alone_two_are_their_sum_and_all_are_the_whole_render(self):
+        model = self.opened(LISTEN)
+        whole, stems = model.render(), stems_of(LISTEN)
+        self.assertIsNone(model.heard)
+        model.hear({"mid"})
+        self.assertEqual(model.heard, {"mid"})
+        self.assert_mix(model.render(), [stems["mid"]])
+        # Two are their sum in the order the song has them, worked out in doubles and rounded to float32 after each.
+        model.hear(["star", "port"])
+        wanted = [np.zeros(6400, dtype=np.float32), np.zeros(6400, dtype=np.float32)]
+        for name in ("port", "star"):
+            for side, gain in enumerate(pan_gains(stems[name]["pan"])):
+                wanted[side] = (wanted[side] + stems[name]["samples"].astype(np.float64) * gain).astype(np.float32)
+        self.assert_render(model.render(), wanted, True)
+        # Every channel by its name is the whole song sample for sample, and all of them is the render it was.
+        model.hear(TRIO["channels"])
+        self.assert_render(model.render(), whole["sides"], True)
+        model.hear()
+        self.assertIsNone(model.heard)
+        self.assertIs(model.render(), whole)
+        # A channel that plays nothing is silence, and so are no channels at all.
+        for only in ({"spare"}, set()):
+            model.hear(only)
+            self.assert_render(model.render(), [np.zeros(6400, dtype=np.float32)] * 2, True)
+
+    def test_a_channel_in_the_middle_one_on_the_left_and_one_on_the_right_keep_their_sides_when_heard_alone(self):
+        model = self.opened(LISTEN)
+        stems = {name: stem["samples"] for name, stem in stems_of(LISTEN).items()}
+        sides = {}
+        for name in ("mid", "port", "star"):
+            model.hear({name})
+            sides[name] = model.render()["sides"]
+            self.assertGreater(float(np.abs(stems[name]).max()), 0.05)
+        # All to one side, a channel is its stem there, at the level it has in the song, and nothing on the other.
+        np.testing.assert_array_equal(sides["port"][0], stems["port"])
+        self.assertFalse(sides["port"][1].any())
+        np.testing.assert_array_equal(sides["star"][1], stems["star"])
+        self.assertLess(float(np.abs(sides["star"][0]).max()), 1e-12)
+        # In the middle, each side has it 3 dB down.
+        for side in sides["mid"]:
+            np.testing.assert_allclose(side, stems["mid"] * math.sqrt(0.5), rtol=0, atol=1e-7)
+
+    def test_a_hear_renders_nothing_again_and_a_mix_is_made_once_while_the_same_channels_are_heard(self):
+        model = self.opened(LISTEN)
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine, \
+                mock.patch.object(gui_model, "mix_stems", wraps=mix_stems) as mixer:
+            whole = model.render()
+            self.assertEqual([engine.call_count, mixer.call_count], [1, 1])
+            for mixes, only in enumerate(({"mid"}, {"port", "star"}, {"mid"}), 2):
+                model.hear(only)
+                self.assertFalse(model.render_ready())
+                made = model.render()
+                self.assertTrue(model.render_ready())
+                self.assertIs(model.render(), made)
+                model.numbers()
+                self.assertEqual([engine.call_count, mixer.call_count], [1, mixes])
+            # The whole song is there as it was rendered, with nothing to mix for it.
+            model.hear(None)
+            self.assertTrue(model.render_ready())
+            self.assertIs(model.render(), whole)
+            self.assertEqual([engine.call_count, mixer.call_count], [1, 4])
+
+    def test_the_numbers_and_the_buffers_stay_those_of_the_whole_song_whatever_is_heard(self):
+        model = self.opened(LISTEN)
+        whole, numbers = model.render(), model.numbers()
+        model.hear({"port"})
+        made = model.render()
+        self.assertIs(model.numbers(), numbers)
+        self.assertIs(made["buffers"], whole["buffers"])
+        self.assertEqual([made["rate"], made["loop"], made["seconds"]], [RATE, True, whole["seconds"]])
+        row = np.mean(whole["sides"], axis=0, dtype=np.float64)
+        np.testing.assert_array_equal(made["buffers"][0], row)
+        self.assertEqual(numbers, {**measure(row, RATE), **brightness(row, rate=RATE)})
+        self.assertFalse(np.array_equal(np.mean(made["sides"], axis=0, dtype=np.float64), row))
+
+    def test_what_is_no_channel_of_the_picked_song_is_refused_and_what_was_heard_stays(self):
+        model = self.opened(LISTEN)
+        model.hear({"mid"})
+        for only, said in (
+            ({"mid", "tune"}, "the song 'trio' has no channel named 'tune'"),
+            ([["mid"]], "the song 'trio' has no channel named ['mid']"),
+            ("mid", "the channels to hear are a set of names or None, not 'mid'"),
+            (3, "the channels to hear are a set of names or None, not 3"),
+        ):
+            with self.subTest(only=only):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.hear(only)
+                self.assertEqual(str(refused.exception), said)
+                self.assertEqual(model.heard, {"mid"})
+        # A sound has no channels to hear and nor has nothing: all of them is all there is to ask for.
+        model.pick("sound", "ping")
+        for other in (model, self.opened({})):
+            with self.assertRaises(RowSynthError) as refused:
+                other.hear(set())
+            self.assertEqual(str(refused.exception), "no song is picked, so there are no channels to hear")
+            other.hear(None)
+            self.assertIsNone(other.heard)
+
+    def test_picking_another_thing_has_all_its_channels_heard_and_picking_the_same_thing_again_does_not(self):
+        model = self.opened(LISTEN)
+        model.hear({"mid"})
+        model.pick("song", "trio")
+        self.assertEqual(model.heard, {"mid"})
+        model.pick("song", "tune")
+        self.assertIsNone(model.heard)
+        self.assert_loop(model.render(), LISTEN, "tune")
+        model.pick("song", "trio")
+        self.assertIsNone(model.heard)
+        self.assert_loop(model.render(), LISTEN, "trio")
+
+    def test_a_channel_removed_or_added_in_the_file_has_all_heard_again_and_any_other_change_does_not(self):
+        model = self.opened(LISTEN)
+        model.hear({"mid", "port"})
+        # Other notes and another pan: the song has the channels it had, and the same two are heard of it.
+        after = copy.deepcopy(LISTEN)
+        after["songs"]["trio"]["patterns"]["a"]["mid"] = "l4 c e g a"
+        after["songs"]["trio"]["channels"]["port"]["pan"] = -0.5
+        self.write(after)
+        self.assertEqual(model.poll(), {("song", "trio")})
+        self.assertEqual([model.heard, model.render_ready()], [{"mid", "port"}, False])
+        stems = stems_of(after)
+        self.assert_mix(model.render(), [stems["mid"], stems["port"]])
+        del after["songs"]["trio"]["channels"]["spare"]
+        self.write(after)
+        model.poll()
+        self.assertIsNone(model.heard)
+        self.assert_loop(model.render(), after, "trio")
+        # A change made here is taken in as one from outside is.
+        model.hear({"mid"})
+        model.change("songs.trio.channels.spare", {"inst": "beep"})
+        self.assertIsNone(model.heard)
+        model.hear({"mid"})
+        model.change("songs.trio", delete=True)
+        self.assertEqual([model.picked, model.heard], [None, None])
+
+    def test_a_song_the_engine_refuses_is_refused_as_it_was_while_only_some_of_its_channels_are_heard(self):
+        model = self.opened(NO_ROWS)
+        model.hear(set())
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
+            for ask in (model.render, model.numbers, model.render):
+                with self.assertRaises(RowSynthError) as refused:
+                    ask()
+                self.assertEqual(str(refused.exception), NO_ROWS_SAID)
+        self.assertEqual(engine.call_count, 1)
+        self.assertTrue(model.render_ready())
+        self.assertEqual(model.levels(0.0), {})
+
+
+class LevelsTest(ModelCase):
+    # What the middle channel reads at its loudest: its one sample, 3 dB down.
+    MIDDLE = 0.5 * math.cos(math.pi / 4)
+
+    def by_hand(self) -> Model:
+        """A model of LISTEN whose trio is rendered into stems written by hand: each silent but for one sample."""
+        stems = []
+        for name, pan, at, sample in (("mid", 0, 4000, 0.5), ("port", -1, 6390, -0.25), ("star", 1, 100, 0.75)):
+            samples = np.zeros(6400, dtype=np.float32)
+            samples[at] = sample
+            stems.append({"name": name, "pan": pan, "samples": samples})
+        model = self.opened(LISTEN)
+        played = {"stems": stems, "rows": 16, "loop_samples": 6400, "seconds": 0.8}
+        with mock.patch.object(gui_model, "render_stems", return_value=played):
+            model.render()
+        return model
+
+    def test_a_channel_reads_the_loudest_sample_of_its_stem_over_the_stretch_times_its_share_of_the_louder_side(self):
+        model = self.by_hand()
+        # The stretch is the 0.03 seconds up to the moment, 240 samples at 8000 Hz, and the sample at each end.
+        for seconds, mid in ((0.49, 0.0), (0.5, self.MIDDLE), (0.515, self.MIDDLE), (0.53, self.MIDDLE), (0.54, 0.0)):
+            with self.subTest(seconds=seconds):
+                self.assertEqual(model.levels(seconds), {"mid": mid, "port": 0.0, "star": 0.0, "spare": 0.0})
+        # A stretch of no time is the one sample, and one longer than the loop is the whole of it.
+        self.assertEqual([model.levels(0.5, 0)["mid"], model.levels(0.5005, 0)["mid"]], [self.MIDDLE, 0.0])
+        self.assertEqual(model.levels(0.2, 5), {"mid": self.MIDDLE, "port": 0.25, "star": 0.75, "spare": 0.0})
+
+    def test_the_stretch_goes_back_round_the_end_of_the_loop_and_a_moment_past_the_loop_is_that_moment_a_round_on(self):
+        model = self.by_hand()
+        # 0.01 seconds in, the stretch began 160 samples before the end of the round before.
+        self.assertEqual(model.levels(0.01), {"mid": 0.0, "port": 0.25, "star": 0.0, "spare": 0.0})
+        self.assertEqual(model.levels(0.02), {"mid": 0.0, "port": 0.25, "star": 0.75, "spare": 0.0})
+        self.assertEqual(model.levels(0.035), {"mid": 0.0, "port": 0.0, "star": 0.75, "spare": 0.0})
+        for seconds in (0.51 + 0.8, 0.51 + 8.0, 0.51 - 1.6):
+            self.assertEqual(model.levels(seconds), model.levels(0.51))
+        self.assertEqual(model.levels(0.51)["mid"], self.MIDDLE)
+
+    def test_a_channel_that_is_not_heard_reads_0_at_once_and_the_others_read_as_they_did(self):
+        model = self.by_hand()
+        model.hear({"mid", "star"})
+        # The mix of the two is not made yet: the levels are read off the stems, by what is heard now.
+        self.assertFalse(model.render_ready())
+        self.assertEqual(model.levels(0.2, 5), {"mid": self.MIDDLE, "port": 0.0, "star": 0.75, "spare": 0.0})
+        model.hear(set())
+        self.assertEqual(model.levels(0.2, 5), dict.fromkeys(TRIO["channels"], 0.0))
+        model.hear(None)
+        self.assertEqual(model.levels(0.2, 5), {"mid": self.MIDDLE, "port": 0.25, "star": 0.75, "spare": 0.0})
+
+    def test_there_are_no_levels_but_of_a_picked_song_whose_render_is_kept(self):
+        model = self.opened(LISTEN)
+        self.assertEqual(model.levels(0.1), {})
+        model.render()
+        read = model.levels(0.1)
+        self.assertEqual(list(read), list(TRIO["channels"]))
+        self.assertGreater(read["port"], 0.05)
+        for picked in (("sound", "ping"), ("instrument", "hum")):
+            model.pick(*picked)
+            model.render()
+            self.assertEqual(model.levels(0.1), {})
+        self.assertEqual(self.opened({}).levels(0.1), {})
+
+    def test_a_moment_or_a_stretch_that_is_no_number_of_seconds_is_refused(self):
+        model = self.by_hand()
+        for seconds, window in (("0.5", 0.03), (None, 0.03), (True, 0.03), (float("nan"), 0.03), (0.5, -0.01),
+                                (0.5, float("inf")), (0.5, [0.03])):
+            with self.subTest(seconds=seconds, window=window):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.levels(seconds, window)
+                self.assertEqual(str(refused.exception), "levels are read at a moment and over a stretch, both a "
+                                 f"number of seconds, not {seconds!r} and {window!r}")
+
+    def test_the_levels_of_eighteen_channels_cost_far_less_than_a_frame_has(self):
+        names = [f"voice{at}" for at in range(18)]
+        wide = {"row_ticks": 3, "channels": {name: {"inst": "hum", "pan": at / 9 - 1} for at, name in enumerate(names)},
+                "patterns": {"a": dict.fromkeys(names, "l1 c")}, "order": ["a"]}
+        self.write({"instruments": PROJECT["instruments"], "songs": {"wide": wide}})
+        model = Model(self.path, 44100)
+        model.render()
+        took = []
+        for _ in range(3):
+            start = time.perf_counter()
+            read = model.levels(0.4)
+            took.append(time.perf_counter() - start)
+        self.assertEqual(list(read), names)
+        self.assertGreater(min(read.values()), 0.01)
+        self.assertLess(min(took), 0.002)
 
 
 class ToneTest(ModelCase):
@@ -637,7 +909,7 @@ class WorkerTest(ModelCase):
     """A render and the checks on threads of their own. An event holds them back, so each test says when they end."""
 
     def held(self, error: Exception | None = None) -> threading.Event:
-        """Has the engine wait before it renders a loop, and the checks before they run. Gives what lets them go on.
+        """Has the engine wait before it renders a song, and the checks before they run. Gives what lets them go on.
 
         With `error`, each raises it once it is let go, and does nothing else.
         """
@@ -651,7 +923,7 @@ class WorkerTest(ModelCase):
                 return real(*args)
             return wait
 
-        for owner, name, kept_as in ((gui_model, "render_loop", "engine"), (checks, "run", "checker")):
+        for owner, name, kept_as in ((gui_model, "render_stems", "engine"), (checks, "run", "checker")):
             patch = mock.patch.object(owner, name, side_effect=waiting(getattr(owner, name)))
             setattr(self, kept_as, patch.start())
             self.addCleanup(patch.stop)
@@ -710,6 +982,52 @@ class WorkerTest(ModelCase):
         self.assertEqual(model.picked, ("song", "tune"))
         self.assertFalse(model.render_ready())
         self.assert_loop(model.render(), after, "tune")
+
+    def test_a_mix_begun_on_its_own_thread_waits_for_the_render_and_is_ready_when_both_are_through(self):
+        model = self.opened(LISTEN)
+        go = self.held()
+        model.hear({"mid"})
+        rendering = self.started(model)
+        (mixing,) = model._mixed._workers.values()
+        self.assertEqual([rendering.name, mixing.name], ["rowsynth-render", "rowsynth-mix"])
+        model.start_render()
+        self.assertEqual([*model._rendered._workers.values(), *model._mixed._workers.values()], [rendering, mixing])
+        self.assertEqual([model.render_ready(), model.levels(0.1)], [False, {}])
+        go.set()
+        mixing.join()
+        self.assertFalse(rendering.is_alive())
+        self.assertTrue(model.render_ready())
+        self.assertEqual([model._rendered._workers, model._mixed._workers], [{}, {}])
+        stems = stems_of(LISTEN)
+        self.assert_mix(model.render(), [stems["mid"]])
+        # Other channels are mixed from the stems that are kept, on a thread too, with nothing rendered again.
+        threads = []
+
+        def mixed(*args: object) -> tuple:
+            threads.append(threading.current_thread().name)
+            return mix_stems(*args)
+
+        with mock.patch.object(gui_model, "mix_stems", side_effect=mixed):
+            model.hear({"port", "star"})
+            self.assertFalse(model.render_ready())
+            model.start_render()
+            self.assertEqual(model._rendered._workers, {})
+            self.assert_mix(model.render(), [stems["port"], stems["star"]])
+        self.assertEqual([threads, self.engine.call_count], [["rowsynth-mix"], 1])
+
+    def test_a_hear_made_while_a_mix_is_on_its_way_is_not_given_that_mix_and_renders_nothing_again(self):
+        model = self.opened(LISTEN)
+        go = self.held()
+        model.hear({"mid"})
+        self.started(model)
+        (mixing,) = model._mixed._workers.values()
+        model.hear({"port"})
+        go.set()
+        mixing.join()
+        # The song's render is the one of now, and is kept. The mix was of other channels than are heard now.
+        self.assertEqual([model._rendered.ready(), model.render_ready()], [True, False])
+        self.assert_mix(model.render(), [stems_of(LISTEN)["port"]])
+        self.assertEqual(self.engine.call_count, 1)
 
     def test_asking_for_a_render_that_is_on_its_way_waits_for_it(self):
         model = self.opened()

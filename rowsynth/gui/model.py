@@ -2,10 +2,11 @@
 from __future__ import annotations
 
 import copy
+import math
 import os
 import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from numbers import Real
 from pathlib import Path
 
@@ -20,7 +21,7 @@ from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
 from ..notes import midi
 from ..project import Project
-from ..song import render_loop
+from ..song import mix_stems, pan_gains, render_stems
 
 # The sections of the listing in the order they are shown, and the kind of the things each one holds.
 KINDS = {"songs": "song", "sounds": "sound", "instruments": "instrument"}
@@ -43,6 +44,10 @@ TONES = 32
 
 # The numbers of a render, in the order they are shown.
 NUMBERS = ("seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz")
+
+# The seconds of sound behind a moment that `Model.levels` reads unless it is told another stretch. It is the
+# stretch the player's own level reads.
+WINDOW = 0.03
 
 
 def _section(kind: str) -> str:
@@ -125,15 +130,41 @@ def _instrument(project: Project, name: object, song: str | None) -> tuple[tuple
     return (None, found), project.instruments[found]
 
 
+def _channels(project: Project, picked: tuple[str, str] | None) -> list[str] | None:
+    """The names of the channels of the picked thing where it is a song the project has. None where it is not."""
+    kind, name = picked or (None, None)
+    return list(project.songs[name]["channels"]) if kind == "song" and name in project.songs else None
+
+
+def _number(value: object) -> bool:
+    """Whether a value is a number to count with: a real number that is finite, and no truth value."""
+    return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
+
+
+def render_loop(song: dict, rate: int) -> dict:
+    """A song as its loop, with the stems the loop is the mix of: what `song.render_loop` gives, and "stems".
+
+    The song is played once, into its stems, and the two sides are all of those mixed. So the sides are sample
+    for sample those of `song.render_loop`, and any of the stems mixed again are the song with only those
+    channels in it.
+    """
+    played = render_stems(song, rate)
+    left, right = mix_stems(played["stems"], played["loop_samples"])
+    return {**played, "left": left, "right": right}
+
+
 def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
-    """One thing of a project as sound, and the numbers of that sound: {"render", "numbers"}."""
+    """One thing of a project as sound, and the numbers of that sound: {"render", "numbers", "stems"}.
+
+    The stems are those a song is the mix of, as `render_stems` gives them. A sound or an instrument has None.
+    """
     if picked is None:
         raise RowSynthError("nothing is picked")
     kind, name = picked
-    buffers = None
+    buffers = stems = None
     if kind == "song":
         played = render_loop(project.song(name), rate)
-        sides = [played["left"], played["right"]]
+        sides, stems = [played["left"], played["right"]], played["stems"]
     elif kind == "sound":
         buffers = render_entry(project.sound(name), rate)
         sides = buffers[:1]
@@ -143,7 +174,7 @@ def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
     told = {**measure(row, rate), **brightness(row, rate=rate)}
     return {"render": {"sides": sides, "rate": rate, "loop": kind == "song", "seconds": len(row) / rate,
                        "buffers": [row] if buffers is None else buffers},
-            "numbers": {key: told[key] for key in NUMBERS}}
+            "numbers": {key: told[key] for key in NUMBERS}, "stems": stems}
 
 
 def _check(project: Project, rate: int) -> list[checks.Finding]:
@@ -206,12 +237,21 @@ class _Kept:
         """
         with self._lock:
             key, parts = self._job()
+        return self.get(key, parts)
+
+    def get(self, key: tuple, parts: tuple) -> object:
+        """The result of `key`, as `take` gives the result of now, made from `parts` where it has to be made.
+
+        This can be asked on any thread, and of a key that is the key of now no longer: the result is then
+        given, and not kept.
+        """
+        with self._lock:
             worker = self._workers.get(key)
         if worker is not None:
             worker.join()
-        if not self.ready():
-            self._work(key, parts)
-        _, made, wrong = self._kept
+        with self._lock:
+            kept = self._kept if self._has(key) else None
+        _, made, wrong = kept or self._work(key, parts)
         if wrong is not None:
             # Raised as it is, the error would carry one more stretch of traceback each time.
             error, trace = wrong
@@ -226,8 +266,8 @@ class _Kept:
         """Whether what is kept is the result of `key`."""
         return self._kept is not None and self._kept[0] == key
 
-    def _work(self, key: tuple, parts: tuple) -> None:
-        """Makes the result of `key`, and keeps it if that is still the key of now.
+    def _work(self, key: tuple, parts: tuple) -> tuple:
+        """Makes the result of `key`, keeps it if that is still the key of now, and gives it as it is kept.
 
         An error the making ends in is kept in the result's place. A RowSynthError is a refusal, and that is all
         that is done with it. Anything else is something broken, and is raised here as well, this once: on a
@@ -245,6 +285,21 @@ class _Kept:
                 self._workers.pop(key, None)
                 if kept is not None and key == self._job()[0]:
                     self._kept = kept
+        return kept
+
+
+def _mix(rendered: _Kept, key: tuple, parts: tuple, heard: frozenset[str]) -> dict:
+    """The render of a song with only the channels in `heard` to be heard: its sides are their stems mixed.
+
+    The song's own render is that of `key` in `rendered`, made from `parts`. It is waited for where it is on
+    its way, and where it is kept nothing of it is made again: the stems are mixed as they are, in their
+    order, each at the level and the pan it has in the song. Everything of the render but its sides stays that
+    of the whole song. What the song's render went wrong with is what this goes wrong with.
+    """
+    whole = rendered.get(key, parts)
+    render = whole["render"]
+    left, right = mix_stems([stem for stem in whole["stems"] if stem["name"] in heard], len(render["sides"][0]))
+    return {**render, "sides": [left, right]}
 
 
 class Model:
@@ -253,6 +308,9 @@ class Model:
     One thread owns a model and calls it. Only `start_render` and `start_findings` put work on other threads. A
     render made there is kept only if the thing it was made of is still the picked one, and findings only if
     they are of the project as it is loaded now.
+
+    A song is kept as the stems it was rendered into, a channel each. So some of its channels can be heard
+    without the others, with nothing rendered again, and each has a level of its own to show.
     """
 
     def __init__(self, path: str | Path, rate: int = DEFAULT_RATE,
@@ -281,7 +339,11 @@ class Model:
         # The notes `tone` made last, each by where its instrument is, its pitch and its ticks: the one asked
         # for longest ago first. Only the thread that owns the model reads or changes them.
         self._tones: dict[tuple, dict] = {}
+        # The channels of the picked song that are heard, or None for all of them.
+        self._heard: frozenset[str] | None = None
         self._rendered = _Kept("rowsynth-render", self._lock, _make, self._render_job)
+        # The render with only some channels heard. It is asked for only while not all of them are.
+        self._mixed = _Kept("rowsynth-mix", self._lock, _mix, self._mix_job)
         self._found = _Kept("rowsynth-checks", self._lock, _check, self._findings_job)
 
     @property
@@ -305,12 +367,48 @@ class Model:
                            for name, entry in getattr(self._project, section).items()])
                 for section in KINDS]
 
+    @property
+    def heard(self) -> frozenset[str] | None:
+        """The channels of the picked song that are heard, by their names, or None for all of them."""
+        return self._heard
+
     def pick(self, kind: str, name: str) -> None:
-        """Selects a song, a sound or an instrument of the project. One the project does not have is refused."""
+        """Selects a song, a sound or an instrument of the project. One the project does not have is refused.
+
+        When it is another thing than the one that was picked, all its channels are heard.
+        """
         if name not in _table(self._project, kind):
             raise RowSynthError(f"no {kind} named {name!r}")
         with self._lock:
+            if (kind, name) != self._picked:
+                self._heard = None
             self._picked = (kind, name)
+
+    def hear(self, only: Iterable[str] | None = None) -> None:
+        """Has only some channels of the picked song be heard, or all of them again: a way of listening.
+
+        `only` names the channels that are heard, none of them for silence, and None is for all. The sides of
+        the render are then those channels alone, each as loud and as far to a side as it is in the song.
+        Nothing is rendered again for it, and nothing in the file changes: the stems the song was rendered
+        into are kept, and those that are heard are mixed, on a thread of its own when `start_render` begins
+        it. With all channels heard the render is the one of the whole song, which is there at once.
+
+        A name that is no channel of the picked song is refused, and so is anything but None when no song is
+        picked, and then what is heard stays as it was.
+        """
+        if only is not None:
+            channels = _channels(self._project, self._picked)
+            if channels is None:
+                raise RowSynthError("no song is picked, so there are no channels to hear")
+            if isinstance(only, str) or not isinstance(only, Iterable):
+                raise RowSynthError(f"the channels to hear are a set of names or None, not {only!r}")
+            only = list(only)
+            for name in only:
+                if name not in channels:
+                    raise RowSynthError(f"the song {self._picked[1]!r} has no channel named {name!r}")
+            only = frozenset(only)
+        with self._lock:
+            self._heard = only
 
     def render(self) -> dict:
         """The picked thing as sound: {"sides", "rate", "loop", "seconds", "buffers"}. Each side is a float32 array.
@@ -323,20 +421,59 @@ class Model:
         one of parts, one a variant, and for a held sound its start, its loop and its end. The first of them is
         the one side. For a song and for an instrument it is one row, the mean of the sides.
 
+        The sides of a song are its stems mixed, sample for sample what `song.render_loop` gives. While `hear`
+        has only some of its channels heard, they are the mix of the stems of those alone, and everything else
+        of the render stays that of the whole song.
+
         The render is kept for as long as its thing stays picked and the project stays as it is, so asking twice
         costs one render. One that is on its way is waited for. With nothing picked there is nothing to render,
         which is refused. A render that went wrong is tried once and no more: what the engine refused is refused
         again each time it is asked for, and an error the engine broke with is raised again as the error it was.
         """
-        return self._rendered.take()["render"]
+        if self._heard is None:
+            return self._rendered.take()["render"]
+        return self._mixed.take()
 
     def numbers(self) -> dict:
         """The numbers of the picked thing's render, measured on the mean of its sides.
 
         {"seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz"}, as
-        `measure` and `brightness` give them. They are made with the render and kept with it.
+        `measure` and `brightness` give them. They are made with the render and kept with it. Those of a song
+        are of the whole song as it is in the file, whichever of its channels are heard.
         """
         return self._rendered.take()["numbers"]
+
+    def levels(self, seconds: float, window: float = WINDOW) -> dict[str, float]:
+        """How loud each channel of the picked song is in what is heard, at a moment of its loop: 0 to 1 by name.
+
+        A channel reads the loudest sample its stem has over the last `window` seconds up to `seconds`, times
+        the larger of the two shares its pan gives it of the sides: what it puts into the louder side of the
+        mix. The stretch goes back round the end of the loop, and a moment past the loop is the same moment a
+        round on. A channel that is not heard reads 0, and so does one that plays nothing in the song.
+
+        There is a reading for every channel of a picked song once its render is kept, and what is heard is
+        read as it is now, mixed or not yet. For anything else the answer is empty: a sound, an instrument,
+        nothing picked, a render that is not ready or went wrong. This never waits. A moment or a stretch that
+        is no number of seconds is refused, and so is a stretch below 0.
+        """
+        if not (_number(seconds) and _number(window) and window >= 0):
+            raise RowSynthError("levels are read at a moment and over a stretch, both a number of seconds, not "
+                                f"{seconds!r} and {window!r}")
+        whole = self._rendered.peek()
+        if whole is None or whole["stems"] is None:
+            return {}
+        render = whole["render"]
+        count, rate = len(render["sides"][0]), render["rate"]
+        last = min(int(seconds % render["seconds"] * rate), count - 1)
+        first = last - min(int(window * rate), count - 1)
+        # A stretch that begins before the loop does is the end of the round before, and then the start of this.
+        spans = [slice(first, last + 1)] if first >= 0 else [slice(first, None), slice(0, last + 1)]
+        read = dict.fromkeys(self._project.songs[self._picked[1]]["channels"], 0.0)
+        for stem in whole["stems"]:
+            if self._heard is None or stem["name"] in self._heard:
+                loudest = max(float(np.abs(stem["samples"][span]).max()) for span in spans)
+                read[stem["name"]] = min(1.0, loudest * max(pan_gains(stem["pan"])))
+        return read
 
     def tone(self, inst: str, pitch: str | float, ticks: float = TEST_TICKS, song: str | None = None) -> dict:
         """One note of an instrument as sound: {"sides", "rate"}, one side, at the level the bank gives a sound.
@@ -364,12 +501,18 @@ class Model:
         return made
 
     def start_render(self) -> None:
-        """Begins the render of the picked thing on a thread of its own, unless it is kept or already on its way."""
+        """Begins the render of the picked thing on a thread of its own, unless it is kept or already on its way.
+
+        While only some channels of a song are heard, the mix of those is begun as well, on a thread of its
+        own that waits for the song's render where that is still on its way.
+        """
         self._rendered.start()
+        if self._heard is not None:
+            self._mixed.start()
 
     def render_ready(self) -> bool:
         """Whether `render` and `numbers` would now answer at once, with the render or with what went wrong."""
-        return self._rendered.ready()
+        return self._rendered.ready() and (self._heard is None or self._mixed.ready())
 
     def findings(self) -> list[checks.Finding]:
         """What the checks find in the project, rendered at the model's rate, in the order the checks give it.
@@ -417,6 +560,8 @@ class Model:
         After a load in which something differs, the picked thing stays picked if the project still has it, and
         nothing is picked if it does not, and the kept render, numbers, findings and notes are dropped. A file
         written again with nothing in it changed drops none of them: only the order of its names is taken from it.
+        What is heard of a picked song stays as it was while the song still has the channels it had, by their
+        names. When one was added, removed or named anew, or the song is gone, all channels are heard.
 
         `changes` then holds the same things as changes to the file: (where, was, now) for each whole thing, as
         in ("sounds.zap", what the sound was, what it is now), with NOTHING for a thing that is not there. They
@@ -467,13 +612,18 @@ class Model:
             self.problem = f"{self.path}: {error.strerror}" if isinstance(error, OSError) else str(error)
             return []
         found = _differ(self._project, project)
+        channels = _channels(self._project, self._picked)
         with self._lock:
             self._project = project
             if found:
                 self._loads += 1
                 if self._picked is not None and self._picked[1] not in _table(project, self._picked[0]):
                     self._picked = None
+                now = _channels(project, self._picked)
+                if now is None or set(now) != set(channels or ()):
+                    self._heard = None
                 self._rendered.drop()
+                self._mixed.drop()
                 self._found.drop()
                 self._tones.clear()
         self._seen = seen
@@ -483,6 +633,11 @@ class Model:
     def _render_job(self) -> tuple[tuple, tuple]:
         """What a render made now would be of, the load of the file and the picked thing, and what it is made from."""
         return (self._loads, self._picked), (self._project, self._picked, self.rate)
+
+    def _mix_job(self) -> tuple[tuple, tuple]:
+        """What a mix made now would be of, the render of now and the channels heard, and what it is made from."""
+        key, parts = self._render_job()
+        return (*key, self._heard), (self._rendered, key, parts, self._heard)
 
     def _findings_job(self) -> tuple[tuple, tuple]:
         """What findings made now would be of, the load of the file, and what they are made from."""
