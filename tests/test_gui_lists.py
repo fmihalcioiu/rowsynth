@@ -328,6 +328,31 @@ class Picking(unittest.TestCase):
         self.assertEqual(keys(rows, (10, 20), (10, 25), (10, 26), (10, 55), (85, 25), (86, 25)),
                          [0, 0, 1, 3, 0, None])
 
+    def test_a_press_of_the_right_button_on_a_row_tells_its_key_and_where_and_picks_nothing(self) -> None:
+        ui, rows, told = made(TALL, TREE, "coin")
+        asked: list[tuple] = []
+        rows.asked = lambda *what: asked.append(what)
+        at = spot(rows, "jump")
+        self.assertTrue(click(ui, at, button=3))
+        self.assertEqual((asked, rows.picked, told), ([("jump", at)], "coin", []))
+        # A heading is not asked about, and neither is a place with no row: the press is not used there.
+        self.assertEqual([click(ui, spot(rows, "SOUNDS"), button=3), click(ui, (10, 219), button=3)], [False, False])
+        self.assertEqual((len(asked), seen(rows)), (1, [row.key for row in TREE]))
+
+    def test_the_rectangle_of_a_name_is_where_the_text_of_its_row_is_drawn_as_the_list_is_scrolled(self) -> None:
+        # After the pad and the square of its heading's colour, to the pad at the other side or to the tag.
+        ui, rows, _ = made(TALL, (*TREE, Row("deep", "deep", indent=2, square=theme.SONG, tag="kick")))
+        self.assertEqual([rows.name_rect(key) for key in ("tune", "SOUNDS", "deep")],
+                         [(27, 32, 57, 12), (27, 52, 47, 12), (43, 120, 13, 12)])
+        # A row that is folded away has none, and neither has a key no row has.
+        click(ui, spot(rows, "SOUNDS"))
+        self.assertEqual([rows.name_rect("coin"), rows.name_rect("gone")], [None, None])
+        # A row with no heading over it and no colour of its own has no square. The bar takes its room.
+        _, flat, _ = made(SHORT, FLAT)
+        self.assertEqual(flat.name_rect(1), (16, 32, 64, 12))
+        flat.scroll.by(1)
+        self.assertEqual([flat.name_rect(1), flat.name_rect(0)], [(16, 20, 64, 12), (16, 8, 64, 12)])
+
 
 @unittest.skipUnless(pygame, NEEDS)
 class Drawn(unittest.TestCase):

@@ -133,6 +133,19 @@ def lay(rows: Sequence[Row], folded: Collection[Hashable] = ()) -> list[Place]:
     return placed
 
 
+def text_room(row: Row, rect: Rect, marked: bool) -> Rect:
+    """Where the text of a row goes in the rectangle of the row: after what stands before it, and before its tag.
+
+    Before it are the row's indent and, where the row is `marked`, the square of a row or the mark of a heading.
+    A row whose tag leaves no room has a rectangle of no width.
+    """
+    x, y, w, h = rect
+    left = x + theme.LIST_PAD + row.indent * theme.LIST_INDENT
+    left += theme.LIST_SQUARE + theme.LIST_SPACE if marked else 0
+    right = x + w - theme.LIST_PAD - (Font.width(row.tag) + theme.LIST_SPACE if row.tag else 0)
+    return left, y, max(0, right - left), h
+
+
 def mix(under: Colour, over: Colour, strength: float) -> Colour:
     """`over` mixed into `under`: at a strength of 0 it is `under`, at 1 it is `over`, and between them in between.
 
@@ -154,13 +167,19 @@ class List(Widget):
     `rows` can be set at any time: the pick stays when its key is still there, and headings stay folded by their
     key. `glow` is from a key to a strength from 0 to 1, for the owner to set: the background of such a row has
     `theme.ACTIVE` mixed into it by that strength.
+
+    A press of the right button on a row that is no heading calls `asked` with the key of the row and the
+    position, and picks nothing: the owner can open a menu there. `name_rect` is where the text of a row is
+    drawn, for a box that is typed into to be put over. The list opens nothing itself.
     """
 
     def __init__(self, rect: Rect, rows: Iterable[Row] = (), picked: Hashable | None = None,
-                 changed: Callable[[Hashable], object] | None = None, help: str = "") -> None:
+                 changed: Callable[[Hashable], object] | None = None, help: str = "",
+                 asked: Callable[[Hashable, Pos], object] | None = None) -> None:
         super().__init__(rect, help)
         self.picked: Hashable | None = picked
         self.changed = changed
+        self.asked = asked
         self.glow: dict[Hashable, float] = {}
         self.scroll = Scroll()
         self._folded: set[Hashable] = set()
@@ -211,6 +230,19 @@ class List(Widget):
         down = pos[1] - self.rect[1] + self.scroll.offset
         return next((place.row for place in self._placed if place.top <= down < place.top + theme.LIST_ROW_H), None)
 
+    def name_rect(self, key: Hashable) -> Rect | None:
+        """The rectangle the text of the row of a key is drawn in, as the list is scrolled now.
+
+        None for a key that no row has, and for a row that is folded away.
+        """
+        self._settle()
+        x, y, w, _ = self._across()
+        for place in self._placed:
+            if place.row.key == key:
+                marked = place.row.square is not None or place.colour is not None
+                return text_room(place.row, (x, y + place.top - self.scroll.offset, w, theme.LIST_ROW_H), marked)
+        return None
+
     def _pick(self, key: Hashable) -> None:
         """Pick the row of a key, scroll it into view, and tell."""
         self.picked = key
@@ -220,13 +252,22 @@ class List(Widget):
             self.changed(key)
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use the keys that move the pick, the wheel, and a press of the left button."""
+        """Use the keys that move the pick, the wheel, a press of the left button, and one of the right on a row.
+
+        The right button is used only where there is an owner to tell of it.
+        """
         self._settle()
         if event.kind == "key":
             return self._key(event)
         self._mouse = event.pos
         if event.kind == "wheel":
             self.scroll.by(-theme.LIST_WHEEL * event.wheel)
+            return True
+        if event.kind == "down" and event.button == 3:
+            row = self.at(event.pos)
+            if row is None or row.head or self.asked is None:
+                return False
+            self.asked(row.key, event.pos)
             return True
         if event.kind == "move" and self._grab is not None:
             held_at, offset = self._grab
@@ -316,20 +357,16 @@ class List(Widget):
         if picked and colour is not None:
             canvas.box((x, y, theme.LIST_STRIP, h), colour)
         left = x + theme.LIST_PAD + row.indent * theme.LIST_INDENT
-        right = x + w - theme.LIST_PAD
         if row.head:
             _mark(canvas, left, y, row.key in self._folded, row.colour)
         elif colour is not None:
             canvas.box((left, y + (h - theme.LIST_SQUARE) // 2, theme.LIST_SQUARE, theme.LIST_SQUARE), colour)
-        if colour is not None:
-            left += theme.LIST_SQUARE + theme.LIST_SPACE
         if row.tag:
             width = Font.width(row.tag)
-            canvas.text_in(row.tag, (right - width, y, width, h), theme.LINE if dim else theme.DIM)
-            right -= width + theme.LIST_SPACE
+            canvas.text_in(row.tag, (x + w - theme.LIST_PAD - width, y, width, h), theme.LINE if dim else theme.DIM)
         # A text too long for the room between is cut there, as `font.fit` cuts it.
         ink = row.colour if row.head else theme.DIM if dim else theme.TEXT
-        canvas.text_in(row.text, (left, y, max(0, right - left), h), ink)
+        canvas.text_in(row.text, text_room(row, rect, colour is not None), ink)
 
 
 def _mark(canvas: Canvas, x: int, y: int, folded: bool, colour: Colour) -> None:
