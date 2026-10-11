@@ -224,6 +224,11 @@ class Model:
         self._found = _Kept("rowsynth-checks", self._lock, _check, self._findings_job)
 
     @property
+    def project(self) -> Project:
+        """The project as the file last gave it. A load puts another object here, so `is` tells a load from none."""
+        return self._project
+
+    @property
     def picked(self) -> tuple[str, str] | None:
         """The one thing that is selected: (kind, name), the kind "song", "sound" or "instrument". None for nothing."""
         return self._picked

@@ -340,6 +340,17 @@ class PollTest(ModelCase):
         ])
         self.assertEqual(model.poll(), set())
 
+    def test_the_project_is_the_one_object_until_a_load_puts_another_in_its_place(self):
+        model = self.opened()
+        before = model.project
+        self.assertEqual(model.poll(), set())
+        self.assertIs(model.project, before)
+        after = changed(songs={"tune": song("l4 c e g a"), "air": None})
+        self.write(after)
+        model.poll()
+        self.assertIsNot(model.project, before)
+        self.assertEqual(model.project, Project.from_dict(after))
+
     def test_after_a_load_the_picked_thing_is_still_picked_and_what_was_kept_of_it_is_made_again(self):
         model = self.opened()
         model.render()

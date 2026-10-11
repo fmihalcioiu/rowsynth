@@ -234,7 +234,7 @@ class SongPanel(Panel):
         """Read the picked thing if it or the project is another than before, and show where the playing is."""
         model = self.session.model
         # The model has no public name for its project. A file that was loaded again is another project.
-        picked, project = model.picked, model._project
+        picked, project = model.picked, model.project
         if picked != self._picked or project is not self._project:
             fresh = picked != self._picked
             self._picked, self._project = picked, project
