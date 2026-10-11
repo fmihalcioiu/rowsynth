@@ -19,10 +19,13 @@ from .model import Model
 from .panels import Panel
 from .screen import Screen
 from .session import Session
+from .theme import Colour
 from .topbar import TopBar
 from .ui import Ui, translate
 
 FPS = 60
+# The seconds a message that was just said has the status bar, whatever the mouse is on.
+MESSAGE_TIME = 3.0
 
 # The side of each part of the frame that its line runs along: the one that faces the middle.
 _LINES = {"top": "bottom", "left": "right", "right": "left", "status": "top"}
@@ -37,6 +40,19 @@ _REDO = (("y", frozenset({"ctrl"})), ("z", frozenset({"ctrl", "shift"})))
 def picked_words(picked: tuple[str, str] | None) -> str:
     """What is picked in a few words: its kind in capitals and then its name, and nothing for nothing picked."""
     return "" if picked is None else f"{picked[0].upper()} {picked[1]}"
+
+
+def status_line(help: str, message: str, age: float) -> tuple[str, Colour]:
+    """The one line the status bar shows, and the colour it is in.
+
+    `help` is the help line of the widget under the mouse, "" with no such line. `message` is what the session
+    has to say, and `age` the seconds since it was said. A message has the bar for its first `MESSAGE_TIME`
+    seconds, whatever the mouse is on. After that the help line has the bar, and the message only where there
+    is no help line. A message is in the colour of text, and a help line is dim.
+    """
+    if message and (age < MESSAGE_TIME or not help):
+        return message, theme.TEXT
+    return help, theme.DIM
 
 
 class App:
@@ -69,6 +85,9 @@ class App:
         except RowSynthError:
             player = None
         self.session = Session(self.model, player)
+        # How many things the session had said by the last frame, and the seconds since the last of them was said.
+        self._said = self.session.messages
+        self._age = MESSAGE_TIME
         self.ui = Ui()
         self.ui.keys[_PLAY] = self.session.toggle
         self.ui.keys[_UNDO] = self.session.undo
@@ -102,11 +121,16 @@ class App:
     def update(self, passed: float = 0.0) -> None:
         """A frame's share of what is not drawing: the session's waiting work, then what each panel shows.
 
-        `passed` is the seconds since the frame before, which each panel is told.
+        `passed` is the seconds since the frame before, which each panel is told. They are also what the age of
+        the session's message is counted in: it is 0 in the frame that finds something said since the frame
+        before, and older by `passed` in each frame after that.
         """
         self.session.tick()
         for panel in self.panels.values():
             panel.update(passed)
+        said = self.session.messages
+        self._age = self._age + passed if said == self._said else 0.0
+        self._said = said
 
     def draw(self, art: pygame.Surface) -> None:
         """Draw one frame on the art surface: the parts of the frame as flat panels, each with its line.
@@ -133,7 +157,8 @@ class App:
     def _status(self, rect: Rect) -> None:
         """Draw what the status bar says: at its right end what is picked, and one line in the room before that.
 
-        The line is the help of the widget the mouse is on. With no such help it is the session's message.
+        The line is the one `status_line` picks of the help of the widget the mouse is on and the session's
+        message. What was said since the last frame was counted is new.
         """
         x, y, w, h = rect
         # Under the bar's line, and in from its two ends.
@@ -142,8 +167,9 @@ class App:
         self.canvas.text_in(picked, (left, top, room, high), theme.DIM, "right")
         if picked:
             room = max(0, room - Font.width(picked) - theme.GROUP_GAP)
-        line = self.ui.help
-        self.canvas.text_in(line or self.session.message, (left, top, room, high), theme.DIM if line else theme.TEXT)
+        age = self._age if self.session.messages == self._said else 0.0
+        line, colour = status_line(self.ui.help, self.session.message, age)
+        self.canvas.text_in(line, (left, top, room, high), colour)
 
     def run(self, frames: int | None = None, shot: str | Path | None = None) -> int:
         """Keep the window drawn until it is closed, then close it. Return how many frames were drawn.

@@ -354,7 +354,8 @@ class Steps(Widget):
     channel, its new notes and a few words for the undo list, and the steps show what `show` gave again: their
     owner saves, and shows the result. A drag ends at the release. A run of the wheel ends when the mouse leaves
     its square, or `WHEEL_WAIT` seconds after its last step by `clock`: for that their owner calls `update` every
-    frame. `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard.
+    frame. `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard. That
+    is before the gesture has ended, so the owner's answer to `edited`, whether it saved, is not waited for.
 
     `help` is the widget's own line. While the mouse is on a square it says what a press there would do, with
     the level of a hit and the letter a hit would take the place of. Where nothing can be changed it says what

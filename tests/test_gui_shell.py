@@ -736,19 +736,64 @@ class InTheApp(unittest.TestCase):
             return ink(art, left, theme.DIM) > 0, ink(art, left, theme.TEXT) > 0, ink(art, right, theme.DIM) > 0
 
         self.assertEqual(shown(), (False, False, True))
-        self.space(app)
-        self.assertEqual(shown(), (False, True, True))
         # The mouse is told in pixels of the window, each art pixel being a square of them.
         top = app.panels["top"]
         at = tuple(part * app.screen.scale for part in middle(top.play.rect))
         app.handle(pygame.event.Event(pygame.MOUSEMOTION, pos=at, rel=(1, 0), buttons=(0, 0, 0)))
         self.assertEqual((app.ui.hot, app.ui.help), (top.play, top.play.help))
         self.assertEqual(shown(), (True, False, True))
+        # Off the widgets, as on the status bar itself, the line is what the session has to say.
+        self.space(app)
+        at = tuple(part * app.screen.scale for part in middle((x, y, w, h)))
+        app.handle(pygame.event.Event(pygame.MOUSEMOTION, pos=at, rel=(1, 0), buttons=(0, 0, 0)))
+        self.assertEqual((app.ui.help, shown()), ("", (False, True, True)))
         # A click in the window reaches the widget under it.
         at = tuple(part * app.screen.scale for part in middle(top.loop.rect))
         app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=at, button=1))
         app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=at, button=1))
         self.assertFalse(app.session.loop)
+
+    def test_the_line_of_the_status_bar_is_a_new_message_then_the_help_and_the_message_where_no_help_is(self) -> None:
+        from rowsynth.gui.app import MESSAGE_TIME, status_line
+
+        self.assertEqual(MESSAGE_TIME, 3.0)
+        said, help = ("refused", theme.TEXT), ("press to play", theme.DIM)
+        self.assertEqual([status_line("press to play", "refused", age) for age in (0.0, 2.99, 3.0, 60.0)],
+                         [said, said, help, help])
+        self.assertEqual([status_line("", "refused", age) for age in (0.0, 60.0)], [said, said])
+        self.assertEqual([status_line("press to play", "", 0.0), status_line("", "", 0.0)], [help, ("", theme.DIM)])
+
+    def test_what_the_session_says_has_the_status_bar_for_three_seconds_whatever_the_mouse_is_on(self) -> None:
+        self.held()
+        app = self.silent()
+        art = app.screen.begin()
+        x, y, w, h = layout.frame(art.get_size())["status"]
+        left = (x, y + 1, w // 2, h - 1)
+        at = tuple(part * app.screen.scale for part in middle(app.panels["top"].play.rect))
+        app.handle(pygame.event.Event(pygame.MOUSEMOTION, pos=at, rel=(1, 0), buttons=(0, 0, 0)))
+
+        def line(passed: float | None = None) -> str:
+            """Of a frame made now, after so many seconds where they are given: which line the bar has."""
+            if passed is not None:
+                app.update(passed)
+            app.draw(art)
+            return "message" if ink(art, left, theme.TEXT) else "help" if ink(art, left, theme.DIM) else ""
+
+        self.assertEqual((app.session.message, line()), ("", "help"))
+        # The first frame says that there is no sound output. In the frame that finds it said, it is new.
+        self.assertEqual((line(1.0), app.session.message), ("message", "no sound output"))
+        self.assertEqual([line(2.5), line(0.5), line(0.0)], ["message", "help", "help"])
+        # The same words said again are new again, and so before a frame has counted them.
+        self.space(app)
+        self.assertEqual((app.session.message, app.session.messages), ("no sound output", 2))
+        self.assertEqual([line(), line(0.0), line(2.5)], ["message", "message", "message"])
+        # Said anew before its time is up, a message has its time anew: it is 5 seconds since the space bar.
+        app.session.say("another thing")
+        self.assertEqual([line(0.0), line(2.5), line(0.5)], ["message", "message", "help"])
+        # With nothing to say, the help line has the bar at once.
+        app.session.say("yet another")
+        app.session.say("")
+        self.assertEqual(line(0.0), "help")
 
     def test_a_file_that_is_not_a_project_is_refused_before_any_window_and_named_as_it_was_given(self) -> None:
         (self.folder / "notes.json").write_text("o4 l8 c e g\n", encoding="utf-8")

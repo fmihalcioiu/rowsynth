@@ -107,8 +107,9 @@ class Session:
         self.audition = True
         self._clock = clock
         self._loop = True
-        # The last thing there was to say.
+        # The last thing there was to say, and how many times there has been something to say.
         self._said = ""
+        self._messages = 0
         # The moment each thing that changed outside began to glow at.
         self._lit: dict[tuple[str, str], float] = {}
         # The moment of the last look at the file, or None before the first.
@@ -140,10 +141,19 @@ class Session:
         there is no sound output, said at the first tick and each time something is to play; the things that
         changed outside; what went wrong with the render of the picked thing; what went wrong with the checks;
         why a change, or a step taken back or made again, was refused; that a change made here took the place
-        of one made outside at the same moment; why a single note did not sound. A pick clears it, and so does
-        a change or a step that is made.
+        of one made outside at the same moment; why a single note did not sound; what `say` was given. A pick
+        clears it, and so does a change or a step that is made.
         """
         return self.model.problem or self._said
+
+    @property
+    def messages(self) -> int:
+        """How many times there has been something to say: one more each time `message` is given words.
+
+        Words that are the same as the last are counted as well, so whoever shows the message can tell that it
+        was said again. What keeps the file from being read counts once for as long as it lasts.
+        """
+        return self._messages
 
     @property
     def can_undo(self) -> bool:
@@ -220,9 +230,19 @@ class Session:
         """
         self.model.pick(kind, name)
         self._drop()
-        self._said = ""
+        self.say("")
         self._waiting = self.audition and kind != "song" and self.player is not None
         self.model.start_render()
+
+    def say(self, words: str) -> None:
+        """Puts words in `message`, as the last thing there is to say. With "" there is nothing to say.
+
+        It is for whoever works with the session and has something to say that the session cannot know, as a
+        panel that could not save what was done in it. Words that are not empty are one more of `messages`.
+        """
+        self._said = words
+        if words:
+            self._messages += 1
 
     def change(self, where: str, value: object, label: str, key: object = None) -> bool:
         """Puts a value at a place in the project and in its file, as a step that can be taken back.
@@ -242,16 +262,16 @@ class Session:
         try:
             told = self.model.change(where, value, delete=value is NOTHING)
         except RowSynthError as error:
-            self._said = str(error)
+            self.say(str(error))
             return False
-        self._said = ""
+        self.say("")
         if not told.get("same"):
             was = told.get("was", NOTHING)
             # The step has a value of its own, whatever becomes of the one that was handed in.
             now = copy.deepcopy(told["now"]) if "now" in told else NOTHING
             self._history.add([(where, was, now)], label, key)
             if not same(held, was):
-                self._said = f"{label} {BOTH}"
+                self.say(f"{label} {BOTH}")
             self._renew(before)
         return True
 
@@ -323,7 +343,7 @@ class Session:
         try:
             self.player.also(self.model.tone(inst, pitch, song=song)["sides"])
         except RowSynthError as error:
-            self._said = str(error)
+            self.say(str(error))
 
     def drum(self, letter: str, song: str) -> None:
         """Sounds what a drum letter plays in a song, as `sound` does: the instrument and the note its drums give it.
@@ -332,7 +352,7 @@ class Session:
         """
         hit = self.model.project.songs.get(song, {}).get("drums", {}).get(letter)
         if hit is None:
-            self._said = f"no drum {letter!r} in the song {song!r}"
+            self.say(f"no drum {letter!r} in the song {song!r}")
         else:
             self.sound(hit["inst"], hit["note"], song)
 
@@ -408,7 +428,7 @@ class Session:
     def _begin(self, which: int | None, holding: bool) -> None:
         """Has the picked thing play as soon as its render is there, in the way `play` or `hold` asked for."""
         if self.player is None:
-            self._said = NO_SOUND
+            self.say(NO_SOUND)
         elif self.model.picked is not None:
             self._waiting, self._which, self._holding = True, which, holding
             if self.model.render_ready():
@@ -439,15 +459,18 @@ class Session:
         """Looks at the file and takes up what changed in it. `first` is for the first look there is.
 
         What changed glows, is named in the message, and is a step that can be taken back. The render of the
-        picked thing and the checks are started at the first look, and again after each change.
+        picked thing and the checks are started at the first look, and again after each change. A file that
+        cannot be read is the message through the model, and is counted as said when it begins to be so.
         """
         if first and self.player is None:
-            self._said = NO_SOUND
-        before = self.model.picked
+            self.say(NO_SOUND)
+        before, problem = self.model.picked, self.model.problem
         changed = self.model.poll()
+        if self.model.problem and self.model.problem != problem:
+            self._messages += 1
         if changed:
             self._lit.update((thing, now) for thing in changed)
-            self._said = _told(changed)
+            self.say(_told(changed))
             self._history.add(self.model.changes, self._said)
         if changed or first:
             self._renew(before)
@@ -510,7 +533,7 @@ class Session:
             for where, was in reversed(made):
                 self._put(where, was)
             back()
-        self._said = refused
+        self.say(refused)
         if made:
             self._renew(before)
         return not refused
@@ -543,7 +566,7 @@ class Session:
         """Says what kept the picked thing from being heard, and stops what plays."""
         self.stop()
         self._render = None
-        self._said = _words(error)
+        self.say(_words(error))
 
     def _check(self) -> None:
         """Takes up the findings the model has ready: where the checks refused the project or broke, that is said."""
@@ -551,4 +574,4 @@ class Session:
         try:
             self.model.findings()
         except Exception as error:
-            self._said = _words(error)
+            self.say(_words(error))

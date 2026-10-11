@@ -709,6 +709,14 @@ class Editing(unittest.TestCase):
         self.steps.update()
         self.assertEqual((self.steps.busy, len(self.told)), (False, 2))
 
+    def test_a_hit_is_heard_as_it_is_put_whatever_the_owner_answers_of_saving_it(self) -> None:
+        self.steps.edited = lambda *said: self.told.append(said) or False
+        self.mouse("down", 0, 5, 1)
+        self.assertEqual((self.told, self.heard), ([], [("kit", "k")]))
+        self.mouse("up", 0, 5, 1)
+        # The owner that did not save shows no other notes, and the hit was heard once all the same.
+        self.assertEqual((len(self.told), self.heard, self.steps.notes("kit")), (1, [("kit", "k")], KIT))
+
     def test_a_press_and_release_that_leave_the_notes_as_they_were_call_nothing(self) -> None:
         # The right button on empty squares, clicked and dragged.
         self.click(1, 0, 3)

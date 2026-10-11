@@ -893,6 +893,39 @@ class StateTest(SessionCase):
         heard.tick()
         self.assertEqual(heard.message, "")
 
+    def test_what_say_is_given_is_the_message_until_something_else_is_said_or_a_change_is_made(self):
+        session = self.opened()
+        self.assertEqual([session.message, session.messages], ["", 0])
+        session.say("the notes were not saved")
+        self.assertEqual([session.message, session.messages], ["the notes were not saved", 1])
+        # A change that is made has nothing to say, and nothing said is not one more message.
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertEqual([session.message, session.messages], ["", 1])
+        session.say("once more")
+        session.say("")
+        self.assertEqual([session.message, session.messages], ["", 2])
+
+    def test_each_thing_said_is_counted_also_the_same_words_again_and_an_unread_file_once_while_it_lasts(self):
+        session = self.opened()
+        session.tick()
+        refusal = "songs.tune.channels.tune.inst: no instrument named 'bell'"
+        for count in (1, 2):
+            self.assertFalse(session.change("songs.tune.channels.tune.inst", "bell", "instrument of tune"))
+            self.assertEqual([session.message, session.messages], [refusal, count])
+        # What changed outside is said by the session itself, and counted as what `say` is given.
+        self.write(changed(sounds={"pop": None}))
+        self.looked(session)
+        self.assertEqual([session.message, session.messages], ["changed outside: pop", 3])
+        # A file that cannot be read is the message through the model: it is one more when it begins.
+        whole = json.dumps(PROJECT)
+        self.write(whole[:len(whole) // 2])
+        for _ in range(2):
+            self.looked(session)
+            self.assertEqual([session.message == session.model.problem, session.messages], [True, 4])
+        self.write(whole)
+        self.looked(session)
+        self.assertEqual([session.message, session.messages], ["changed outside: pop", 5])
+
     def test_checks_that_refused_the_project_are_told_from_checks_that_still_run(self):
         session = self.opened(changed(songs={"air": STILL}))
         go = self.held()

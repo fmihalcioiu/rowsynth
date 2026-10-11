@@ -379,8 +379,10 @@ class Roll(Widget):
     The mouse and the keys place, move, stretch and remove its notes, and it saves nothing. When a gesture ends
     and the notes are others than they were, `edited` is called with the channel's new notes and a few words for
     the list of what can be undone, and the roll goes on showing what `show` gave it last: its owner saves, and
-    shows it the result. `sounded` is called with a pitch and an instrument for the owner to let be heard: when a
-    note is placed, and each time the note that the mouse moves comes to another pitch. `grid` is the rows in a
+    shows it the result. An owner that answers false has not saved: any other answer, and none, is taken for
+    saved. `sounded` is called with a pitch and an instrument for the owner to let be heard: when a note is
+    placed and saved, each time the note that the mouse moves comes to another pitch, and when the left button
+    is pressed on a key of the strip, which changes nothing and picks nothing. `grid` is the rows in a
     step of the grid, a whole number of them: a placed note begins on a step, and notes are moved and stretched
     by whole steps. `picked` is the picked notes, and `drawn` the notes as a gesture that is under way would
     leave them: `busy` is whether one is under way. A key that the Ui hands the roll, which it does while the
@@ -519,6 +521,9 @@ class Roll(Widget):
         if self.pattern is None:
             return ""
         seen = self.map
+        key = self._key_at(pos) if button == 1 else None
+        if key is not None:
+            return f"hear {name(key)}"
         kind, index = begins(seen, self.notes, self._rows(), pos, button, mods)
         if not kind or not self._open:
             return OFF_GRID if kind else ""
@@ -539,15 +544,16 @@ class Roll(Widget):
         """Note where the mouse is, begin a gesture at a press and carry it on to its release, and use the wheel.
 
         The wheel scrolls the keys, with shift the rows, and with ctrl it zooms: not while a gesture is under way.
-        A press is used when it begins a gesture, and the owner is told of no edit before its release. A key goes
-        to `key`, and one that is not the roll's to `typed`: it is used when either used it.
+        A press is used when it begins a gesture, and the owner is told of no edit before its release. A press of
+        the left button on a key of the strip is used as well: it begins no gesture, and its key is heard. A key
+        of the computer goes to `key`, and one that is not the roll's to `typed`: it is used when either used it.
         """
         if event.kind == "key":
             return self.key(event) or (self.typed is not None and bool(self.typed(event)))
         self._mouse, self._mods = event.pos, event.mods
         if event.kind == "down":
             # A press while another button is held begins nothing.
-            return ui.held is None and self._press(event)
+            return ui.held is None and (self._press(event) or self._strike(event))
         gesture = self._gesture
         if event.kind == "wheel":
             return gesture is None and self._wheel(event)
@@ -556,6 +562,23 @@ class Roll(Widget):
             if event.kind == "up" and event.button == gesture.button:
                 self._release()
         return False
+
+    def _key_at(self, pos: Pos) -> int | None:
+        """The pitch of the key of the strip that a position is on, or None where it is on no key of a channel."""
+        seen = self.map
+        pitch = seen.pitch_at(pos[1])
+        on_key = self._own is not None and inside(seen.keys, pos) and LOWEST <= pitch <= HIGHEST
+        return pitch if on_key else None
+
+    def _strike(self, event: Event) -> bool:
+        """Tell of the key of the strip that the left button is pressed on, to be heard, and say whether it was on one.
+
+        The note is the key's, with the channel's own instrument. Nothing is changed and nothing is picked.
+        """
+        key = self._key_at(event.pos) if event.button == 1 else None
+        if key is not None and self.sounded is not None:
+            self.sounded(key, self._own.inst)
+        return key is not None
 
     def _wheel(self, event: Event) -> bool:
         """Scroll the keys by a step of the wheel, with shift the rows, and with ctrl zoom. It is always used."""
@@ -606,7 +629,8 @@ class Roll(Widget):
         """End the gesture: other notes than there were are handed on, and the same notes are picked as it leaves them.
 
         The length of a note that was placed by a drag or stretched is kept for the next click, and the level that
-        was set last for the next note. A note that was placed is told of, to be heard.
+        was set last for the next note. A note that was placed is told of, to be heard, unless the owner answers
+        that it was not saved.
         """
         gesture, self._gesture = self._gesture, None
         notes, picked = gesture.gives()
@@ -620,15 +644,17 @@ class Roll(Widget):
             self._length = placed.rows
         elif gesture.kind == STRETCH:
             self._length = gesture.grabbed().rows
-        self._give(notes, picked, gesture.label)
-        if placed is not None:
+        if self._give(notes, picked, gesture.label) and placed is not None:
             self._sound(placed)
 
-    def _give(self, notes: tuple[Note, ...], picked: frozenset[int], label: str) -> None:
-        """Hand an edit on to the owner, and keep what it leaves picked for when its notes are shown."""
+    def _give(self, notes: tuple[Note, ...], picked: frozenset[int], label: str) -> bool:
+        """Hand an edit on to the owner, and keep what it leaves picked for when its notes are shown.
+
+        The answer is whether the edit was saved: it was not where the owner answers false. With no owner, and
+        with one that answers anything else or nothing, it is taken for saved.
+        """
         self._gave = (notes, picked)
-        if self.edited is not None:
-            self.edited(notes, label)
+        return self.edited is None or self.edited(notes, label) is not False
 
     def _sound(self, note: Note) -> None:
         """Tell the owner of a note to let be heard."""

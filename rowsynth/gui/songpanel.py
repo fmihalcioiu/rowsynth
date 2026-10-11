@@ -43,6 +43,8 @@ FOLLOW = "FOLLOW"
 GHOSTS = "GHOSTS"
 TUNED = "TUNED"
 DRUMS = "DRUMS"
+#: What is said, after the channel and its pattern, of an edit that ended after the channel was changed outside.
+MEANWHILE = "was changed outside while it was edited here: this edit stands, and undo brings the other back"
 
 
 def place_at(seconds: float, row_ticks: float, blocks: Sequence[Block]) -> tuple[int, float] | None:
@@ -136,8 +138,10 @@ class SongPanel(Panel):
     are written as its text for the pattern, and that is one change to the file, and one step that can be taken
     back. The song is then read again as after any change, so the views show what the file holds. A change that
     is refused leaves them as they were, and the session says why. While a gesture is under way in a view the
-    song is not read: what changed meanwhile, here or outside, is shown when the gesture has ended. A note that
-    is placed is heard, and with the focus on the roll the keys of the computer play the instrument of its
+    song is not read, and the picked place does not go along with the playing: what changed meanwhile, here or
+    outside, is shown when the gesture has ended. An edit that ends after its channel was changed outside is
+    saved, and the session is told so. A note that is placed and saved is heard, and so is a key of the roll's
+    strip that is pressed. With the focus on the roll the keys of the computer play the instrument of its
     channel as a piano, from the lowest c the roll has in view.
     """
 
@@ -192,7 +196,7 @@ class SongPanel(Panel):
         is the seconds since the frame before, which the panel has no use for.
         """
         self.steps.update()
-        if not (self.roll.busy or self.steps.busy):
+        if not self._busy():
             self._look()
         self.roll.ghosts = self.ghosts.is_on
         self._play()
@@ -214,23 +218,41 @@ class SongPanel(Panel):
             self._picked, self._project = picked, project
             self._read(fresh)
 
-    def _save(self, channel: str, notes: Sequence[Note], label: str) -> None:
+    def _busy(self) -> bool:
+        """Whether a gesture is under way in the roll or in the steps."""
+        return self.roll.busy or self.steps.busy
+
+    def _text(self, project: Project, pattern: str, channel: str) -> object:
+        """The text a project has for a channel in a pattern of the song that is shown, or None where it has none."""
+        return project.songs.get(self._picked[1], {}).get("patterns", {}).get(pattern, {}).get(channel)
+
+    def _save(self, channel: str, notes: Sequence[Note], label: str) -> bool:
         """Save the notes a view gave for a channel of the pattern that is shown, and show what the file then holds.
 
         The notes are written as the channel's text, filling the rows of the pattern, and put in the file as one
-        step: `label` is what the view calls it. A channel the pattern had no text for gets its text. A change
-        the project refuses is not made, and the session's message is the refusal. Notes that cannot be written
-        as text are not saved either.
+        step: `label` is what the view calls it. A channel the pattern had no text for gets its text. The answer
+        is whether they were saved. A change the project refuses is not made, and the session's message is the
+        refusal. Notes that cannot be written as text are not saved either, and the session is told why.
+
+        Where the channel's text is another by now than the one the views were shown, it was changed outside
+        while a gesture was under way here. The notes of the hand are saved all the same, and the session is told
+        that they were, and that taking the step back gives the other text.
         """
         pattern = self._patterns[self._blocks[self.strip.picked].name]
+        place = f"{channel} of pattern {pattern.name}"
         try:
             text = songview.text(notes, pattern.rows, channel, self._song)
-        except RowSynthError:
-            # The session has no way to be told of a refusal that is not its own: the views stay as they were.
-            return
-        self.session.change(f"songs.{self._picked[1]}.patterns.{pattern.name}.{channel}", text,
-                            f"{channel} of pattern {pattern.name}: {label}")
+        except RowSynthError as error:
+            self.session.say(f"{place}: {error}")
+            return False
+        shown, held = (self._text(project, pattern.name, channel)
+                       for project in (self._project, self.session.model.project))
+        saved = self.session.change(f"songs.{self._picked[1]}.patterns.{pattern.name}.{channel}", text,
+                                    f"{place}: {label}")
+        if saved and held not in (shown, text):
+            self.session.say(f"{place} {MEANWHILE}")
         self._look()
+        return saved
 
     def _sound(self, pitch: float, inst: str) -> None:
         """Let a note of an instrument of the song be heard, over whatever plays."""
@@ -318,12 +340,14 @@ class SongPanel(Panel):
 
         While the song plays, the playhead of the strip is the row of the whole song that plays. That of the views
         is the row of the pattern, and it is there only while the pattern that plays is the one that is shown, at
-        whatever place in the order it plays.
+        whatever place in the order it plays. While a gesture is under way in a view, the picked place stays
+        where it is, so that the pattern does not change under the hand: it goes along again when the gesture
+        has ended.
         """
         at = None
         if self._song is not None and self.session.playing:
             at = place_at(self.session.position(), self._song["row_ticks"], self._blocks)
-        if at is not None and self.follow.is_on and at[0] != self.strip.picked:
+        if at is not None and self.follow.is_on and at[0] != self.strip.picked and not self._busy():
             self.strip.picked = at[0]
             self._view()
         shown = at is not None and self._blocks[at[0]].name == self._blocks[self.strip.picked].name

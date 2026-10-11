@@ -337,7 +337,8 @@ class View(unittest.TestCase):
                                 ((233, 87), ("shift",), "pick the notes that a box touches"),
                                 ((130, 240), (), "set the level of g4 to 9"),
                                 ((230, 240), (), "the notes of a channel"),
-                                ((20, 90), (), "the notes of a channel"),
+                                ((20, 90), (), "hear g4"),
+                                ((20, 25), (), "the notes of a channel"),
                                 ((60, 224), (), "the notes of a channel")):
             self.ui.handle(Event("move", pos, mods=frozenset(mods)))
             self.assertEqual(self.ui.help, line)
@@ -616,6 +617,35 @@ class Edits(unittest.TestCase):
         self.roll.typed = None
         self.assertFalse(self.ui.handle(Event("key", key="z")))
 
+    def test_a_press_on_a_key_of_the_strip_is_heard_gives_the_focus_and_changes_nothing(self) -> None:
+        self.drag(self.at(0, 64))
+        # A press off the roll takes the focus from it.
+        self.mouse("down", (5, 5))
+        self.mouse("up", (5, 5))
+        self.assertEqual((self.ui.focus, self.roll.picked), (None, {0}))
+        # In the strip of keys, on the key of g4.
+        key = (20, self.at(0, 67)[1])
+        self.assertTrue(self.mouse("down", key))
+        self.assertEqual((self.ui.focus, self.roll.busy, self.ui.help, self.heard),
+                         (self.roll, False, "hear g4", [(67, "lead")]))
+        self.mouse("move", self.at(4, 70))
+        self.mouse("up", self.at(4, 70))
+        self.assertEqual((self.roll.notes, self.roll.picked, self.edits, self.heard), (TUNE, {0}, [], [(67, "lead")]))
+        # The right button on a key is not used, and neither is a press over the strip, beside the ruler.
+        self.assertEqual([self.mouse("down", key, 3), self.mouse("up", key, 3), self.mouse("down", (20, 25))],
+                         [False, False, False])
+        self.assertEqual(len(self.heard), 1)
+
+    def test_a_placed_note_is_not_heard_where_the_owner_answers_that_it_was_not_saved(self) -> None:
+        self.roll.edited = lambda notes, label: self.edits.append((notes, label)) or False
+        self.drag(self.at(20, 62))
+        self.assertEqual((self.edits, self.heard, self.roll.notes),
+                         ([((*TUNE, note(20, 4, 62)), "note placed")], [], TUNE))
+        # Any other answer is taken for saved, as no answer is.
+        self.roll.edited = lambda notes, label: True
+        self.drag(self.at(20, 62))
+        self.assertEqual(self.heard, [(62, "lead")])
+
     def test_the_roll_is_busy_from_the_press_that_begins_a_gesture_until_it_is_released_or_dropped(self) -> None:
         self.assertFalse(self.roll.busy)
         self.mouse("down", self.at(14, 60))
@@ -757,8 +787,9 @@ class Edits(unittest.TestCase):
         self.assertEqual([self.key(key, *mods) for key, mods in (("a", ("ctrl",)), ("delete", ()), ("escape", ()))],
                          [False] * 3)
         self.assertEqual((self.roll.drawn, self.roll.picked, self.edits, self.heard), (triplets, frozenset(), [], []))
+        # The keys of the strip can be heard all the same, and over the strip a press does nothing.
         for pos, line in ((self.at(4, 64), OFF_GRID), (self.at(10, 62), OFF_GRID), ((90, 240), OFF_GRID),
-                          ((20, 100), "the notes of a channel")):
+                          ((20, 100), "hear g-4"), ((20, 25), "the notes of a channel")):
             self.mouse("move", pos)
             self.assertEqual(self.ui.help, line)
         self.assertEqual(OFF_GRID, "this pattern has lengths the grid does not hold: it is shown and not changed")
