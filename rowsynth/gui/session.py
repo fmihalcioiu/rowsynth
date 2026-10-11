@@ -10,7 +10,7 @@ from typing import TYPE_CHECKING
 
 import numpy as np
 
-from ..edit import NOTHING, get_in
+from ..edit import NOTHING, delete_in, get_in, set_in
 from ..errors import RowSynthError
 from ..sound import tick_sample
 from .history import Change, History, same
@@ -93,9 +93,9 @@ class Session:
     checks: what is not ready is taken up by a later `tick`. What plays is always the picked thing, and single
     notes can be sounded over it.
 
-    The project is changed one thing at a time, with `change` and `remove`, and each change is in the file as
-    soon as it is made. Every change is a step that `undo` takes back and `redo` makes again, and so is what
-    another program changed in the file.
+    The project is changed one thing at a time, with `change` and `remove`, or several things as one with
+    `change_many`, and each change is in the file as soon as it is made. Every change is a step that `undo`
+    takes back and `redo` makes again, and so is what another program changed in the file.
 
     The channels of the picked song can be muted and soloed, with `mute` and `solo`. That is a way of listening
     and no change: nothing of it is in the file, it is no step, and another thing picked has none of it.
@@ -284,15 +284,34 @@ class Session:
         except RowSynthError as error:
             self.say(str(error))
             return False
-        self.say("")
-        if not told.get("same"):
-            was = told.get("was", NOTHING)
-            # The step has a value of its own, whatever becomes of the one that was handed in.
-            now = copy.deepcopy(told["now"]) if "now" in told else NOTHING
-            self._history.add([(where, was, now)], label, key)
-            if not same(held, was):
-                self.say(f"{label} {BOTH}")
-            self._renew(before)
+        self._made([told], [held], label, key, before)
+        return True
+
+    def change_many(self, changes: Iterable[tuple[str, object]], label: str) -> bool:
+        """Makes several changes to the project and its file as one, and as one step that is taken back in one.
+
+        Each change is (where, value), as `change` is given the two, with NOTHING for what is taken out. They
+        are made in the order given and checked together, as `change_file_many` does it, so things that name
+        one another can be changed where no one of the changes could be made alone. The step holds every one
+        of the places. Refused, none of them is made: the answer is false, the message is the refusal, and no
+        step is kept. Everything else is as in `change`.
+        """
+        changes = list(changes)
+        before = self.model.picked
+        # What is here at each place as its change comes to it, the changes before it made.
+        data, held = self.model.project.to_dict(), []
+        for where, value in changes:
+            try:
+                held.append(delete_in(data, where) if value is NOTHING
+                            else set_in(data, where, copy.deepcopy(value)))
+            except RowSynthError:
+                held.append(NOTHING)
+        try:
+            told = self.model.change_many(changes)
+        except RowSynthError as error:
+            self.say(str(error))
+            return False
+        self._made(told, held, label, None, before)
         return True
 
     def remove(self, where: str, label: str) -> bool:
@@ -311,8 +330,9 @@ class Session:
     def undo(self) -> bool:
         """Takes the last step back, one made here or one that came from outside. False when there is none.
 
-        The step's changes are made one by one, the last of them first. Where one is refused, those made before
-        it are put back, the step stays the one to take back, the message is the refusal and the answer is false.
+        The step's changes are made as one, the last of them first, in one write to the file. Where that is
+        refused nothing is changed, the step stays the one to take back, the message is the refusal and the
+        answer is false.
         """
         return self._replay(self._history.undo(), self._history.redo)
 
@@ -614,41 +634,43 @@ class Session:
         except RowSynthError:
             return NOTHING
 
-    def _put(self, where: str, value: object) -> str:
-        """Puts a value at a place through the model, or with NOTHING takes out what is there.
+    def _made(self, told: Sequence[dict], held: Sequence[object], label: str, key: object,
+              before: tuple[str, str] | None) -> None:
+        """Takes up changes the model has made as one: `told` is what it answered for each, in their order.
 
-        The answer is "" when that is done, and the refusal in its own words when it is not.
+        They are kept as one step, unless every one of them left its place as it was. `held` is what the
+        project here had at each place, and where the file had something else, the message says so. `before`
+        is what was picked before the changes.
         """
-        try:
-            self.model.change(where, value, delete=value is NOTHING)
-        except RowSynthError as error:
-            return str(error)
-        return ""
+        self.say("")
+        if all(one.get("same") for one in told):
+            return
+        # The step has values of its own, whatever becomes of those that were handed in.
+        step = [(one["where"], one.get("was", NOTHING), copy.deepcopy(one["now"]) if "now" in one else NOTHING)
+                for one in told]
+        self._history.add(step, label, key)
+        if not all(same(had, was) for had, (_, was, _) in zip(held, step)):
+            self.say(f"{label} {BOTH}")
+        self._renew(before)
 
     def _replay(self, changes: Iterable[Change] | None, back: Callable[[], object]) -> bool:
-        """Makes the changes of a step the history has just moved, one by one. None is for no step, and false.
+        """Makes the changes of a step the history has just moved, all as one write. None is for no step, and false.
 
-        `back` moves the step to where it was. Where a change is refused, those made before it are put back,
-        the step is moved back, the message is the refusal and the answer is false.
+        `back` moves the step to where it was. Where the changes are refused none of them is made, the step is
+        moved back, the message is the refusal and the answer is false.
         """
         if changes is None:
             return False
         before = self.model.picked
-        made: list[tuple[str, object]] = []
-        refused = ""
-        for where, was, now in changes:
-            refused = self._put(where, now)
-            if refused:
-                break
-            made.append((where, was))
-        if refused:
-            for where, was in reversed(made):
-                self._put(where, was)
+        try:
+            self.model.change_many([(where, now) for where, _, now in changes])
+        except RowSynthError as error:
             back()
-        self.say(refused)
-        if made:
-            self._renew(before)
-        return not refused
+            self.say(str(error))
+            return False
+        self.say("")
+        self._renew(before)
+        return True
 
     def _take(self) -> None:
         """Takes up the render the model has ready.

@@ -1,8 +1,10 @@
-"""One change to a project: a place in its data read, set or deleted, and the same done to its file."""
+"""A change to a project: a place in its data read, set or deleted, and one or several of them done to its file."""
 from __future__ import annotations
 
+import copy
 import json
 import re
+from collections.abc import Iterable
 from pathlib import Path
 from typing import NoReturn
 
@@ -138,6 +140,40 @@ def _same(one: object, other: object) -> bool:
     return json.dumps(one) == json.dumps(other)
 
 
+def change_file_many(path: str | Path, changes: Iterable[tuple[str, object]]) -> list[dict]:
+    """Make several changes to the project file at `path` as one, and save the file when the project then holds.
+
+    Each change is (where, value): the value put at the place, as `set_in` puts it, or with NOTHING for the
+    value what is there taken out. The file is read once, the changes are made in the order given, and the
+    project is checked once, whole, after the last of them. So things that name one another can be changed
+    together, where each change alone would leave the project wrong: an instrument under another name, and the
+    song that plays it. The file is saved once. Where a place leads nowhere or the check refuses the project,
+    that is refused in its own words and nothing is written.
+
+    The answer has for each change what `change_file` tells of one: {"file", "where", "was", "now"}, with "was"
+    what was there as that change was made. A value that is what was there already has "same": true, and
+    where every change is so, the file is not written.
+    """
+    data = Project.load(path).to_dict()
+    told = []
+    for where, value in changes:
+        one = {"file": str(path), "where": where}
+        if value is NOTHING:
+            one["was"] = delete_in(data, where)
+        else:
+            # The data has a value of its own, so that a later change to a place in it leaves this one as it is.
+            was = set_in(data, where, copy.deepcopy(value))
+            if was is not NOTHING:
+                one["was"] = was
+            one["now"] = value
+            if was is not NOTHING and _same(was, value):
+                one["same"] = True
+        told.append(one)
+    if not all(one.get("same") for one in told):
+        Project.from_dict(data).save(path)
+    return told
+
+
 def change_file(path: str | Path, where: str, value: object = NOTHING, delete: bool = False) -> dict:
     """Make one change to the project file at `path`, and save the file when the project still holds.
 
@@ -145,23 +181,11 @@ def change_file(path: str | Path, where: str, value: object = NOTHING, delete: b
     out. The file is read, changed, checked and saved within this one call, so what another program wrote to
     it a moment before is kept. The project is checked whole, as it is when it is loaded, before anything is
     written: a change that would leave it wrong is refused with the check's own message, and the file stays
-    as it was.
+    as it was. It is `change_file_many` with the one change.
 
     The answer is {"file", "where", "was", "now"}. "was" is left out when nothing was there, and "now" after
     a delete. A value that is what the file holds already is not written, and the answer has "same": true.
     """
     if (value is NOTHING) != delete:
         raise RowSynthError(f"{where}: a change is a value to put there or a delete, and only one of the two")
-    data = Project.load(path).to_dict()
-    told = {"file": str(path), "where": where}
-    if delete:
-        told["was"] = delete_in(data, where)
-    else:
-        was = set_in(data, where, value)
-        if was is not NOTHING:
-            told["was"] = was
-        told["now"] = value
-        if was is not NOTHING and _same(was, value):
-            return {**told, "same": True}
-    Project.from_dict(data).save(path)
-    return told
+    return change_file_many(path, [(where, value)])[0]

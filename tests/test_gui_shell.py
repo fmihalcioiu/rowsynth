@@ -53,6 +53,13 @@ SMALL = {
     "songs": {"tune": {"row_ticks": 3, "channels": {"tune": {"inst": "beep"}},
                        "patterns": {"a": {"tune": "l4 c e g > c"}}, "order": ["a"]}},
 }
+#: A project whose one instrument is named by a sound, by the channel of a song, and by a switch in its text.
+THINGS = {
+    "instruments": {"beep": {"vol": [15, 12, 9, 6]}},
+    "sounds": {"zap": {"def": {"voices": [{"inst": "beep", "notes": [[0, "a4", 4]]}]}}},
+    "songs": {"tune": {"row_ticks": 3, "channels": {"tune": {"inst": "beep"}},
+                       "patterns": {"a": {"tune": "l4 c e @beep g > c"}}, "order": ["a"]}},
+}
 
 
 class Held:
@@ -496,6 +503,127 @@ class Left(unittest.TestCase):
             self.assertTrue(lies_in(side.list.rect, rect), rect)
         side.place(SMALL_SIDE)
         self.assertEqual(side.list.rect, (42, 36, 55, 24))
+
+
+class Changing(unittest.TestCase):
+    """The left panel with a real session, on a small project in a folder of its own."""
+
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        # Every render and the checks are refused at once, so that none costs its time.
+        for owner, name in ((gui_model, "render_stems"), (gui_model, "render_entry"), (checks, "run")):
+            patch = mock.patch.object(owner, name, side_effect=RowSynthError("not made in this test"))
+            patch.start()
+            self.addCleanup(patch.stop)
+        # No thread of one test is left to run into the next.
+        self.addCleanup(settle)
+        self.path = Path(folder.name) / "things.json"
+        self.path.write_text(json.dumps(THINGS), encoding="utf-8")
+        self.session = Session(gui_model.Model(self.path))
+        self.ui = Ui()
+        self.side = Browser(self.session, self.ui)
+        self.side.place(SIDE)
+        self.side.update()
+
+    def held(self) -> dict:
+        """What the file holds now."""
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def menu(self, key: Hashable | None) -> list[str | None]:
+        """Press the right button on the row of a key, or with None under the rows: the texts of the menu it opens."""
+        x, y, _, h = self.side.list.rect
+        pos = (x + 2, y + h - 2) if key is None else spot(self.side.list, key)
+        self.ui.handle(Event("down", pos, button=3))
+        self.ui.handle(Event("up", pos, button=3))
+        return [item and item.text for item in self.ui.modal.items]
+
+    def choose(self, text: str) -> None:
+        """Click the item of the open menu that has a text, and bring the panel up to date."""
+        menu = self.ui.modal
+        click(self.ui, middle(menu.rows[[item and item.text for item in menu.items].index(text)]))
+        self.side.update()
+
+    def enter(self, text: str) -> None:
+        """Type a text into the open box in place of what is picked there, press enter, and update the panel."""
+        self.ui.handle(Event("text", text=text))
+        self.ui.handle(Event("key", key="return"))
+        self.side.update()
+
+    def test_rename_opens_a_box_over_the_name_and_enter_gives_the_instrument_its_new_name_everywhere(self) -> None:
+        self.assertEqual(self.menu(("instrument", "beep")), ["Rename...", "Copy", None, "Delete"])
+        self.choose("Rename...")
+        box = self.ui.modal
+        self.assertEqual((box.text, box.picked), ("beep", (0, 4)))
+        self.assertEqual(box.rect, popups.over(self.side.list.name_rect(("instrument", "beep")), self.ui.size))
+        # A name that is refused is said, and is in the box again to be mended. A dot is not typed at all.
+        written = self.path.read_bytes()
+        self.enter("my .bell")
+        self.assertEqual(self.session.message,
+                         "the channel tune in the pattern a of tune switches to the instrument as @beep, and a name "
+                         "written so holds only letters, digits and _, which 'my bell' does not")
+        box = self.ui.modal
+        self.assertEqual((box.text, box.picked, self.path.read_bytes()), ("my bell", (7, 7), written))
+        self.ui.handle(Event("key", key="a", mods=frozenset({"ctrl"})))
+        self.enter("bell")
+        self.assertIsNone(self.ui.modal)
+        held = self.held()
+        tune = held["songs"]["tune"]
+        self.assertEqual([list(held["instruments"]), tune["channels"]["tune"]["inst"], tune["patterns"]["a"]["tune"],
+                          held["sounds"]["zap"]["def"]["voices"][0]["inst"]],
+                         [["bell"], "bell", "l4 c e @bell g > c", "bell"])
+        # The press of the right button picked nothing, and the thing under its new name is the picked one.
+        self.assertEqual([self.session.undo_label, self.session.message, self.session.model.picked,
+                          self.side.list.picked],
+                         ["instrument beep renamed to bell", "", ("instrument", "bell"), ("instrument", "bell")])
+
+    def test_a_rename_is_taken_back_in_one_step_and_the_list_has_the_old_name_again(self) -> None:
+        self.menu(("instrument", "beep"))
+        self.choose("Rename...")
+        self.enter("bell")
+        self.assertIn(Row(("instrument", "bell"), "bell"), self.side.list.rows)
+        self.assertTrue(self.session.undo())
+        self.side.update()
+        self.assertEqual(json.dumps(self.held()), json.dumps(THINGS))
+        self.assertEqual([self.session.can_undo, self.session.redo_label], [False, "instrument beep renamed to bell"])
+        self.assertIn(Row(("instrument", "beep"), "beep"), self.side.list.rows)
+        # The picked thing is gone with its name, and the first thing there is takes its place.
+        self.assertEqual(self.side.list.picked, ("song", "tune"))
+
+    def test_copy_makes_a_thing_like_it_under_the_next_free_name_and_picks_it(self) -> None:
+        self.menu(("song", "tune"))
+        self.choose("Copy")
+        held = self.held()
+        self.assertEqual([list(held["songs"]), held["songs"]["tune2"]], [["tune", "tune2"], THINGS["songs"]["tune"]])
+        self.assertEqual([self.session.undo_label, self.side.list.picked],
+                         ["song tune copied as tune2", ("song", "tune2")])
+
+    def test_delete_takes_a_thing_out_and_an_instrument_that_is_still_used_is_refused_and_said(self) -> None:
+        written = self.path.read_bytes()
+        self.menu(("instrument", "beep"))
+        self.choose("Delete")
+        self.assertEqual(self.session.message,
+                         "instrument 'beep' is still used by the channel tune of tune, the channel tune in the "
+                         "pattern a of tune, the sound zap")
+        self.assertEqual([self.path.read_bytes(), self.session.can_undo], [written, False])
+        # The picked thing deleted, the first thing there is takes its place.
+        self.menu(("song", "tune"))
+        self.choose("Delete")
+        self.assertEqual([self.held()["songs"], self.session.undo_label, self.side.list.picked],
+                         [{}, "song tune deleted", ("sound", "zap")])
+
+    def test_the_right_button_on_a_heading_or_under_the_rows_makes_a_new_thing_of_each_kind_and_picks_it(self) -> None:
+        for key, kind in (("songs", "song"), (None, "sound"), (None, "instrument")):
+            with self.subTest(kind=kind):
+                self.assertEqual(self.menu(key), ["New song", "New sound", "New instrument"])
+                self.choose(f"New {kind}")
+                self.assertEqual([self.session.undo_label, self.side.list.picked], [f"new {kind} {kind}", (kind, kind)])
+        held = self.held()
+        # The press on the heading folded nothing away, and the new song and the new sound play the instrument there is.
+        self.assertIsNotNone(self.side.list.name_rect(("song", "tune")))
+        self.assertEqual([held["songs"]["song"]["channels"]["lead"]["inst"],
+                          held["sounds"]["sound"]["def"]["voices"][0]["inst"], held["instruments"]["instrument"]],
+                         ["beep", "beep", {"wave": "pulse"}])
 
 
 @unittest.skipUnless(pygame, NEEDS)

@@ -15,6 +15,7 @@ from unittest import mock
 import numpy as np
 
 from rowsynth import checks
+from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import KINDS, Model
@@ -802,7 +803,7 @@ class ChangeTest(SessionCase):
         self.assertEqual(self.data(), outside)
         self.assertEqual([session.message, session.can_undo], ["", False])
 
-    def test_an_undo_that_is_refused_part_way_puts_back_what_it_had_done_and_keeps_its_step(self):
+    def test_an_undo_that_is_refused_writes_nothing_and_keeps_its_step(self):
         hum = {"hum": {"wave": "tri"}}
         session = self.opened(changed(instruments=hum, sounds={"zap": {"def": sound("a4", "hum")}}))
         session.tick()
@@ -813,12 +814,36 @@ class ChangeTest(SessionCase):
         # Then the instrument zap had is removed outside, which no look has found as the step is taken back.
         del after["instruments"]["hum"]
         self.write(after)
-        with mock.patch.object(session.model, "change", wraps=session.model.change) as change:
-            self.assertFalse(session.undo())
-        self.assertEqual([call.args[0] for call in change.call_args_list], ["sounds.pop", "sounds.zap", "sounds.pop"])
-        self.assertEqual(self.data(), after)
+        written = self.path.read_bytes()
+        # The two changes are made as one, so pop is not put back alone.
+        self.assertFalse(session.undo())
+        self.assertEqual(self.path.read_bytes(), written)
         self.assertEqual(session.message, "sounds.zap.def.voices[0].inst: no instrument named 'hum'")
         self.assertEqual([session.undo_label, session.can_redo], ["changed outside: pop, zap", False])
+
+    def test_several_places_changed_as_one_are_one_step_that_is_taken_back_and_made_again_in_one_write(self):
+        session = self.opened()
+        session.tick()
+        # The instrument under another name, in its table and in every sound and song: none of these alone holds.
+        after = json.loads(json.dumps(PROJECT).replace('"beep"', '"bell"'))
+        changes = [("instruments", after["instruments"]),
+                   *((f"{table}.{name}", after[table][name]) for table in ("sounds", "songs") for name in after[table])]
+        label = "instrument beep renamed to bell"
+        self.assertTrue(session.change_many(changes, label))
+        self.assertEqual(self.data(), after)
+        self.assertEqual(session.model.project, Project.from_dict(after))
+        self.assertEqual([session.undo_label, session.can_redo, session.message], [label, False, ""])
+        with mock.patch.object(os, "replace", wraps=os.replace) as replaced:
+            self.assertTrue(session.undo())
+            self.assertEqual([replaced.call_count, self.data(), session.redo_label], [1, PROJECT, label])
+            self.assertTrue(session.redo())
+            self.assertEqual([replaced.call_count, self.data(), session.can_undo], [2, after, True])
+        # What is refused is made nowhere and is no step, and neither are values that are there already.
+        written = self.path.read_bytes()
+        self.assertFalse(session.change_many([("songs.tune.gain", 0.3), ("instruments.bell", NOTHING)], "bell gone"))
+        self.assertEqual(session.message, "sounds.zap.def.voices[0].inst: no instrument named 'bell'")
+        self.assertTrue(session.change_many([("songs.tune.row_ticks", 3), ("songs.air.row_ticks", 3)], "tempos"))
+        self.assertEqual([self.path.read_bytes(), session.undo_label, session.message], [written, label, ""])
 
     def test_a_change_made_here_does_not_glow_and_has_the_render_and_the_checks_made_again(self):
         session = self.opened()

@@ -9,19 +9,23 @@ import time
 from collections.abc import Callable, Iterable
 from numbers import Real
 from pathlib import Path
+from typing import TypeVar
 
 import numpy as np
 
 from .. import checks
 from ..bank import render_entry
 from ..commands import mono
-from ..edit import NOTHING, change_file
+from ..edit import NOTHING, change_file, change_file_many
 from ..errors import RowSynthError
 from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
 from ..notes import midi
 from ..project import Project
 from ..song import mix_stems, pan_gains, render_stems
+
+# What a write to the file answers.
+_Told = TypeVar("_Told")
 
 # The sections of the listing in the order they are shown, and the kind of the things each one holds.
 KINDS = {"songs": "song", "sounds": "sound", "instruments": "instrument"}
@@ -602,10 +606,33 @@ class Model:
         another program has open cannot be written: the change is tried again after each wait of `SAVE_WAITS`,
         and refused when the last try fails too.
         """
+        told = self._saved(lambda: change_file(self.path, where, value, delete))
+        if not told.get("same"):
+            self._load(_look(self.path))
+        return told
+
+    def change_many(self, changes: Iterable[tuple[str, object]]) -> list[dict]:
+        """Makes several changes to the file as one, as `change_file_many` makes them, and takes the file in.
+
+        Each change is (where, value), with NOTHING for what is taken out. The answer is the one
+        `change_file_many` gives. It is one write and one load, and everything else is as in `change`: what is
+        refused leaves the file and the model as they were, and a file another program has open is waited for.
+        """
+        changes = list(changes)
+        told = self._saved(lambda: change_file_many(self.path, changes))
+        if not all(one.get("same") for one in told):
+            self._load(_look(self.path))
+        return told
+
+    def _saved(self, write: Callable[[], _Told]) -> _Told:
+        """What a write to the file answers, tried again after each wait of `SAVE_WAITS` while the file is not free.
+
+        A file another program has open is refused when the last try fails too, and a file that cannot be
+        written for another reason is refused at once, both in plain words.
+        """
         for pause in (*SAVE_WAITS, None):
             try:
-                told = change_file(self.path, where, value, delete)
-                break
+                return write()
             except PermissionError as error:
                 if pause is None:
                     raise RowSynthError(f"{self.path}: another program has the file open, so the change was not "
@@ -613,9 +640,6 @@ class Model:
                 self._wait(pause)
             except OSError as error:
                 raise RowSynthError(f"{self.path}: {error.strerror}") from error
-        if not told.get("same"):
-            self._load(_look(self.path))
-        return told
 
     def _load(self, seen: tuple[int, int] | None) -> list[tuple[str, str, object, object]]:
         """Reads the file, which was looked at as `seen`, and puts what it holds in the place of the project.

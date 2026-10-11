@@ -10,7 +10,7 @@ import unittest
 from collections.abc import Callable
 from pathlib import Path
 
-from rowsynth.edit import NOTHING, change_file, delete_in, get_in, set_in, steps
+from rowsynth.edit import NOTHING, change_file, change_file_many, delete_in, get_in, set_in, steps
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
 
@@ -273,6 +273,44 @@ class ChangeFile(unittest.TestCase):
                 self.assertEqual(str(refused.exception),
                                  "songs.tune.gain: a change is a value to put there or a delete, and only one of "
                                  "the two")
+
+    def test_several_changes_are_made_as_one_where_each_alone_would_leave_the_project_wrong(self) -> None:
+        # The instrument of the lead under another name: in its table, where it keeps its place, and in the song.
+        table = {"top" if name == "lead" else name: inst for name, inst in self.before["instruments"].items()}
+        song = copy.deepcopy(self.before["songs"]["tune"])
+        song["channels"]["lead"]["inst"] = "top"
+        for where, value in (("instruments", table), ("songs.tune", song)):
+            with self.subTest(where=where):
+                with self.assertRaises(RowSynthError):
+                    change_file(self.path, where, value)
+        self.assert_holds(self.before)
+        told = change_file_many(self.path, [("instruments", table), ("songs.tune", song), ("sounds.jump", NOTHING)])
+        file = str(self.path)
+        self.assertEqual(told, [
+            {"file": file, "where": "instruments", "was": self.before["instruments"], "now": table},
+            {"file": file, "where": "songs.tune", "was": self.before["songs"]["tune"], "now": song},
+            {"file": file, "where": "sounds.jump", "was": self.before["sounds"]["jump"]}])
+        expected = copy.deepcopy(self.before)
+        expected["instruments"], expected["songs"]["tune"] = table, song
+        del expected["sounds"]["jump"]
+        self.assert_holds(expected)
+
+    def test_several_changes_of_which_one_is_refused_or_all_are_there_already_write_nothing(self) -> None:
+        os.utime(self.path, ns=(10 ** 18, 10 ** 18))
+        stamped, written = os.stat(self.path).st_mtime_ns, self.path.read_bytes()
+        for changes, message in (
+            # The first is refused by the project's check once both are made, and the second by where it leads.
+            ([("instruments.lead", NOTHING), ("songs.tune.gain", 0.3)],
+             "songs.tune.channels.lead.inst: no instrument named 'lead'"),
+            ([("songs.tune.gain", 0.3), ("songs.march.gain", 0.3)], "songs has no key 'march'"),
+        ):
+            with self.subTest(changes=changes):
+                with self.assertRaises(RowSynthError) as refused:
+                    change_file_many(self.path, changes)
+                self.assertEqual(str(refused.exception), message)
+        told = change_file_many(self.path, [("songs.tune.gain", 0.35), ("songs.tune.row_ticks", 6)])
+        self.assertEqual([one.get("same") for one in told], [True, True])
+        self.assertEqual((os.stat(self.path).st_mtime_ns, self.path.read_bytes()), (stamped, written))
 
 
 if __name__ == "__main__":
