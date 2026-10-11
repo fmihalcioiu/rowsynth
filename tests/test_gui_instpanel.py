@@ -12,16 +12,18 @@ from pathlib import Path
 from unittest import mock
 
 from rowsynth import project as validator
-from rowsynth.gui import layout, sprites, theme
+from rowsynth.errors import RowSynthError
+from rowsynth.gui import fmview, layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.dials import WHEEL_WAIT
 from rowsynth.gui.font import Font
-from rowsynth.gui.instpanel import (A4, BUZZ_UNUSED, FM, LATER, NEEDED, NUMBERS, TABLES, InstPanel, Waves, arrange,
-                                    key_at, keyboard, note_name, slack, used, uses)
+from rowsynth.gui.instpanel import (A4, BUZZ_UNUSED, DIALS, FEEDBACK, FM_NEEDED, FM_TABLES, NEEDED, NUMBERS, PLAIN,
+                                    SCOPE_HELP, SILENT, TABLES, InstPanel, Waves, arrange, key_at, keyboard,
+                                    note_name, role, slack, used, uses)
 from rowsynth.gui.model import Model
 from rowsynth.gui.panels import within
 from rowsynth.gui.session import POLL_EVERY, Session
-from rowsynth.gui.ui import Event, Ui, Widget
+from rowsynth.gui.ui import Event, Label, Ui, Widget
 from rowsynth.notes import midi
 from rowsynth.project import Project
 
@@ -41,7 +43,8 @@ NEEDS = "pygame is not installed"
 RECT = (124, 22, 662, 504)
 SMALL = (124, 22, 500, 300)
 
-#: A pulse with every kind of table and a vibrato, a short noise with a filter, an FM voice, and one with no key.
+#: A pulse with every kind of table and a vibrato, a short noise with a filter, an FM voice that names two of its
+#: four operators, and one with no key.
 BELL = {"wave": "pulse", "duty": [1, 2], "vol": [15, 12, 9, 6], "pitch": {"v": [0, -1], "loop": 1},
         "vib": {"delay": 12, "depth": 0.3, "rate": 5}, "release": 3, "gain": 0.8}
 HISS = {"wave": "noise", "short": True, "lp": [4000, 2000]}
@@ -79,13 +82,17 @@ SOUNDS = {
 PROJECT = {"instruments": {"bell": BELL, "hiss": HISS, "brass": BRASS, "plain": {}}, "sounds": SOUNDS,
            "songs": {"walk": WALK}}
 
-#: What each setting of an instrument reads on the window: the words of the widgets that show it.
+#: What each setting of an instrument reads on the window: the words of the widgets that show it, and for one
+#: that is a picture what kind of picture it is. An operator has three knobs and its envelope.
 WORDS = {
     "wave": ["PULSE SAW TRI NOISE FM"], "vol": ["LOUDNESS"], "duty": ["PULSE WIDTH"], "arp": ["JUMP"],
     "pitch": ["SWEEP"], "vib": ["VIBRATO", "VIB WAIT", "VIB RATE"], "slide": ["SLIDE"], "release": ["FADE"],
     "gain": ["LEVEL"], "short": ["BUZZ"], "lp": ["FILTER"], "res": ["RING"], "key_scale": ["KEY TILT"],
-    "gate": ["HELD FOR"], "alg": [LATER], "fb": [LATER], "ops": [LATER],
+    "gate": ["HELD FOR"], "alg": ["Wiring"], "fb": ["FEEDBACK"], "ops": ["PITCH X", "DETUNE", "LEVEL", "Envelope"] * 4,
 }
+#: The settings that are the FM wave's, and the parts of `arrange` that are the frame of the page and none of it.
+FM = ("alg", "fb", "ops")
+FRAME = ("head", "box", "view")
 #: The rate the project is rendered at on the threads of its model: a low one, to be quick.
 RATE = 8000
 #: The time the first write from outside is stamped with, in nanoseconds: none the file gets by being saved.
@@ -139,6 +146,11 @@ def differing(one: object, other: object, where: str = "") -> list[str]:
                 for place in (differing(one[key], other[key], f"{where}.{key}".lstrip("."))
                               if key in one and key in other else [f"{where}.{key}".lstrip(".")])]
     return [] if json.dumps(one) == json.dumps(other) else [where]
+
+
+def page(rect: layout.Rect, fm: bool = False) -> list[str]:
+    """The parts of the page of a panel, by what `arrange` calls them: with `fm`, the page of an FM instrument."""
+    return [name for name in arrange(rect, fm=fm) if name not in FRAME]
 
 
 def middle(rect: layout.Rect) -> tuple[int, int]:
@@ -210,39 +222,85 @@ class Sums(unittest.TestCase):
                          ((128, 26, 654, 17), (128, 47, 654, 475), (132, 51, 646, 467), 0))
         # Five tables one under the other, each as wide as the view, the one of four widths lower than the rest.
         self.assertEqual([parts[table.key] for table in TABLES],
-                         [(132, 70, 646, 76), (132, 149, 646, 50), (132, 202, 646, 76), (132, 281, 646, 75),
-                          (132, 359, 646, 76)])
-        self.assertEqual((parts["later"], parts["gain"], parts["key_scale"]),
-                         ((132, 70, 646, 365), (132, 441, 54, 37), (596, 441, 54, 37)))
-        # The keyboard is along the foot, with the stepper of its octave before it and the room of a scope after.
-        self.assertEqual((parts["octave"], parts["keys"], parts["scope"]),
-                         ((132, 494, 36, 13), (174, 484, 196, 34), (376, 484, 402, 34)))
-        page = [name for name in parts if name not in ("head", "box", "view", "later")]
-        self.assertTrue(all(within(parts[name], parts["view"]) == parts[name] for name in page))
-        self.assertTrue(all(apart(parts[one], parts[other]) for one in page for other in page if one != other))
+                         [(132, 70, 646, 71), (132, 144, 646, 47), (132, 194, 646, 71), (132, 268, 646, 71),
+                          (132, 342, 646, 71)])
+        self.assertEqual((parts["gain"], parts["key_scale"]), ((132, 419, 54, 37), (596, 419, 54, 37)))
+        # The keyboard is along the foot, with the stepper of its octave before it. After it come the scope and
+        # the spectrum, whose box is as high as the scope and has the names of its marks under it.
+        self.assertEqual((parts["octave"], parts["keys"], parts["scope"], parts["spectrum"]),
+                         ((132, 483, 36, 13), (174, 462, 196, 56), (376, 462, 158, 47), (540, 462, 238, 56)))
+        names = page(RECT)
+        self.assertTrue(all(within(parts[name], parts["view"]) == parts[name] for name in names))
+        self.assertTrue(all(apart(parts[one], parts[other]) for one in names for other in names if one != other))
+        # Nothing of the FM wave is on this page.
+        self.assertEqual([name for name in names if name in FM or name.startswith("ops")], [])
         # The wheel has nothing to scroll: asked for or not, the page stays.
         self.assertEqual(arrange(RECT, 40), parts)
 
+    def test_the_page_of_an_fm_instrument_has_the_wirings_the_operators_and_the_tables_it_reads_and_fits(self) -> None:
+        parts, plain = arrange(RECT, fm=True), arrange(RECT)
+        self.assertEqual((FM_NEEDED, slack(RECT, True), [parts[name] for name in FRAME]),
+                         (339, 0, [plain[name] for name in FRAME]))
+        # The eight wirings, and after them the knob of the feedback, in the middle of their height.
+        self.assertEqual((parts["alg"], parts["fb"], [cell[2] for cell in fmview.cells(parts["alg"])]),
+                         ((132, 70, 586, 62), (724, 82, 54, 37), [68] * 8))
+        # Four columns. Each has its heading with what the operator does after it, its envelope and three knobs.
+        self.assertEqual([parts[f"ops[{op}]"] for op in range(4)],
+                         [(132, 138, 59, 11), (295, 138, 59, 11), (458, 138, 59, 11), (621, 138, 59, 11)])
+        self.assertEqual([parts[f"ops[3]{part}"] for part in (".does", ".env", ".mul", ".det", ".level")],
+                         [(688, 138, 90, 11), (621, 149, 157, 122), (621, 274, 49, 37), (674, 274, 49, 37),
+                          (727, 274, 49, 37)])
+        # Under them the tables an FM voice reads, side by side: the width of a pulse is not one of them.
+        self.assertEqual(([table.key for table in FM_TABLES], [parts[table.key] for table in FM_TABLES]),
+                         (["vol", "arp", "pitch", "lp"],
+                          [(132, 317, 157, 96), (295, 317, 157, 96), (458, 317, 157, 96), (621, 317, 157, 96)]))
+        # The knobs and the foot are where the other page has them.
+        foot = [number.key for number in NUMBERS] + ["octave", "keys", "scope", "spectrum"]
+        self.assertEqual([parts[name] for name in foot], [plain[name] for name in foot])
+        names = page(RECT, True)
+        self.assertEqual((len(names), "duty" in names), (3 + 2 + 4 * 6 + 4 + 9 + 4, False))
+        self.assertTrue(all(within(parts[name], parts["view"]) == parts[name] for name in names))
+        self.assertTrue(all(apart(parts[one], parts[other]) for one in names for other in names if one != other))
+
+    def test_what_an_operator_does_in_a_wiring_is_said_as_the_heading_of_its_column_says_it(self) -> None:
+        self.assertEqual([[role(wiring, op) for op in range(4)] for wiring in (1, 4, 5, 7)],
+                         [["CHANGES 2", "CHANGES 2", "CHANGES 3", "HEARD"],
+                          ["CHANGES 1", "HEARD", "CHANGES 3", "HEARD"],
+                          ["CHANGES 1, 2, 3", "HEARD", "HEARD", "HEARD"], ["HEARD"] * 4])
+        # The widest of them has its room after the heading, at the width the layout is drawn for.
+        widest = max(Font.width(role(wiring, op)) for wiring in range(8) for op in range(4))
+        self.assertEqual((widest, arrange(RECT, fm=True)["ops[0].does"][2]), (89, 90))
+
     def test_in_a_low_panel_the_page_keeps_its_height_and_is_scrolled_no_further_than_its_end(self) -> None:
         parts = arrange(SMALL)
-        self.assertEqual((parts["view"], NEEDED, slack(SMALL)), ((132, 51, 484, 263), 324, 61))
+        self.assertEqual((parts["view"], NEEDED, slack(SMALL)), ((132, 51, 484, 263), 346, 83))
         # Every table has its least height, and the knobs are as wide as a narrow page leaves them.
         self.assertEqual([parts[table.key][3] for table in TABLES], [45, 30, 45, 45, 45])
-        self.assertEqual((parts["gain"], parts["vib.rate"], parts["keys"]),
-                         ((132, 298, 50, 37), (456, 298, 50, 37), (174, 341, 196, 34)))
-        page = [name for name in parts if name not in ("head", "box", "view", "later")]
-        self.assertTrue(all(apart(parts[one], parts[other]) for one in page for other in page if one != other))
+        self.assertEqual((parts["gain"], parts["vib.rate"], parts["keys"], parts["scope"], parts["spectrum"]),
+                         ((132, 298, 50, 37), (456, 298, 50, 37), (174, 341, 196, 56), (376, 341, 94, 47),
+                          (476, 341, 140, 56)))
+        names = page(SMALL)
+        self.assertTrue(all(apart(parts[one], parts[other]) for one in names for other in names if one != other))
         # Scrolled, every part of the page is that much higher, and the boxes stay.
         moved = arrange(SMALL, 24)
-        self.assertEqual([(moved[name][0], moved[name][1] + 24, *moved[name][2:]) for name in page],
-                         [parts[name] for name in page])
-        self.assertEqual([moved[name] for name in ("head", "box", "view")],
-                         [parts[name] for name in ("head", "box", "view")])
+        self.assertEqual([(moved[name][0], moved[name][1] + 24, *moved[name][2:]) for name in names],
+                         [parts[name] for name in names])
+        self.assertEqual([moved[name] for name in FRAME], [parts[name] for name in FRAME])
         # At its end the keyboard stands on the foot of the view, and the page goes no further.
-        self.assertEqual((arrange(SMALL, 61)["keys"], arrange(SMALL, 500), arrange(SMALL, -9)),
-                         ((174, 280, 196, 34), arrange(SMALL, 61), parts))
-        # A panel with no room at all has every part, none with a size below nothing.
-        self.assertTrue(all(w >= 0 and h >= 0 for _, _, w, h in arrange((0, 0, 0, 0)).values()))
+        self.assertEqual((arrange(SMALL, 83)["keys"], arrange(SMALL, 500), arrange(SMALL, -9)),
+                         ((174, 258, 196, 56), arrange(SMALL, 83), parts))
+        # The page of an FM instrument is as high as it needs to be too, its envelopes and its tables at their
+        # least, and is scrolled as far as its own end.
+        parts = arrange(SMALL, fm=True)
+        self.assertEqual((slack(SMALL, True), parts["ops[0].env"], parts["ops[3].level"], parts["lp"]),
+                         (76, (132, 149, 117, 45), (580, 197, 36, 37), (500, 240, 116, 45)))
+        names = page(SMALL, True)
+        self.assertTrue(all(apart(parts[one], parts[other]) for one in names for other in names if one != other))
+        self.assertEqual((arrange(SMALL, 76, True)["keys"], arrange(SMALL, 500, True)),
+                         ((174, 258, 196, 56), arrange(SMALL, 76, True)))
+        # A panel with no room at all has every part of either page, none with a size below nothing.
+        self.assertTrue(all(w >= 0 and h >= 0 for fm in (False, True)
+                            for _, _, w, h in arrange((0, 0, 0, 0), fm=fm).values()))
 
 
 class Opened(unittest.TestCase):
@@ -334,17 +392,41 @@ class Shown(Opened):
         self.assertEqual((len(known), sorted(panel.settings)), (17, sorted(known)))
 
         def words(widget: Widget) -> str:
-            return " ".join(widget.options) if isinstance(widget, Waves) else widget.text
+            return " ".join(widget.options) if isinstance(widget, Waves) else getattr(widget, "text",
+                                                                                      type(widget).__name__)
 
         self.assertEqual({name: [words(widget) for widget in panel.settings[name]] for name in known}, WORDS)
         mine = [widget for name in known if name not in FM for widget in panel.settings[name]]
         # A choice, a toggle, five tables and nine knobs, each with a line that says what it does to the sound.
         self.assertEqual(len(mine), 16)
         self.assertTrue(all(widget in panel.widgets and widget.visible and widget.help for widget in mine))
-        # The three of the FM wave have the line that stands for them, which is seen with an FM instrument.
-        self.assertEqual(([panel.settings[name] for name in FM], panel.later.visible), ([(panel.later,)] * 3, False))
+        # The three of the FM wave have the wirings, a knob, and four operators of three knobs and an envelope
+        # each. They are seen with an FM instrument, and not with another.
+        theirs = [widget for name in FM for widget in panel.settings[name]]
+        self.assertEqual((len(theirs), [widget for widget in theirs if widget.visible]), (18, []))
         self.pick("brass")
-        self.assertTrue(panel.later.visible)
+        self.assertTrue(all(widget in panel.widgets and widget.visible and widget.help for widget in theirs))
+
+    def test_every_setting_the_validator_of_an_operator_knows_has_a_widget_in_the_column_of_each_operator(
+            self) -> None:
+        panel = self.panel
+        with mock.patch.object(validator, "_record") as record:
+            validator._ops([{}], "instruments.any.ops")
+            known = record.call_args.args[2]
+            known["env"]({}, "instruments.any.ops[0].env")
+            parts = list(record.call_args.args[2])
+        # A setting an operator gets later is in the validator's table, and fails here until a widget shows it.
+        self.assertEqual((list(known), parts), (["mul", "det", "level", "env"], ["a", "d", "s", "sd", "r"]))
+        self.assertEqual(([sorted(column) for column in panel.operators], [number.key for number in DIALS]),
+                         ([sorted(known)] * 4, ["mul", "det", "level"]))
+        # Every part of an envelope is set by a point of its line, to the side or up and down.
+        self.assertEqual({key for point in fmview.POINTS for key in (point.time, point.level) if key}, set(parts))
+        self.assertEqual({name: [widget for column in panel.operators for widget in column.values()]
+                          for name in ("ops",)}, {"ops": list(panel.settings["ops"])})
+        # The knobs are called in plain words, and each says what it does to the sound.
+        self.assertEqual([(number.text, number.words, bool(number.help)) for number in (FEEDBACK, *DIALS)],
+                         [("FEEDBACK", "feedback", True), ("PITCH X", "pitch times", True),
+                          ("DETUNE", "detune", True), ("LEVEL", "level", True)])
 
     def test_the_widgets_show_what_the_file_holds_and_what_the_engine_takes_for_what_it_does_not(self) -> None:
         panel = self.panel
@@ -396,32 +478,86 @@ class Shown(Opened):
         self.assertEqual([panel.knobs[key].enabled for key in ("vib.depth", "vib.delay", "vib.rate")],
                          [True, False, False])
 
-    def test_an_fm_instrument_has_the_line_in_place_of_the_tables_and_another_wave_picked_loses_nothing(self) -> None:
+    def test_an_fm_instrument_shows_its_wirings_its_feedback_and_a_column_for_each_of_its_four_operators(self) -> None:
         panel = self.panel
         self.pick("brass")
-        self.assertEqual(self.seen(), ["word", "wave", "short", *(number.key for number in NUMBERS), "octave", "keys"])
-        self.assertEqual((panel.later.visible, panel.later.text, panel.later.rect, panel.later.colour),
-                         (True, "the wiring and the four operators of the FM wave come in a later step",
-                          arrange(RECT)["later"], theme.DIM))
+        # All of the page of an FM instrument is seen, and nothing that is not on it.
+        self.assertEqual((sorted(self.seen()), panel.tables["duty"].visible), (sorted(page(RECT, True)), False))
         self.assertEqual((panel.wave.waves[panel.wave.picked], panel.knobs["gate"].value), ("fm", 0.7))
+        self.assertEqual((panel.wiring.algorithm, panel.wiring.rect, panel.feedback.value, panel.feedback.text),
+                         (5, arrange(RECT, fm=True)["alg"], 0.25, "FEEDBACK"))
+        # The only words that stand alone on the page are the one before the waves and the headings.
+        self.assertEqual([widget.text for widget in panel.widgets if isinstance(widget, Label) and widget.visible],
+                         ["WAVE", "OPERATOR 0", "OPERATOR 1", "OPERATOR 2", "OPERATOR 3",
+                          "CHANGES 1, 2, 3", "HEARD", "HEARD", "HEARD"])
+        # Two operators are as the file has them, with the engine's own envelope. The two it leaves out are shown
+        # as the engine takes them: at no level, and down at once.
+        self.assertEqual([column["env"].op for column in panel.operators], [*BRASS["ops"], SILENT, SILENT])
+        self.assertEqual([[column[key].value for key in ("mul", "det", "level")] for column in panel.operators],
+                         [[1, 0, 1], [2, 0, 0.5], [1, 0, 0], [1, 0, 0]])
+        self.assertEqual((SILENT, fmview.settings(SILENT)["s"]), ({"level": 0, "env": {"s": 0, "d": 0.001}}, 0))
+        # The ranges of the knobs, each with the value a right click puts it back to, and their colour.
+        dials = [panel.feedback, *panel.operators[2].values()][:4]
+        self.assertEqual([(dial.low, dial.high, dial.steps, dial.default, dial.colour) for dial in dials],
+                         [(0, 3, 60, 0, theme.INSTRUMENT), (0, 16, 64, 1, theme.INSTRUMENT),
+                          (-10, 10, 200, 0, theme.INSTRUMENT), (0, 8, 160, 1, theme.INSTRUMENT)])
+        # The help line names the point of an envelope the mouse is on, and the wiring of a picture.
+        at = panel.operators[0]["env"].map.spots(fmview.settings(BRASS["ops"][0]))[fmview.RELEASE]
+        self.ui.handle(Event("move", at))
+        self.assertEqual(self.ui.help, "release: 0.2 s")
+        self.ui.handle(Event("move", middle(fmview.cells(panel.wiring.rect)[7])))
+        self.assertEqual(self.ui.help, "none changes another; 0, 1, 2 and 3 are heard")
+
+    def test_another_wave_picked_for_an_fm_instrument_and_fm_picked_again_lose_nothing_of_the_file(self) -> None:
+        panel = self.panel
+        self.pick("brass")
         # Another wave is that one place in the file: the settings of the FM wave stay, to come back to.
         before = self.data()
         click(self.ui, middle(panel.wave.cells()[1]))
         self.assertEqual((differing(before, self.data()), self.inst("brass")),
                          (["instruments.brass.wave"], {**BRASS, "wave": "saw"}))
-        self.assertEqual((self.session.undo_label, panel.later.visible, self.seen()[3:8]),
-                         ("brass: wave saw", False, ["vol", "duty", "arp", "pitch", "lp"]))
+        self.assertEqual((self.session.undo_label, sorted(self.seen())), ("brass: wave saw", sorted(page(RECT))))
         self.assertEqual((panel.tables["vol"].table, panel.tables["lp"].table), ([15, 10], 2800))
-        # Picking FM for an instrument writes its wave and nothing more.
+        click(self.ui, middle(panel.wave.cells()[4]))
+        self.assertEqual((self.inst("brass"), self.session.undo_label, sorted(self.seen())),
+                         (BRASS, "brass: wave fm", sorted(page(RECT, True))))
+        self.assertEqual((panel.wiring.algorithm, panel.operators[1]["mul"].value), (5, 2))
+
+    def test_the_fm_wave_picked_for_an_instrument_with_no_operators_gives_it_some_so_that_it_is_heard(self) -> None:
+        panel = self.panel
+        # With no operators an FM voice is silence.
+        self.outside(lambda instruments: instruments.update(mute={"wave": "fm"}))
+        self.assertFalse(self.tone(A4, "mute")[0].any())
         self.pick("plain")
         click(self.ui, middle(panel.wave.cells()[4]))
-        self.assertEqual((self.inst("plain"), panel.later.visible, panel.tables["vol"].visible),
-                         ({"wave": "fm"}, True, False))
+        given = {"wave": "fm", "ops": [{}, {}, {"level": 0}, {"level": 0}]}
+        self.assertEqual((self.inst("plain"), [dict(op) for op in PLAIN], self.session.undo_label),
+                         (given, given["ops"], "plain: wave fm"))
+        # It is heard at once, and what is heard is a sound.
+        self.assertIs(self.heard()[-1], self.tone(A4, "plain"))
+        self.assertGreater(float(abs(self.tone(A4, "plain")[0]).max()), 0.5)
+        # The wiring is the 4 the engine takes for an instrument that names none: operator 0 changes operator
+        # 1, which is heard, and the other pair is there at no level.
+        self.assertEqual((panel.wiring.algorithm, [does.text for does in panel.roles],
+                          [column["level"].value for column in panel.operators], "alg" in self.inst("plain")),
+                         (4, ["CHANGES 1", "HEARD", "CHANGES 3", "HEARD"], [1, 1, 0, 0], False))
+        # The wave and the operators are one step.
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.inst("plain"), self.session.undo_label), ({}, "changed outside: mute"))
+        self.assertTrue(self.session.redo())
+        panel.update()
+        # Switched to another wave and back, the operators are in the file all the while.
+        click(self.ui, middle(panel.wave.cells()[2]))
+        self.assertEqual(self.inst("plain"), {**given, "wave": "tri"})
+        before = self.data()
+        click(self.ui, middle(panel.wave.cells()[4]))
+        self.assertEqual((differing(before, self.data()), self.inst("plain")), (["instruments.plain.wave"], given))
 
     def test_with_a_song_a_sound_or_nothing_picked_and_off_the_window_the_panel_shows_nothing(self) -> None:
         panel = self.panel
         shown = [widget for widget in panel.widgets if widget.visible]
-        self.assertEqual(shown, [widget for widget in panel.widgets if widget is not panel.later])
+        self.assertEqual(shown, [widget for widget in panel.widgets
+                                 if widget in (panel.page, *(panel._placed[part] for part in page(RECT)))])
         for kind, name in (("song", "walk"), ("sound", "ping")):
             self.pick(name, kind)
             self.assertEqual((panel.name, [widget for widget in panel.widgets if widget.visible]), (None, []))
@@ -470,8 +606,8 @@ class Saved(Opened):
             # Nothing but the table differs: of the one with a loop, its steps alone.
             self.assertEqual((differing(before, self.data()), self.inst()[key]), ([f"instruments.bell.{place}"], table))
             self.assertEqual((panel.tables[key].table, self.session.undo_label), (table, label))
-        # Thirty of the 57 rows of the filter, whose top is 8000 Hz, are a whole number of hertz.
-        self.assertEqual((self.inst()["lp"], type(self.inst()["lp"])), (4211, int))
+        # Thirty of the 52 rows of the filter, whose top is 8000 Hz, are a whole number of hertz.
+        self.assertEqual((self.inst()["lp"], type(self.inst()["lp"])), (4615, int))
         # A drag over two bars sets them both, and is one change to the file when the mouse lets go.
         before = self.data()
         self.ui.handle(Event("down", self.bar("vol", 2, 2), button=1))
@@ -777,10 +913,370 @@ class Outside(Opened):
         self.assertEqual((self.data(), self.session.can_undo, panel.knobs["gain"].value), (before, False, 1))
 
 
+class Wired(Opened):
+    """The panel with the FM instrument picked: the file has two of its operators, and leaves two out."""
+
+    def setUp(self) -> None:
+        super().setUp()
+        self.pick("brass")
+
+    def ops(self) -> list:
+        """What the file holds now for the operators of the FM instrument."""
+        return self.inst("brass")["ops"]
+
+    def env(self, op: int) -> fmview.Envelope:
+        """The envelope of an operator."""
+        return self.panel.operators[op]["env"]
+
+    def spot(self, op: int, point: int) -> tuple[int, int]:
+        """The pixel a point of an operator's envelope is at."""
+        widget = self.env(op)
+        return widget.map.spots(fmview.settings(widget.op))[point]
+
+    def grab(self, op: int, point: int, by: tuple[int, int], let_go: bool = True) -> tuple[dict, tuple[int, int]]:
+        """Press on a point of an operator's envelope, and move so many pixels right and down.
+
+        The answer is the operator as the sums of the envelope have it after that move, and where the mouse is.
+        """
+        widget, (x, y) = self.env(op), self.spot(op, point)
+        made = fmview.moved(widget.op, point, widget.map, by)
+        self.ui.handle(Event("down", (x, y), button=1))
+        self.ui.handle(Event("move", (x + by[0], y + by[1])))
+        if let_go:
+            self.ui.handle(Event("up", (x + by[0], y + by[1]), button=1))
+        return made, (x + by[0], y + by[1])
+
+    def inks(self) -> list[theme.Colour | None]:
+        """The colour of each column: of its heading, of what it does and of its envelope, None where they differ."""
+        panel = self.panel
+        return [name.colour if name.colour == does.colour == column["env"].colour else None
+                for name, does, column in zip(panel.names, panel.roles, panel.operators)]
+
+    def test_a_click_on_a_wiring_saves_the_algorithm_at_its_one_place_and_nothing_else(self) -> None:
+        panel, before = self.panel, self.data()
+        cells = fmview.cells(panel.wiring.rect)
+        click(self.ui, middle(cells[2]))
+        self.assertEqual((differing(before, self.data()), self.inst("brass")["alg"], panel.wiring.algorithm),
+                         (["instruments.brass.alg"], 2, 2))
+        self.assertEqual((self.session.undo_label, len(self.heard())), ("brass: wiring 2", 1))
+        self.assertIs(self.heard()[0], self.tone(A4, "brass"))
+        # The wiring that is picked already is not picked again, and the 4 the engine takes without one is
+        # written as any other.
+        click(self.ui, middle(cells[2]))
+        click(self.ui, middle(cells[4]))
+        self.assertEqual((self.inst("brass"), self.session.undo_label, len(self.heard())),
+                         ({**BRASS, "alg": 4}, "brass: wiring 4", 2))
+
+    def test_the_colours_of_the_columns_follow_the_wiring_that_is_picked(self) -> None:
+        panel = self.panel
+        heard, other = theme.ACTIVE, theme.SONG
+        # Under wiring 5 operator 0 changes the three others, and those are heard.
+        self.assertEqual(([does.text for does in panel.roles], self.inks()),
+                         (["CHANGES 1, 2, 3", "HEARD", "HEARD", "HEARD"], [other, heard, heard, heard]))
+        click(self.ui, middle(fmview.cells(panel.wiring.rect)[2]))
+        self.assertEqual(([does.text for does in panel.roles], self.inks()),
+                         (["CHANGES 3", "CHANGES 2", "CHANGES 3", "HEARD"], [other, other, other, heard]))
+        self.assertEqual([name.text for name in panel.names], [f"OPERATOR {op}" for op in range(4)])
+        # A wiring that is written outside is followed too, and so is one that is taken back.
+        self.outside(lambda instruments: instruments["brass"].update(alg=7))
+        panel.update()
+        self.assertEqual((panel.wiring.algorithm, {does.text for does in panel.roles}, self.inks()),
+                         (7, {"HEARD"}, [heard] * 4))
+        self.assertTrue(self.session.undo())
+        panel.update()
+        self.assertEqual((panel.wiring.algorithm, self.inks()), (2, [other, other, other, heard]))
+
+    def test_an_envelope_that_is_dragged_saves_its_operator_when_the_mouse_lets_go_and_not_before(self) -> None:
+        before = self.data()
+        made, mouse = self.grab(1, fmview.DECAY, (10, 5), let_go=False)
+        # The operator named no envelope, so it had the engine's: its decay is longer now, and falls to a level
+        # under the full one.
+        self.assertEqual((sorted(made["env"]), made["env"]["d"] > 0.3, made["env"]["s"] < 1, made["mul"]),
+                         (["d", "s"], True, True, 2))
+        self.assertEqual((self.env(1).op, self.env(1).busy, self.data(), self.session.can_undo, self.heard()),
+                         (made, True, before, False, []))
+        self.ui.handle(Event("up", mouse, button=1))
+        self.assertEqual((differing(before, self.data()), self.ops()),
+                         (["instruments.brass.ops"], [BRASS["ops"][0], made]))
+        self.assertEqual((self.session.undo_label, self.env(1).op, self.env(1).busy),
+                         ("brass: operator 1 decay", made, False))
+        self.assertIs(self.heard()[-1], self.tone(A4, "brass"))
+        # Each point is called by its own name in the step it makes.
+        for point, by, name in ((fmview.RELEASE, (-4, 0), "release"), (fmview.ATTACK, (6, 0), "attack"),
+                                (fmview.SUSTAIN, (0, 6), "sustain")):
+            made, _ = self.grab(0, point, by)
+            self.assertEqual((self.ops()[0], self.session.undo_label), (made, f"brass: operator 0 {name}"))
+        self.assertEqual((sorted(self.ops()[0]["env"]), len(self.heard())), (["a", "r", "sd"], 4))
+
+    def test_each_knob_of_an_operator_is_saved_at_its_own_place_and_called_in_plain_words(self) -> None:
+        panel = self.panel
+        saved = {"mul": 1.25, "det": 0.1, "level": 1.05}
+        labels = ["pitch times 1.25", "detune 0.1", "level 1.05"]
+        for (key, value), label in zip(saved.items(), labels):
+            before = self.data()
+            # One step of the wheel is one step of the knob, and it is saved when the run of the wheel has ended.
+            self.ui.handle(Event("wheel", middle(panel.operators[0][key].rect), wheel=1))
+            panel.update()
+            self.assertEqual(self.data(), before)
+            self.now += WHEEL_WAIT
+            panel.update()
+            self.assertEqual((differing(before, self.data()), self.ops()[0][key], self.session.undo_label),
+                             (["instruments.brass.ops"], value, f"brass: operator 0 {label}"))
+        self.assertEqual(self.ops(), [{"mul": 1.25, "det": 0.1, "level": 1.05}, BRASS["ops"][1]])
+        # A knob that is dragged is saved when it is let go, and not before.
+        level = panel.operators[1]["level"]
+        mouse = self.drag(level, 10, let_go=False)
+        self.assertEqual((level.value, level.busy, self.ops()[1]), (1.3, True, BRASS["ops"][1]))
+        self.ui.handle(Event("up", mouse, button=1))
+        self.assertEqual((self.ops()[1], self.session.undo_label), ({"mul": 2, "level": 1.3},
+                                                                   "brass: operator 1 level 1.3"))
+
+    def test_the_feedback_is_saved_when_its_knob_is_let_go_and_at_none_it_is_taken_out_of_the_file(self) -> None:
+        panel, before = self.panel, self.data()
+        mouse = self.drag(panel.feedback, 5, let_go=False)
+        self.assertEqual((panel.feedback.value, self.data(), self.session.can_undo), (0.4, before, False))
+        self.ui.handle(Event("up", mouse, button=1))
+        self.assertEqual((differing(before, self.data()), self.inst("brass")["fb"], self.session.undo_label),
+                         (["instruments.brass.fb"], 0.4, "brass: feedback 0.4"))
+        click(self.ui, middle(panel.feedback.rect), button=3)
+        self.assertEqual(("fb" in self.inst("brass"), self.session.undo_label, panel.feedback.value),
+                         (False, "brass: feedback 0", 0))
+
+    def test_what_is_put_back_to_what_the_engine_takes_for_an_operator_without_it_is_taken_out_of_the_file(
+            self) -> None:
+        panel = self.panel
+        click(self.ui, middle(panel.operators[1]["mul"].rect), button=3)
+        self.assertEqual((self.ops()[1], self.session.undo_label, panel.operators[1]["mul"].value),
+                         ({"level": 0.5}, "brass: operator 1 pitch times 1", 1))
+        # An attack dragged away from none is written, and dragged back to none it is not: an envelope with
+        # nothing left to write goes with it.
+        made, _ = self.grab(0, fmview.ATTACK, (6, 0))
+        self.assertEqual((self.ops()[0], sorted(made["env"]), made["env"]["a"] > 0), (made, ["a"], True))
+        self.grab(0, fmview.ATTACK, (-40, 0))
+        self.assertEqual((self.ops()[0], self.session.undo_label, self.env(0).op),
+                         (BRASS["ops"][0], "brass: operator 0 attack", BRASS["ops"][0]))
+        # Of the two parts a decay sets, the level dragged back to the full one goes, and the time stays.
+        made, _ = self.grab(1, fmview.DECAY, (10, 5))
+        self.grab(1, fmview.DECAY, (0, -300))
+        self.assertEqual((self.ops()[1], self.session.undo_label),
+                         ({"level": 0.5, "env": {"d": made["env"]["d"]}}, "brass: operator 1 decay"))
+        # What the file has at such a value by itself stays in it, where a drag sets another part.
+        self.outside(lambda instruments: instruments["brass"]["ops"][0].update(env={"d": 0.3, "r": 0.5}))
+        panel.update()
+        made, _ = self.grab(0, fmview.RELEASE, (-5, 0))
+        self.assertEqual((self.ops()[0]["env"], made["env"]["d"], made["env"]["r"] < 0.5), (made["env"], 0.3, True))
+
+    def test_an_operator_the_file_leaves_out_is_written_after_silent_ones_when_it_is_changed(self) -> None:
+        panel, before = self.panel, self.data()
+        self.ui.handle(Event("wheel", middle(panel.operators[3]["level"].rect), wheel=2))
+        self.now += WHEEL_WAIT
+        panel.update()
+        # Operator 2 is written as the silent one the engine took for it, so the sound has changed by no more
+        # than the level that was turned up.
+        self.assertEqual((differing(before, self.data()), self.ops(), self.session.undo_label),
+                         (["instruments.brass.ops"], [*BRASS["ops"], SILENT, {**SILENT, "level": 0.1}],
+                          "brass: operator 3 level 0.1"))
+        # It is in the file now, and what is changed of it next is written at its own place.
+        made, _ = self.grab(2, fmview.DECAY, (20, -30))
+        self.assertEqual((self.ops()[2], made["level"], made["env"]["s"] > 0, self.session.undo_label),
+                         (made, 0, True, "brass: operator 2 decay"))
+        # Its level at the 1 the engine takes for an operator that names none is not written.
+        click(self.ui, middle(panel.operators[2]["level"].rect), button=3)
+        self.assertEqual((self.ops()[2], self.ops()[3]), ({"env": made["env"]}, {**SILENT, "level": 0.1}))
+
+    def test_a_step_taken_back_puts_the_picture_of_the_fm_voice_back(self) -> None:
+        panel = self.panel
+        click(self.ui, middle(fmview.cells(panel.wiring.rect)[2]))
+        made, _ = self.grab(1, fmview.DECAY, (10, 5))
+        self.drag(panel.operators[0]["level"], 10)
+
+        def state() -> tuple:
+            """What the pictures show of the three things that were changed, and of the heading that follows."""
+            return panel.wiring.algorithm, panel.roles[0].text, self.env(1).op, panel.operators[0]["level"].value
+
+        self.assertEqual(state(), (2, "CHANGES 3", made, 1.8))
+        back = []
+        for _ in range(3):
+            self.assertTrue(self.session.undo())
+            panel.update()
+            back.append(state())
+        self.assertEqual(back, [(2, "CHANGES 3", made, 1), (2, "CHANGES 3", BRASS["ops"][1], 1),
+                                (5, "CHANGES 1, 2, 3", BRASS["ops"][1], 1)])
+        self.assertEqual((self.inst("brass"), self.session.can_undo), (BRASS, False))
+        self.assertTrue(self.session.redo())
+        panel.update()
+        self.assertEqual(state(), (2, "CHANGES 3", BRASS["ops"][1], 1))
+
+    def test_the_tables_an_fm_voice_reads_are_shown_and_saved_and_the_width_of_a_pulse_is_not_there(self) -> None:
+        panel = self.panel
+        self.assertEqual([(key, table.enabled) for key, table in panel.tables.items() if table.visible],
+                         [("vol", True), ("arp", True), ("pitch", True), ("lp", True)])
+        self.assertEqual((panel.tables["vol"].table, panel.tables["lp"].table, panel.tables["lp"].rect),
+                         ([15, 10], 2800, arrange(RECT, fm=True)["lp"]))
+        drawn = (("vol", 3, [3, 10], "loudness"), ("arp", 7, 7, "jump"), ("pitch", -2, -2, "sweep"))
+        for key, value, table, word in drawn:
+            before = self.data()
+            click(self.ui, self.bar(key, 0, value))
+            self.assertEqual((differing(before, self.data()), self.inst("brass")[key], self.session.undo_label),
+                             ([f"instruments.brass.{key}"], table, f"brass: {word} table"))
+        # A filter drawn down to none is the engine's own, and is taken out of the file.
+        click(self.ui, self.bar("lp", 0, 0))
+        self.assertEqual(("lp" in self.inst("brass"), self.session.undo_label, panel.tables["lp"].table),
+                         (False, "brass: filter table", 0))
+
+    def test_a_change_from_outside_waits_for_an_envelope_that_is_dragged_or_only_pressed(self) -> None:
+        panel = self.panel
+        made, mouse = self.grab(1, fmview.DECAY, (10, 5), let_go=False)
+        self.outside(lambda instruments: (instruments["brass"].update(fb=0.5, alg=2),
+                                          instruments["brass"]["ops"][1].update(level=0.9, env={"r": 1})))
+        panel.update()
+        # All but the envelope under the hand shows what was written, and that one has its colour from it.
+        self.assertEqual((self.env(1).op, self.env(1).busy, self.env(1).colour), (made, True, theme.SONG))
+        self.assertEqual((panel.operators[1]["level"].value, panel.feedback.value, panel.wiring.algorithm),
+                         (0.9, 0.5, 2))
+        # The release saves the envelope as the hand has it, in the place of the one written outside and beside
+        # the level written outside.
+        self.ui.handle(Event("up", mouse, button=1))
+        self.assertEqual((self.ops()[1], self.env(1).op, self.session.undo_label, self.session.message),
+                         ({"mul": 2, "level": 0.9, "env": made["env"]},) * 2 + ("brass: operator 1 decay", ""))
+        # An envelope that is pressed and let go where it was saves nothing, and then shows what came.
+        at = self.spot(0, fmview.DECAY)
+        self.ui.handle(Event("down", at, button=1))
+        self.outside(lambda instruments: instruments["brass"]["ops"][0].update(env={"a": 0.1}))
+        panel.update()
+        self.assertEqual((self.env(0).op, self.env(0).busy), (BRASS["ops"][0], True))
+        self.ui.handle(Event("up", at, button=1))
+        self.assertEqual((self.env(0).op, self.session.undo_label), (BRASS["ops"][0], "changed outside: brass"))
+        panel.update()
+        self.assertEqual(self.env(0).op, {**BRASS["ops"][0], "env": {"a": 0.1}})
+        # A knob in a run of the wheel is under the hand as well, though no button holds it.
+        level = panel.operators[0]["level"]
+        self.ui.handle(Event("wheel", middle(level.rect), wheel=1))
+        self.outside(lambda instruments: instruments["brass"]["ops"][0].update(level=0.3, mul=3))
+        panel.update()
+        self.assertEqual((level.value, level.busy, panel.operators[0]["mul"].value), (1.05, True, 3))
+        self.now += WHEEL_WAIT
+        panel.update()
+        self.assertEqual((self.ops()[0], level.value, self.session.undo_label),
+                         ({"mul": 3, "level": 1.05, "env": {"a": 0.1}}, 1.05, "brass: operator 0 level 1.05"))
+
+    def test_another_instrument_picked_while_an_envelope_is_dragged_takes_the_panel_and_nothing_is_saved(
+            self) -> None:
+        panel, before = self.panel, self.data()
+        _, (x, y) = self.grab(1, fmview.DECAY, (10, 5), let_go=False)
+        self.pick("bell")
+        self.assertEqual((panel.name, self.env(1).busy, self.env(1).visible), ("bell", False, False))
+        self.ui.handle(Event("move", (x, y + 5)))
+        self.ui.handle(Event("up", (x, y + 5), button=1))
+        self.assertEqual((self.data(), self.session.can_undo), (before, False))
+
+    def test_a_change_to_the_fm_voice_that_is_refused_leaves_the_pictures_showing_the_file(self) -> None:
+        panel = self.panel
+        # Another program has taken the instrument out of the file, and the session has not looked at it yet.
+        written = self.outside(lambda instruments: instruments.pop("brass"), look=False)
+        refusal = "instruments has no key 'brass'"
+        click(self.ui, middle(fmview.cells(panel.wiring.rect)[2]))
+        self.assertEqual((panel.wiring.algorithm, panel.roles[0].text, self.session.message),
+                         (5, "CHANGES 1, 2, 3", refusal))
+        self.grab(1, fmview.DECAY, (10, 5))
+        self.assertEqual((self.env(1).op, self.session.message), (BRASS["ops"][1], refusal))
+        # So it is with an operator the file left out, which would have been written with all the others.
+        self.drag(panel.operators[3]["level"], 10)
+        self.assertEqual((panel.operators[3]["level"].value, self.session.message), (0, refusal))
+        self.assertEqual((self.data(), self.session.can_undo, self.session.messages, self.heard()),
+                         (written, False, 3, []))
+
+
+class Traced(Opened):
+    def watch(self) -> tuple[mock.Mock, mock.Mock]:
+        """Have what the scope and the spectrum are handed from now on kept, and still shown by them."""
+        kept = []
+        for widget in (self.panel.scope, self.panel.spectrum):
+            patch = mock.patch.object(widget, "show", wraps=widget.show)
+            kept.append(patch.start())
+            self.addCleanup(patch.stop)
+        return kept[0], kept[1]
+
+    def test_the_scope_and_the_spectrum_show_the_note_played_last_which_is_a4_before_any_key_is_pressed(
+            self) -> None:
+        panel = self.panel
+        self.assertEqual((panel.scope.colour, panel.spectrum.colour, panel.scope.visible, panel.spectrum.visible),
+                         (theme.INSTRUMENT, theme.INSTRUMENT, True, True))
+        self.assertEqual((panel.scope.rect, panel.spectrum.rect, panel.scope.help),
+                         (arrange(RECT)["scope"], arrange(RECT)["spectrum"], "3 cycles of a4, 6.8 ms"))
+        scope, spectrum = self.watch()
+        click(self.ui, self.key(52))
+        # The scope is handed the pitch with the note, and the spectrum the note alone.
+        self.assertEqual((scope.call_count, spectrum.call_count, scope.call_args.args[1:], spectrum.call_args.args[1:]),
+                         (1, 1, (RATE, 52), (RATE,)))
+        self.assertIs(scope.call_args.args[0], self.tone(52)[0])
+        self.assertIs(spectrum.call_args.args[0], self.tone(52)[0])
+        self.assertEqual(panel.scope.help, "3 cycles of e3, 18.1 ms")
+        # A key of the computer is a key of the keyboard.
+        self.ui.handle(Event("key", key="q"))
+        self.assertEqual((scope.call_count, scope.call_args.args[2]), (2, 60))
+        self.assertIs(spectrum.call_args.args[0], self.tone(60)[0])
+
+    def test_after_a_change_is_saved_the_two_are_shown_the_sound_as_it_is_now(self) -> None:
+        panel = self.panel
+        click(self.ui, self.key(52))
+        was = self.tone(52)[0]
+        scope, spectrum = self.watch()
+        click(self.ui, middle(panel.knobs["gain"].rect), button=3)
+        self.assertEqual((scope.call_count, scope.call_args.args[1:]), (1, (RATE, 52)))
+        self.assertIs(scope.call_args.args[0], self.tone(52)[0])
+        self.assertIs(spectrum.call_args.args[0], self.tone(52)[0])
+        self.assertIsNot(scope.call_args.args[0], was)
+        # So it is after a change to an FM voice.
+        self.pick("brass")
+        was = self.tone(52, "brass")[0]
+        click(self.ui, middle(fmview.cells(panel.wiring.rect)[7]))
+        self.assertIs(scope.call_args.args[0], self.tone(52, "brass")[0])
+        self.assertIs(spectrum.call_args.args[0], self.tone(52, "brass")[0])
+        self.assertIsNot(spectrum.call_args.args[0], was)
+
+    def test_after_a_change_from_outside_the_two_are_shown_the_sound_as_it_is_now(self) -> None:
+        panel = self.panel
+        was = self.tone(A4)[0]
+        scope, spectrum = self.watch()
+        self.outside(lambda instruments: instruments["bell"].update(wave="saw"))
+        # They are shown it when the panel takes its frame.
+        self.assertEqual(scope.call_count, 0)
+        panel.update()
+        self.assertEqual((scope.call_count, spectrum.call_count, scope.call_args.args[1:]), (1, 1, (RATE, A4)))
+        self.assertIs(scope.call_args.args[0], self.tone(A4)[0])
+        self.assertIs(spectrum.call_args.args[0], self.tone(A4)[0])
+        self.assertIsNot(scope.call_args.args[0], was)
+        # A frame with nothing new shows them nothing again.
+        panel.update()
+        self.assertEqual(scope.call_count, 1)
+
+    def test_every_instrument_that_is_picked_is_shown_whatever_its_wave_and_a_note_that_is_refused_is_no_sound(
+            self) -> None:
+        panel = self.panel
+        scope, spectrum = self.watch()
+        for count, name in enumerate(("plain", "hiss", "brass"), 1):
+            self.pick(name)
+            self.assertEqual((scope.call_count, spectrum.call_count, scope.call_args.args[1:]),
+                             (count, count, (RATE, A4)))
+            self.assertIs(scope.call_args.args[0], self.tone(A4, name)[0])
+            self.assertIs(spectrum.call_args.args[0], self.tone(A4, name)[0])
+            self.assertTrue(panel.scope.visible and panel.spectrum.visible)
+        # With a song picked there is no note to show.
+        self.pick("walk", "song")
+        self.assertEqual((scope.call_count, panel.scope.visible), (3, False))
+        # A note the model cannot make is no sound to the two: each has the line it was made with.
+        self.assertNotEqual(panel.scope.help, SCOPE_HELP)
+        with mock.patch.object(self.session.model, "tone", side_effect=RowSynthError("no such note")):
+            self.pick("bell")
+        self.assertEqual((panel.scope.help, len(spectrum.call_args.args[0]), panel.spectrum.above),
+                         (SCOPE_HELP, 0, 0))
+
+
 class Placed(Opened):
     def test_the_wheel_scrolls_a_page_that_does_not_fit_and_a_part_not_wholly_in_view_is_not_seen(self) -> None:
         panel = self.panel
-        every = list(panel._placed)
+        every = [part for part in panel._placed if part in page(RECT)]
         # In the middle of the window everything is seen, and the wheel has nothing to do.
         at = middle(arrange(RECT)["scope"])
         self.assertEqual((self.seen(), self.ui.handle(Event("wheel", at, wheel=-1)), panel.scroll), (every, False, 0))
@@ -795,7 +1291,8 @@ class Placed(Opened):
                                                          *(number.key for number in NUMBERS)]))
         self.assertTrue(self.ui.handle(Event("wheel", at, wheel=-3)))
         self.assertEqual((panel.scroll, self.seen()),
-                         (61, ["duty", "arp", "pitch", "lp", *(number.key for number in NUMBERS), "octave", "keys"]))
+                         (83, ["arp", "pitch", "lp", *(number.key for number in NUMBERS), "octave", "keys", "scope",
+                               "spectrum"]))
         # At its end the page stays, and the step of the wheel is not used.
         self.assertFalse(self.ui.handle(Event("wheel", at, wheel=-1)))
         self.assertTrue(self.ui.handle(Event("wheel", at, wheel=9)))
@@ -809,10 +1306,11 @@ class Placed(Opened):
         panel = self.panel
         for name in ("bell", "brass"):
             self.pick(name)
+            fm = name == "brass"
             for rect in (RECT, SMALL):
                 panel.place(rect)
                 view, ever = arrange(rect)["view"], set()
-                for scroll in range(0, slack(rect) + 1):
+                for scroll in range(0, slack(rect, fm) + 1):
                     panel.scroll = scroll
                     panel.place(rect)
                     shown = [widget for widget in panel.widgets if widget.visible and widget is not panel.page]
@@ -820,21 +1318,25 @@ class Placed(Opened):
                     self.assertTrue(all(within(widget.rect, view) == widget.rect for widget in shown), (rect, scroll))
                     self.assertTrue(all(apart(one.rect, other.rect) for one in shown for other in shown
                                         if one is not other), (rect, scroll))
-                # What is not seen at one place of the page is seen at another: the line of an FM instrument
-                # stands for the tables, which are not there.
-                gone = [panel.later] if name == "bell" else list(panel.tables.values())
-                self.assertEqual(ever, set(panel.widgets) - {panel.page, *gone}, (name, rect))
+                # What is not seen at one place of the page is seen at another: all that the page of the
+                # instrument has, and of the other page only what the two share.
+                self.assertEqual(ever, {panel._placed[part] for part in page(rect, fm)}, (name, rect))
+            self.assertEqual((slack(RECT, fm), slack(SMALL, fm)), ((0, 76) if fm else (0, 83)))
 
 
 @unittest.skipUnless(pygame, NEEDS)
 class Drawn(unittest.TestCase):
     def setUp(self) -> None:
+        self.open("arcade.json", "chime")
+
+    def open(self, file: str, name: str) -> None:
+        """Draw the panel with an instrument of an example picked, on a surface of its own."""
         self.surface = pygame.Surface((960, 540))
         self.surface.fill(theme.BACKGROUND)
         self.canvas = Canvas(self.surface, Font(sprites.load("font")), sprites.load("icons"))
         self.ui = Ui()
-        model = Model(EXAMPLES / "arcade.json")
-        model.pick("instrument", "chime")
+        model = Model(EXAMPLES / file)
+        model.pick("instrument", name)
         self.panel = InstPanel(Stand(model), self.ui)
         self.panel.place(RECT)
         self.panel.update()
@@ -853,10 +1355,10 @@ class Drawn(unittest.TestCase):
         left, top, _, rows = seen.bars
         # A level of 15 is every row of the field, and each level under it that share of them, to the pixel.
         high = [self.ink((seen.x(step), top, 1, rows), theme.INSTRUMENT) for step in range(15)]
-        self.assertEqual((rows, high), (57, [math.floor(level * 57 / 15 + 0.5) for level in held["vol"]]))
-        self.assertEqual((high[0], high[7], high[14], seen.x(0)), (57, 30, 4, left))
+        self.assertEqual((rows, high), (52, [math.floor(level * 52 / 15 + 0.5) for level in held["vol"]]))
+        self.assertEqual((high[0], high[7], high[14], seen.x(0)), (52, 28, 3, left))
         # The bar stands on the foot of the field, nine pixels wide, with nothing of its colour beside it.
-        self.assertEqual(self.ink((left, top, 10, rows), theme.INSTRUMENT), 9 * 57)
+        self.assertEqual(self.ink((left, top, 10, rows), theme.INSTRUMENT), 9 * 52)
 
     def test_the_heading_names_the_instrument_in_its_colour_and_the_key_of_the_note_heard_again_is_lit(self) -> None:
         parts = arrange(RECT)
@@ -873,9 +1375,50 @@ class Drawn(unittest.TestCase):
         keys = dict(keyboard(parts["keys"], 48))
         x, y, w, h = keys[A4]
         self.assertEqual(self.ink(parts["keys"], theme.ACTIVE), self.ink((x, y, w - 1, h), theme.ACTIVE))
-        self.assertEqual(self.ink((x, y + 20, w - 1, h - 20), theme.ACTIVE), (w - 1) * (h - 20))
-        # The room beside the keyboard is left empty for the scope.
-        self.assertEqual(self.ink(parts["scope"], theme.PANEL), parts["scope"][2] * parts["scope"][3])
+        self.assertEqual(self.ink((x, y + 34, w - 1, h - 34), theme.ACTIVE), (w - 1) * (h - 34))
+
+    def test_the_scope_has_the_wave_of_the_chime_and_the_spectrum_its_bars_in_the_colour_of_an_instrument(
+            self) -> None:
+        scope, spectrum = self.panel.scope, self.panel.spectrum
+        self.assertEqual((scope.rect, spectrum.rect, scope.help),
+                         (arrange(RECT)["scope"], arrange(RECT)["spectrum"], "3 cycles of a4, 6.8 ms"))
+        # The wave is one line from side to side of the scope: a pixel at least in each column inside its outline.
+        x, y, w, h = scope.rect
+        self.assertTrue(all(self.ink((x + 1 + column, y, 1, h), theme.INSTRUMENT) for column in range(w - 2)))
+        # A pulse has a bar in most columns of the spectrum, and the loudest is as high as the box is inside.
+        x, y, w, h = spectrum.bars
+        high = [self.ink((x + column, y, 1, h), theme.INSTRUMENT) for column in range(w)]
+        self.assertEqual((h, max(high), sum(bar > 0 for bar in high) > w * 3 // 4), (45, 45, True))
+        # The line where harsh begins stands in it, and the names of the marks under its box.
+        self.assertGreater(self.ink(spectrum.bars, theme.FAULT), h - 1)
+        self.assertGreater(self.ink((x, y + h + 1, w, 9), theme.DIM), 0)
+
+    def test_the_picked_wiring_of_an_fm_instrument_is_lit_and_its_columns_are_in_the_colours_of_the_wiring(
+            self) -> None:
+        self.open("piece.json", "fmbrass")
+        panel = self.panel
+        cells = fmview.cells(panel.wiring.rect)
+        self.assertEqual((panel.name, panel.wiring.algorithm, len(cells)), ("fmbrass", 4, 8))
+        # The picked picture has the lit ground and an outline in the colour of what is on. The others have neither.
+        corners = [self.surface.get_at((x, y))[:3] for x, y, _, _ in cells]
+        grounds = [self.surface.get_at((x + 2, y + h - 3))[:3] for x, y, _, h in cells]
+        self.assertEqual((corners, grounds), ([theme.ACTIVE if wiring == 4 else theme.LINE for wiring in range(8)],
+                                              [theme.LIT if wiring == 4 else theme.RAISED for wiring in range(8)]))
+        # In wiring 4 operators 1 and 3 are heard: their headings and the lines of their envelopes are in that
+        # colour, and those of the two that change them in the other.
+        for op, (mine, other) in enumerate(((theme.SONG, theme.ACTIVE), (theme.ACTIVE, theme.SONG)) * 2):
+            for rect in (panel.names[op].rect, panel.roles[op].rect, panel.operators[op]["env"].rect):
+                self.assertEqual((self.ink(rect, mine) > 0, self.ink(rect, other)), (True, 0), (op, rect))
+        # The spectrum of the brass has bars, and the scope its wave.
+        self.assertGreater(self.ink(panel.spectrum.bars, theme.INSTRUMENT), 1000)
+        self.assertGreater(self.ink(panel.scope.rect, theme.INSTRUMENT), panel.scope.rect[2] - 3)
+        # In a low panel the thumb beside the page is as long as the share of this page that is in view.
+        self.surface.fill(theme.BACKGROUND)
+        panel.place(SMALL)
+        panel.draw(self.canvas)
+        x, y, w, h = arrange(SMALL)["view"]
+        self.assertEqual((slack(SMALL, True), self.ink((x + w + 1, y, 2, h), theme.LINE)),
+                         (76, 2 * (h * h // (h + 76))))
 
 
 if __name__ == "__main__":
