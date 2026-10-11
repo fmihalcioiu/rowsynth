@@ -173,6 +173,32 @@ python -m rowsynth build audio.json --out out/music
 
 `--stems` writes each channel as a loop of its own, `CHANNEL.wav`. Without it `render` writes the song played once, with half a second after its last row. `build` writes the loops a game loads, as WAV or with `--format opus` as Opus, and `music.json`, which names them.
 
+## Changing a project that exists
+
+To change one value in a project file that is there already, use `set`. Do not write the file out again by hand, and never from a copy you read earlier.
+
+```
+python -m rowsynth set audio.json songs.tune.channels.bass.gain 0.7
+python -m rowsynth set audio.json songs.tune.patterns.b.lead "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a2 r2"
+python -m rowsynth set audio.json sounds.coin.db -3
+python -m rowsynth set audio.json songs.tune.channels.lead.echo --delete
+```
+
+The place is spelt as the target of a finding is: names joined by dots, and `[n]` for an item of a list, counted from 0. The value is read as JSON when it is JSON and as text when it is not. `--text` makes it text whatever it looks like, and `--from PATH` reads it from a file, or from standard input with `-`, which keeps a long text or a whole sound out of the shell's quoting. A key that is not there yet is added, and so is the next item of a list. The command prints `{"file", "where", "was", "now"}`: `was` is what your change replaced.
+
+Why `set`, and not the file written again:
+
+- It reads the file, makes the change and writes it in one run, so what the person or another program wrote a moment before is kept. A copy you read a minute ago may be stale.
+- The project is checked before anything is written, as loading checks it. A change that fails is refused with `error:` and exit code 2, and the file is as it was.
+- The file is written whole or not at all. The text goes to a temporary file that takes the old one's place in one move, so nothing that reads the file gets half of it.
+- It writes one tidy layout, with each channel of each pattern on a line of its own. One value changed is one line of a diff, which a person can read.
+
+`set` checks what loading checks: the keys, the kinds of the values, and that every name points at something. It does not read song text and it runs none of the rules, so a channel that is a bar short is written without a word. Run `check` after every `set` that touches notes.
+
+Write a whole file when it is new. For anything else, make the changes one `set` at a time.
+
+The person may have the file open in the window, `python -m rowsynth gui audio.json`, where they place notes with the mouse and hear them. Then `set` is the way to change the file. The window sees your change within a quarter of a second, shows it, names it in its status line, and keeps it as a step: the person takes it back with Ctrl+Z if they do not want it. What they change is written to the file as they change it, so the file moves under you. Never edit a file the window has open in a way that leaves it half written, even for a moment, and never write it whole from a copy of your own: a file that does not load stops the window from saving the person's changes until it is whole again, and a whole file written from a copy puts back everything they changed since you read it. `references/window.md` has what the person sees, what to tell them to look at and listen to after a change, and how to get a picture of the window without opening one.
+
 ## Commands
 
 Every command prints JSON. The usage lines are each command's own: type `python -m rowsynth` where they say `rowsynth`. After the command, its flags and its other words can come in any order.
@@ -185,6 +211,8 @@ rowsynth measure [-h] WAV [--at SECONDS]
 rowsynth measure [-h] FILE NAME [--rate N] [--variant N] [--part {start,loop,end}] [--at SECONDS]
 rowsynth page [-h] --out DIR [--rate N] [--format {wav,mp3,opus}] FILE
 rowsynth build [-h] --out DIR [--rate N] [--format {wav,opus}] FILE [NAME ...]
+rowsynth set [-h] [--text] [--from PATH] [--delete] FILE WHERE [VALUE]
+rowsynth gui [-h] [--scale N] [--frames N] [--shot PATH] [FILE]
 ```
 
 | Command | Use |
@@ -195,6 +223,8 @@ rowsynth build [-h] --out DIR [--rate N] [--format {wav,opus}] FILE [NAME ...]
 | `measure` | The figures of a WAV file, or of a sound or a song of a project file, with the brightness and the pitch. It reads no MP3 and no Opus |
 | `page` | The listen page, `index.html`, with its audio files in a folder `audio` beside it |
 | `build` | The songs named, or every song, as loops in a folder with `music.json` |
+| `set` | One value of a project file changed and the rest kept: checked as loading checks it, then written whole or not at all |
+| `gui` | The window on a project file, which is for the person. Run it yourself only with `--frames` and `--shot`, for a picture: `references/window.md` |
 
 `check`, `render` and `measure` work at 44100 samples a second unless `--rate` says otherwise, and `page` and `build` at 48000.
 

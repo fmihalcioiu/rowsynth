@@ -30,6 +30,8 @@ The first run is slower than the ones after it, because Numba compiles the loops
 
 MP3 and Opus files are made by ffmpeg, which has to be on the path. Nothing else needs it.
 
+The window, `rowsynth gui`, needs pygame, and nothing else does. In the clone, `pip install ".[gui]"` installs the package with it, and `pip install pygame` adds it to an install that is there. Without it the command stops with `error: the GUI needs pygame, which is not installed: pip install rowsynth[gui]`.
+
 ## A first sound
 
 Save this as `ping.json`:
@@ -336,6 +338,111 @@ A chord in the project's `chords` table is the pitch class of its root and the p
 
 `intro` is `{"order", "tail", "fade"}`. The patterns of its `order` are played once. The intro runs on for `tail` seconds past them, 1.5 when left out, for what is still sounding, and falls away to nothing over its last `fade` seconds, 0.05 when left out. The tail cannot be longer than one bar. `build` writes the intro as a file of its own, and the listen page has a player for it.
 
+## The window
+
+```
+python -m rowsynth gui examples/piece.json
+```
+
+![The window with the example piece open](docs/window.png)
+
+The window shows a project file as something to click on. Notes are placed with the mouse and heard as they are placed, and every change is written to the file as it is made. It works on the same files as the commands, and the two can work on one file at the same time.
+
+It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels: the largest square at which the screen still has room for the whole of it. The window can be resized.
+
+### The parts of the screen
+
+| Part | What it is for |
+|---|---|
+| Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end how many findings `check` has for the project |
+| The list on the left | The songs, the sounds and the instruments. A click picks one, and a sound or an instrument is played as it is picked. The right button on one renames it, copies it or deletes it, and anywhere else in the list it makes a new one |
+| The middle | What is picked, to change: a song, an instrument or a sound, each as below |
+| The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in |
+| Status line | One line of help for whatever the mouse is on, and what the window has to say. At its right end is what is picked |
+
+After every change the picked thing is rendered again and the checks are run again, so the numbers and the findings are those of the file as it is.
+
+### Songs
+
+Along the top is the song as a strip of blocks, one for each pattern in its `order`, with the notes drawn small. A click on a block shows that pattern underneath. A block is dragged to another place in the order, and with Ctrl held it is copied there as a new pattern. The right button on a block opens a menu: play its pattern again after it, copy it as a new pattern, put an empty pattern after it, rename it, set its length in bars, or take the block out of the order.
+
+`NOTES`, `MIXER` and `LAYERS` choose what stands under the strip.
+
+`NOTES` has the channels at the left, the tuned ones and the drum channels apart, and at the right the picked channel in the picked pattern. Over the notes are the channel's instrument, level, pan and echo. The right button on a channel renames it, moves it up or down, makes a new channel or removes it.
+
+- A tuned channel is a piano roll. A click on the grid places a note. A note is dragged to move it, dragged by its right end to make it longer or shorter, and removed with the right button. Shift and a drag draw a box that picks notes, and Ctrl and a click add a note to the picked ones. The lane under the grid holds the level of each note. A channel plays one note at a time, so a note placed where another still sounds cuts that one short. The wheel moves along the keys, with Shift along the rows, and with Ctrl it zooms. `GHOSTS` draws the notes of the other channels dim behind, and `FOLLOW` has the pattern that is shown go along with the playing.
+- A drum channel is a grid of steps: a lane for each drum and a square for each row, with all the drum channels of the pattern together. A click puts a hit or takes one away, a drag does so along the lane, and the wheel on a hit sets its level.
+- Over the piano roll a strip names the chord of each bar, and the keys of that chord are lit across the bar. A click on a bar picks its chord from those of the project, or makes a new one from a root and a kind. A note that the `chords` rule would find is outlined in red, also while it is still being dragged.
+
+The grid is the rows. A pattern with a note that starts or ends between two rows, as a triplet does, is shown and is not changed here.
+
+`MIXER` has every channel side by side: a fader and a meter each, `M` to mute it and `S` to solo it, and a fader for the whole song. A mute or a solo is a way of listening. It is not written to the file, and it is not a step that is taken back.
+
+`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade.
+
+`TEMPO` steps through the tempos a song can have. A row lasts a whole number of ticks, so at four rows to a beat they are 900 over that number, from 40 to 300 beats a minute. The two buttons of `KEY` move every tuned note of the song a semitone down or up.
+
+### Instruments
+
+An instrument has its wave as a row of buttons, its step tables as bars and its numbers as knobs. A table is drawn with the mouse: a press or a drag sets every step it passes, the right button sets them to zero, the handle after the last bar makes the table longer or shorter, and the bracket under the bars is its loop. A knob is dragged up and down, a tenth as fast with Shift held, or turned with the wheel, and a right click puts it back to what the engine takes when the file has no value.
+
+With the FM wave the eight wirings are pictures to click, and each of the four operators has its envelope as a line with points to drag, and knobs of its own.
+
+At the foot is a keyboard of two octaves to try the instrument on. Beside it a scope shows a few cycles of the note played last, and a spectrum where its energy sits from low to high. The spectrum has a line at 4 kHz and the share of the energy above it, which is what the `bright` rule goes by.
+
+### Sounds
+
+A sound is a timeline in seconds: its notes as bars, each voice in a colour of its own, and under them the wave of the sound on the same clock. Notes are placed, moved, stretched and removed as in the piano roll, on a grid of ticks. Over the timeline are the voices, to pick the one a new note goes into and to add or remove one, then the instrument of the picked voice, the level of the sound, and its echo. Each return of the echo is drawn as a fainter copy of the bars, as much later as it is heard.
+
+The variants of a sound lie one after the other on the timeline, and a click on one plays it. The parts of a sound lie where they start. A held sound has its start, its loop and its end as three tinted zones, and a `HOLD` button: the sound is held for as long as the button is kept pressed, and its end is heard when the button is let go.
+
+### The FILE menu
+
+| Item | What it does |
+|---|---|
+| `New project...` | Asks for a file that is not there yet and puts the smallest project that can be heard in it: one instrument, one sound and one song |
+| `Open...` | Opens another project file in the window |
+| `Save a copy as...` | Writes the project as it is to another file. The open file stays the open one |
+| `Export...` | Opens a window with three tabs, for what `render`, `build` and `page` do: the picked sound or song as a WAV file, the songs for a player, or the listen page. It lists the files it will write, with their sizes where those are known and a mark on each that takes the place of a file that is there, and writes none of them until `WRITE` is pressed |
+| The files opened last | Eight at the most, each opened with a click |
+| `Close` | Closes the project and shows the first screen |
+
+There is no Save, because nothing is ever left unsaved.
+
+The first screen is also what `python -m rowsynth gui` shows with no file. It has `NEW PROJECT`, `OPEN...`, the files opened last, and in a clone of this repo the two examples. An example is opened as a copy in a file you name, so the example itself is never changed.
+
+### Every change is saved, and can be taken back
+
+A note that is placed, a knob that is let go of, a pattern that is moved: each is written to the file as it is made, in the layout that `set` writes, under Commands below. A change the project cannot hold is refused. The file is then as it was, and the status line says why.
+
+Each change is also a step. Ctrl+Z takes the last step back and Ctrl+Y makes it again, as the two arrows in the top bar do, and both write the file. With the mouse on an arrow the status line says which step it is. The last 200 steps are kept, for as long as the file stays open in the window.
+
+### Another program on the same file
+
+The window looks at its file four times a second. When another program has written it, `rowsynth set` or an editor, the window reads it again and shows what it holds now. A song that is playing goes on from where it is, with the change in it. The status line names what changed, as in `changed outside: tune`, and the change is a step like any other: Ctrl+Z takes it back, in the file as well.
+
+The window and the other program can both write between two looks. Changes to different places are both kept. Where both changed the same place, such as one channel of one pattern, the change made in the window is the one that stands. The status line says that it `was changed outside at the same moment: this change stands, and undo brings the other back`, and Ctrl+Z then puts in the file what the other program wrote.
+
+A file that cannot be read just then, half written or no JSON, changes nothing in the window. The status line says what is wrong with it, a change made in the window is refused meanwhile, and the file is taken in when a later look finds it whole.
+
+### Keys
+
+| Key | What it does |
+|---|---|
+| Space | Plays what is picked, or stops what plays |
+| Ctrl+Z | Takes the last step back |
+| Ctrl+Y, Ctrl+Shift+Z | Makes the step again |
+| Delete, Backspace | Removes the picked notes |
+| Up, Down | Moves the picked notes a semitone, and with Shift an octave |
+| Left, Right | Moves the picked notes a step of the grid |
+| Ctrl+A | Picks every note. In a sound it is every note of the picked voice, and with Shift of every voice |
+| Ctrl+C, Ctrl+V | Copies the picked notes, and pastes them where the mouse is |
+| Escape | Drops what the mouse is in the middle of, or else what is picked. Closes a menu or a box |
+| Enter | Takes what is typed in a box, and the lit row of a menu |
+| `Z S X D C V G B H N J M` | The twelve notes from c, as on a piano. `Q 2 W 3 E R 5 T 6 Y 7 U` are the octave above, and `I 9 O 0 P` go on from there |
+
+The keys that change notes go to the piano roll or to the timeline of a sound, whichever was clicked in last. The piano keys play the channel of the piano roll, or the instrument that is shown, once it has been clicked in. In a list, Up, Down, Home and End move the pick.
+
 ## Commands
 
 Every command prints one JSON document to standard output, so a script can read the result. A command that cannot go on prints `error:` and the reason to standard error and exits with code 2. `python -m rowsynth COMMAND -h` lists everything a command takes.
@@ -584,6 +691,120 @@ python -m rowsynth page examples/arcade.json --out out/arcade
 }
 ```
 
+### set
+
+```
+usage: rowsynth set [-h] [--text] [--from PATH] [--delete] FILE WHERE [VALUE]
+```
+
+Changes one thing in a project file and keeps the rest of it as it is. It is how a script changes a project, and how anything changes a file that the window has open, without writing the whole file back.
+
+`WHERE` is the place, written as `check` writes a target: names joined by dots, and `[n]` after a list for its item n, counted from 0. The examples are run on `tune.json`, a copy of `examples/arcade.json`.
+
+```
+python -m rowsynth set tune.json songs.tune.channels.bass.gain 0.7
+```
+
+```
+{
+  "file": "tune.json",
+  "where": "songs.tune.channels.bass.gain",
+  "was": 0.9,
+  "now": 0.7
+}
+```
+
+`VALUE` is read as JSON when it is JSON, and as text when it is not. So `0.7` is a number, and the text of a channel is text. `--text` takes the value as text whatever it looks like: without it `2` is a number, and with it the name of a pattern that is called 2.
+
+```
+python -m rowsynth set tune.json songs.tune.patterns.b.lead "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a2 r2" --text
+```
+
+```
+{
+  "file": "tune.json",
+  "where": "songs.tune.patterns.b.lead",
+  "was": "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a1",
+  "now": "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a2 r2"
+}
+```
+
+`--from PATH` reads the value from a file, and from standard input when the path is `-`. The line end the file closes with is no part of the value. With `l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h k h k s l16 s s s s` saved as `kit.txt`:
+
+```
+python -m rowsynth set tune.json songs.tune.patterns.a.kit --from kit.txt
+```
+
+```
+{
+  "file": "tune.json",
+  "where": "songs.tune.patterns.a.kit",
+  "was": "l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h",
+  "now": "l8 k h s h k k s h | l8 k h s h k k s h | l8 k h s h k k s h | l8 k h k h k s l16 s s s s"
+}
+```
+
+`--delete` takes out what is at the place, and has no value:
+
+```
+python -m rowsynth set tune.json songs.tune.channels.lead.echo --delete
+```
+
+```
+{
+  "file": "tune.json",
+  "where": "songs.tune.channels.lead.echo",
+  "was": {
+    "rows": 3,
+    "gain": 0.3
+  }
+}
+```
+
+A key that is not there yet is added, and so is the next item of a list: `was` is then left out. A value that is what the file holds already is not written, and the answer has `"same": true`.
+
+The file is read, changed, checked and written in the one run, so what another program wrote to it a moment before is kept. The check is the one that loading makes: an unknown key, a value of the wrong kind, a name that points at nothing. A change that fails it is refused with the reason and exit code 2, and the file is as it was:
+
+```
+python -m rowsynth set tune.json songs.tune.channels.bass.inst organ
+```
+
+```
+error: songs.tune.channels.bass.inst: no instrument named 'organ'
+```
+
+Loading does not read the text of a channel, and it runs none of the rules. A line that is misspelt or a bar short is written all the same. `check` then stops on the first with `error:`, and reports the second under `rows`.
+
+`set` writes the file in one layout, the one the window saves in and the examples are kept in. Each entry of the four tables starts a line. A song is opened out, and so are its `instruments`, `drums`, `channels`, `patterns` and `layers`, one entry a line, and each pattern, one channel's text a line. Anything else is on one line when it ends by column 110, and is opened out one key or item a line when it does not. A text is never broken, and keys keep their order. So a change to one channel of one pattern changes one line of the file, and each of the four changes above is one line in a diff. A file that was in another layout is put into this one by the first change. The text goes to a temporary file that takes the place of the old one in one move, so a program that reads the file meanwhile gets the old text or the new, never half of one.
+
+### gui
+
+```
+usage: rowsynth gui [-h] [--scale N] [--frames N] [--shot PATH] [FILE]
+```
+
+Opens the window on a project file, or with no `FILE` on its first screen. The window is described under The window above. The command goes on until the window is closed, and then prints the file and how many frames were drawn.
+
+`--scale N` is how many screen pixels a drawn pixel takes each way, a whole number. Left out, it is the largest that leaves 960 by 480 drawn pixels or more.
+
+The files opened in the window are remembered from one run to the next, in `rowsynth/recent.json` in the settings folder of the user: `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and `$XDG_CONFIG_HOME` or `~/.config` anywhere else.
+
+`--frames` and `--shot` are for a run that nobody watches. `--frames N` closes the window by itself after N frames, and `--shot PATH` writes the last frame as a PNG, a pixel for each drawn pixel. Such a run reads no list of files and remembers none. With `SDL_VIDEODRIVER` and `SDL_AUDIODRIVER` both set to `dummy` in the environment it opens no window and plays no sound, which is how the picture above was made:
+
+```
+python -m rowsynth gui examples/piece.json --frames 600 --shot docs/window.png
+```
+
+```
+{
+  "file": "examples/piece.json",
+  "frames": 600,
+  "shot": "docs/window.png"
+}
+```
+
+The render and the checks run beside the window, and until they are through the picture has dots where the numbers and the findings go. A long song needs more frames for that than a short one.
+
 ## Checks
 
 `check` renders the sounds and the songs of a project and holds them to these rules. Both example files pass all of them.
@@ -725,6 +946,15 @@ rowsynth.save_wav("out/tune.wav", [tune["left"], tune["right"]])
 `project.sound` and `project.song` give a copy with every instrument written out, which is what the renderers take. `render_entry` gives the buffers of a sound, levelled as the commands level it: one, or one a variant, or the start, the loop and the end of a held sound. `render_bank` does that for a whole table of sounds, and `render_sound` renders one `def` at its own gain. `render_song` gives the two sides of a song, `render_stems` one loop a channel, and `render_loop` those loops mixed to stereo.
 
 Samples are float32 NumPy arrays. The renderers work at 44100 samples a second unless they are given a `rate`. `build` and `write_page` do what the `build` and `page` commands do, at 48000 unless they are given another, and they take the format as `fmt`. `load_wav` reads a 16-bit WAV file back, and `save_audio` in `rowsynth.encode` writes samples in any of the formats. Whatever the package refuses, it refuses with a `RowSynthError`.
+
+`change_file` in `rowsynth.edit` is what the `set` command calls, and what the window saves with. It reads the file, puts a value at a place, checks the project as loading does and writes the file, or refuses and writes nothing. Its answer is the dict that `set` prints, and `delete=True` in place of a value takes out what is there. `change_file_many` makes several changes as one, checked once after the last, for things that name one another:
+
+```python
+from rowsynth.edit import change_file, change_file_many
+
+print(change_file("tune.json", "songs.tune.gain", 0.3))
+change_file_many("tune.json", [("instruments.organ", {"wave": "tri"}), ("songs.tune.channels.bass.inst", "organ")])
+```
 
 ## A skill for Claude
 

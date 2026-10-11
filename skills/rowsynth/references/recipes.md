@@ -1,6 +1,6 @@
 # Recipes
 
-Each block is a whole project file, and each passes `check`. Take the nearest one, change its notes first and its tables after, and run the loop on what you made.
+Each JSON block is a whole project file, and each passes `check`. Take the nearest one, change its notes first and its tables after, and run the loop on what you made. The last recipe is for a file that is there already.
 
 ## A coin
 
@@ -174,6 +174,31 @@ Six notes up a chord, four ticks each and the last held, with an echo that comes
 ```
 
 One long note of a saw under a low-pass, cut in two: its first 12 ticks are the start, where the level rises, and the 60 after them are the loop, which goes round for as long as the sound is held. a2 is 110 Hz, so a loop of one second is 110 whole periods. The end is the same note on an instrument that falls away. `--part loop` renders or measures the loop, and `--part end` the end.
+
+## Change one thing while the window is open
+
+The person has `audio.json` open in the window, a copy of the repo's `examples/arcade.json`. They find the bass too loud, and want the lead to end pattern `b` on a rest. That is two values, so two `set` commands, and then `check`:
+
+```
+python -m rowsynth set audio.json songs.tune.channels.bass.gain 0.7
+python -m rowsynth set audio.json songs.tune.patterns.b.lead "o5 l4 a >c f c< | b >d g d< | >e2 c4< a4 | a2 r2"
+python -m rowsynth check audio.json
+```
+
+The first answers with what was there and what is there now, and the second likewise:
+
+```
+{
+  "file": "audio.json",
+  "where": "songs.tune.channels.bass.gain",
+  "was": 0.9,
+  "now": 0.7
+}
+```
+
+Each channel of each pattern is one line of the file, so the line to change is quick to find and to read just before you change it. Change the whole line: the last bar went from `a1` to `a2 r2`, and still comes to 16 rows. `check` prints no findings.
+
+The window shows each change within a quarter of a second, and its status line says `changed outside: tune`. Tell the person where to look and listen: the song `tune`, the block `b` in the strip along the top, the channel `lead`, and Space to play it. The bass is one fader in `MIXER`. If they do not want a change, Ctrl+Z in the window takes the last one back.
 
 ## What they measure
 
