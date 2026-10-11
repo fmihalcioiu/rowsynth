@@ -75,6 +75,24 @@ LENGTH = 6
 SPARE = 3
 #: How much of its colour a wave keeps while it is stale: its sound was changed, and the render of that has not come.
 STALE = 0.4
+#: What a handle can be: the label of a part, the two borders of a held sound, and the line of the longest time.
+PART, START, LOOP, LIMIT = "part", "start", "loop", "limit"
+#: What a right press asks a menu for: that of the label of a variant or a part, or that of the ruler.
+LABEL, RULER = "label", "ruler"
+#: How far to each side of its line an upright handle is drawn, and is taken by the mouse.
+GRIP = 2
+#: From a side of the tab of a label to its text, from the last tab to the box of the sign after it, and the sign.
+TAB_PAD = 3
+PLUS_GAP = 2
+ADD = "+"
+#: The line of the longest time is dragged in steps of so many seconds, and to no less than one of them.
+LIMIT_STEP = 0.01
+#: The clock goes on to a longest time that is no more than so many times as long as the sound, and then by this
+#: share of it further, so that the line stands clear of the edge.
+LIMIT_REACH = 2.0
+LIMIT_AIR = 0.05
+#: What one of the sounds is called that the sign adds to: an entry of any other kind has none.
+ADDED = {"defs": "variant", "parts": "part"}
 
 # What was done to the notes by the gestures that are listed with a count of notes.
 _DONE = {PLACE: "placed", MOVE: "moved", STRETCH: "stretched", REMOVE: "removed"}
@@ -113,6 +131,26 @@ def stretch(starts: Sequence[float], at: float) -> int | None:
         if at >= start:
             found = index
     return found
+
+
+def on_tick(second: float) -> float:
+    """The second at which the tick nearest to a second begins, to the millionth. None is before second 0."""
+    return round(max(0, math.floor(second * TICK_HZ + 0.5)) / TICK_HZ, 6)
+
+
+def limit_lines(laid: Sequence[tuple[str, float, Shape]], kind: str, limit: float | None) -> list[tuple[int, float]]:
+    """Where the line of a longest time stands among some shapes as they are laid: (shape, second of the clock).
+
+    Variants have a clock each, so each has its line, where that falls before the next variant starts. An
+    entry of any other kind has the one clock and the one line. With no limit there is none.
+    """
+    if limit is None:
+        return []
+    if kind != "defs":
+        return [(0, float(limit))]
+    starts = [place for _, place, _ in laid]
+    return [(index, start + limit) for index, (start, end) in enumerate(zip(starts, [*starts[1:], math.inf]))
+            if start + limit < end]
 
 
 def tint(ground: Colour, zone: int) -> Colour:
@@ -306,6 +344,21 @@ class Map:
         """This map, moved no further than the clock goes: it starts no sooner than second 0, and ends no later."""
         last = max(0.0, self.seconds) * (1 - ZOOM_STEP ** -self.zoom)
         return replace(self, start=min(max(self.start, 0.0), last))
+
+
+def tabs(seen: Map, laid: Sequence[tuple[str, float, Shape]]) -> list[Rect]:
+    """The tab of each label in the strip of the names: from where its shape starts, `TAB_PAD` round its text."""
+    _, y, _, h = seen.names
+    return [(seen.x(place), y, Font.width(label) + 2 * TAB_PAD, h) for label, place, _ in laid]
+
+
+def plus(seen: Map, laid: Sequence[tuple[str, float, Shape]]) -> Rect:
+    """The box of the sign that adds a sound, in the strip of the names: `PLUS_GAP` after the tab that ends
+    furthest on, and no further on than the strip goes."""
+    x, y, w, h = seen.names
+    wide = Font.width(ADD) + 2 * TAB_PAD
+    after = max((left + width for left, _, width, _ in tabs(seen, laid)), default=x) + PLUS_GAP
+    return max(x, min(after, x + w - wide)), y, wide, h
 
 
 def called(kind: str, index: int) -> str:
@@ -551,6 +604,33 @@ class Gesture:
         return counted(count, _DONE[self.kind])
 
 
+@dataclass
+class Pull:
+    """A handle that is pulled along the clock: which one, where the press was, and what it stands at.
+
+    kind is what the handle is, and which the part it is of, or the variant whose line it is. seen is the sums
+    of the view at the press, start where the press was, and was what the handle stood at then: a second for a
+    part and for a longest time, and ticks for a border of a held sound. help is what the help line said of it.
+    pos is where the mouse is now, dragged whether it has been more than `SLACK` pixels to a side of the press,
+    and value what a release where the mouse is leaves the handle at. wave is that of a part by itself, where
+    the owner of the view gave one.
+    """
+
+    kind: str
+    which: int
+    seen: Map
+    start: Pos
+    was: float
+    help: str = ""
+    pos: Pos = field(init=False)
+    dragged: bool = field(default=False, init=False)
+    value: float = field(init=False)
+    wave: np.ndarray | None = field(default=None, init=False)
+
+    def __post_init__(self) -> None:
+        self.pos, self.value = self.start, self.was
+
+
 class SoundView(Widget):
     """The view of a sound: its notes as bars on a grid of seconds and keys, and under them its wave on the same clock.
 
@@ -581,6 +661,23 @@ class SoundView(Widget):
     A variant can be chosen: `chosen` is called with its number, from 0, as the left button goes down on its
     label or in its stretch of the wave. `played` is the shape whose label is lit, or None: the owner sets it to
     the variant that was played last.
+
+    What belongs to the kind of the entry has handles, which are there once the owner has set `handled`. The
+    label of a part is a tab that is dragged along the clock to where the part is to start, on a tick and never
+    before second 0: its bars follow, and so does its own wave where `alone` gives the wave of a part by itself.
+    The two borders of a held sound are dragged in the strip of the labels, and stop where `soundedit.held_with`
+    keeps the start and the loop, by the instruments that `show` was given. Where the entry has a longest time,
+    its `max_seconds`, a line stands at that second in the colour of a fault, and is dragged in the ruler. The
+    clock goes on to a line that is no more than `LIMIT_REACH` times the sound away. While a handle is dragged
+    the view is `busy` and the waves are dim, and at its release `handled` is called with what the handle is,
+    which part or variant it is of, and what it stands at: the second of a part or of the longest time, or the
+    ticks of the `start` or the `loop`. The view changes nothing itself.
+
+    With `added` set, variants and parts have a sign after their last label: a press on it calls `added` with
+    None, and a click in the ruler of an entry of parts with ctrl held calls it with the second there, on a
+    tick. With `asked` set, the right button calls it for a menu: with `LABEL`, the variant or the part, the
+    second and the position on a label, and with `RULER`, the variant, the second of its clock and the position
+    in the ruler.
     """
 
     def __init__(self, rect: Rect, help: str = "") -> None:
@@ -593,6 +690,10 @@ class SoundView(Widget):
         self.edited: Callable[[int, dict, str], object] | None = None
         self.sounded: Callable[[str | dict, float], object] | None = None
         self.refused: Callable[[str], object] | None = None
+        self.added: Callable[[float | None], object] | None = None
+        self.asked: Callable[[str, int, float, Pos], object] | None = None
+        self.handled: Callable[[str, int, float], object] | None = None
+        self.alone: Callable[[int], np.ndarray | None] | None = None
         self.seconds = 0.0
         self.start, self.zoom = 0.0, 0
         self.stale = False
@@ -615,14 +716,21 @@ class SoundView(Widget):
         self._clip: Clip = ()
         # How long the last note was that was placed by a drag or stretched.
         self._length = LENGTH
+        # The entry that is shown and the instruments of its project, its longest time, and the handle that is
+        # pulled.
+        self._entry: dict | None = None
+        self._instruments: dict | None = None
+        self._limit: float | None = None
+        self._pull: Pull | None = None
 
     @property
     def help(self) -> str:
         """What the mouse is on or what a press there would do, in plain words, or the line the view was made with.
 
-        While a gesture is under way it is what the press did that began it.
+        While a gesture is under way, or a handle is pulled, it is what the press did that began it.
         """
-        told = self._gesture.help if self._gesture is not None else self._tell(self._mouse, self._mods)
+        under_way = self._gesture or self._pull
+        told = under_way.help if under_way is not None else self._tell(self._mouse, self._mods)
         return told or self._help
 
     @help.setter
@@ -653,7 +761,7 @@ class SoundView(Widget):
 
     @sound.setter
     def sound(self, which: int) -> None:
-        self._sound, self._picked, self._gesture = which, frozenset(), None
+        self._sound, self._picked, self._gesture, self._pull = which, frozenset(), None, None
 
     @property
     def picked(self) -> Picked:
@@ -669,20 +777,54 @@ class SoundView(Widget):
 
     @property
     def busy(self) -> bool:
-        """Whether a gesture is under way: from the press that began it to its release, or until it is dropped."""
-        return self._gesture is not None
+        """Whether a gesture is under way or a handle is pulled: from the press that began it to its release, or
+        until it is dropped."""
+        return self._gesture is not None or self._pull is not None
+
+    @property
+    def limit(self) -> float | None:
+        """The longest time of the entry that is shown, in seconds, or None where it has none."""
+        return self._limit
+
+    def _moving(self) -> bool:
+        """Whether a handle is dragged that takes sounds along with it: the label of a part, or a border."""
+        pull = self._pull
+        return pull is not None and pull.dragged and pull.kind != LIMIT
+
+    def _placed(self) -> tuple[tuple[str, float, Shape], ...]:
+        """The shapes where they lie: while a part or a border is dragged, where its release would leave them.
+
+        A part lies at the second its label is at. The loop of a held sound starts where its start ends, and
+        its end where the loop does.
+        """
+        pull, laid = self._pull, self._laid
+        if not self._moving():
+            return laid
+        if pull.kind == PART:
+            label, _, shape = laid[pull.which]
+            return (*laid[:pull.which], (label, pull.value, shape), *laid[pull.which + 1:])
+        lengths = {START: laid[1][1], LOOP: laid[2][1] - laid[1][1]}
+        lengths[pull.kind] = soundview.ticks_to_seconds(pull.value, self._rate)
+        (first, _, start), (second, _, loop), (third, _, end) = laid
+        return ((first, 0.0, start), (second, lengths[START], loop), (third, lengths[START] + lengths[LOOP], end))
 
     def _now(self) -> tuple[tuple[Span, ...], Picked]:
-        """The sounds to draw and the picked notes: with a gesture under way what it gives, and else what there is."""
+        """The sounds to draw and the picked notes: with a gesture under way what it gives, and else what there is.
+
+        While a part or a border is dragged, the sounds lie where its release would leave them.
+        """
         gesture = self._gesture
         if gesture is None:
+            if self._moving():
+                return spans(self._entry, self._placed()), self._picked
             return self._spans, self._picked
         defn, picked = gesture.gives()
         return (*self._spans[:gesture.which], replace(gesture.span, defn=defn),
                 *self._spans[gesture.which + 1:]), picked
 
     def show(self, shapes: Sequence[tuple[str, float, Shape]], samples: Sequence[np.ndarray], rate: int,
-             colour: Colour, kind: str = "def", entry: dict | None = None, stale: bool = False) -> None:
+             colour: Colour, kind: str = "def", entry: dict | None = None, stale: bool = False,
+             instruments: dict | None = None) -> None:
         """Show some shapes, as `soundview.shapes` gives them, over the samples of their render at a rate.
 
         `kind` is what the entry of the shapes is, as `bank.entry_kind` names it. The shapes of "defs" are
@@ -699,7 +841,9 @@ class SoundView(Widget):
         changed by hand, and with None they are shown and no more. What is picked stays picked while the sound
         it is in has the notes it had. The sound that the last edit gave is shown with what that edit left
         picked. With any other notes nothing is picked, and a gesture that is under way is dropped when any
-        sound of the entry is another than it was.
+        sound of the entry is another than it was. A handle that is pulled is dropped by any other entry.
+        `instruments` are those of the project the entry is in, by which the borders of a held sound are kept
+        inside its note.
 
         What is no kind, no rows, no wave or no rate is refused, and so are rows that are neither one nor one
         for each shape, and an entry with other shapes than these. Then nothing changes.
@@ -721,9 +865,16 @@ class SoundView(Widget):
         waves = tuple((laid[index][1] if each else 0.0, row) for index, row in enumerate(samples))
         self._laid, self._waves, self._rate, self.colour, self.kind = laid, waves, rate, colour, kind
         self.stale = stale
+        if entry != self._entry:
+            self._pull = None
+        limit = None if entry is None else entry.get("max_seconds")
+        numbered = isinstance(limit, (int, float)) and not isinstance(limit, bool) and limit > 0
+        self._entry, self._instruments, self._limit = entry, instruments, limit if numbered else None
         self._take(fresh)
         self.seconds = max([0.0] + [place + shape.seconds for _, place, shape in laid]
                            + [place + len(row) / rate for place, row in waves])
+        if numbered and kind != "defs" and self.seconds / (1 + LIMIT_AIR) < limit <= LIMIT_REACH * self.seconds:
+            self.seconds = limit * (1 + LIMIT_AIR)
         self._see(self.map)
 
     def _take(self, fresh: tuple[Span, ...]) -> None:
@@ -788,10 +939,13 @@ class SoundView(Widget):
         its start in view its first column begins at its first sample, and with its end in view its last column
         ends at its last.
         """
-        seen = self.map
+        return self._columns(self.map, self._waves)
+
+    def _columns(self, seen: Map, waves: Sequence[tuple[float, np.ndarray]]) -> list[tuple[int, np.ndarray]]:
+        """Some waves as a map has them in view, each as (the second it starts at, its samples): as `columns`."""
         x, _, w, _ = seen.wave
         found = []
-        for place, samples in self._waves:
+        for place, samples in waves:
             begins, ends = seen.x(place), seen.x(place + len(samples) / self._rate)
             left = max(x, begins)
             right = max(left, min(x + w, ends))
@@ -811,6 +965,51 @@ class SoundView(Widget):
             return None
         shape = stretch([seen.x(place) for _, place, _ in self._laid], pos[0])
         return shape if shape is None or self.kind != "held" else shape // 2
+
+    def tab(self, which: int) -> Rect:
+        """The tab of the label of one of the shapes, counted from 0, in the strip of the names."""
+        return tabs(self.map, self._laid)[which]
+
+    def handle_at(self, pos: Pos) -> tuple[str, int] | None:
+        """The handle a position is on: what it is, and which part it is of or which variant's line it is.
+
+        The line of a longest time is taken in the ruler, `GRIP` pixels to each side of it. In the strip of the
+        names a border of a held sound is taken as near, the nearer of the two and of two as near the loop's,
+        and a part by the tab of its label, the one drawn last first. None anywhere else, and while nobody is
+        told of a handle.
+        """
+        if not self._spans or self.handled is None:
+            return None
+        seen = self.map
+        if inside(seen.ruler, pos):
+            for index, second in limit_lines(self._laid, self.kind, self._limit):
+                if abs(pos[0] - seen.x(second)) <= GRIP:
+                    return LIMIT, index
+        elif inside(seen.names, pos) and self.kind == "held":
+            far, key = min((abs(pos[0] - seen.x(place)), key)
+                           for key, (_, place, _) in zip((LOOP, START), self._laid[:0:-1]))
+            return (key, 0) if far <= GRIP else None
+        elif self.kind == "parts":
+            which = self._tab_at(seen, pos)
+            return None if which is None else (PART, which)
+        return None
+
+    def _tab_at(self, seen: Map, pos: Pos) -> int | None:
+        """The shape whose tab a position is on, the one drawn last first, or None for none."""
+        boxes = tabs(seen, self._laid)
+        return next((which for which in reversed(range(len(boxes))) if inside(boxes[which], pos)), None)
+
+    def _own(self, second: float) -> tuple[int, float]:
+        """A second of the view's clock on the clock a longest time is counted on: which variant, and its second.
+
+        Variants have a clock each, and a second is on that of the variant whose stretch it is in. Anything
+        else has the view's clock. No second is before 0.
+        """
+        if self.kind != "defs":
+            return 0, max(0.0, second)
+        starts = [place for _, place, _ in self._laid]
+        which = stretch(starts, second) or 0
+        return which, max(0.0, second - starts[which])
 
     def _voice(self, span: Span) -> int:
         """The voice of a sound that a new note goes into: the picked one, or the last where it has fewer."""
@@ -839,12 +1038,32 @@ class SoundView(Widget):
             return f"leave {named} out of the picked notes" if out else f"pick {named} as well"
         return f"{kind} {named}"
 
+    def _offers(self, seen: Map, pos: Pos) -> str:
+        """What a press does at a position on a handle, on the sign that adds a sound, or in the ruler. No words
+        anywhere else, and none for what nobody is told of."""
+        hit = self.handle_at(pos)
+        if hit is not None:
+            return {PART: f"drag to move where part {hit[1] + 1} starts, or press the right button for more",
+                    START: "drag to move where the loop starts", LOOP: "drag to move where the loop ends",
+                    LIMIT: "the longest time the sound may last: drag to move it"}[hit[0]]
+        adds = bool(self._spans) and self.added is not None and self.kind in ADDED
+        if adds and inside(seen.names, pos) and inside(plus(seen, self._laid), pos):
+            end = " at the end" if self.kind == "parts" else ""
+            return f"add a {ADDED[self.kind]}{end}, a copy of {called(self.kind, self._sound)}"
+        if self._spans and self.asked is not None and inside(seen.ruler, pos):
+            more = ", and ctrl and a click adds a part here" if adds and self.kind == "parts" else ""
+            return f"press the right button to set the longest time the sound may last{more}"
+        return ""
+
     def _tell(self, pos: Pos, mods: frozenset[str] = _NO_MODS, button: int = 1) -> str:
         """What is at a position, in plain words: a note, a label there is to press, or a moment of the wave and
         its level. Where the notes can be changed it is what a press on the grid would do. Else no words."""
         seen = self.map
         if self._spans and inside(seen.grid, pos):
             return self._does(seen, pos, mods, button)
+        offered = self._offers(seen, pos)
+        if offered:
+            return offered
         bar = self.bar_at(pos)
         if bar is not None:
             line = f"{spelt(round(bar.pitch))}, {bar.seconds:.2f} s"
@@ -869,21 +1088,26 @@ class SoundView(Widget):
     def on(self, event: Event, ui: Ui) -> bool:
         """Note where the mouse is, take a press and carry the gesture it begins on to its release, and use the wheel.
 
-        A press of the left button on a label, or in a variant's stretch of the wave, chooses: it begins no
-        gesture. With ctrl the wheel zooms, and alone it scrolls a clock zoomed in: not while a gesture is under
-        way. A press is used when it chooses or begins a gesture, and the owner is told of no edit before its
-        release. A key goes to `key`.
+        A press on a handle begins a pull, and one on the sign after the labels, in the ruler, or with the right
+        button on a label tells the owner: see `_grab`. A press of the left button on a label, or in a variant's
+        stretch of the wave, chooses: it begins no gesture. With ctrl the wheel zooms, and alone it scrolls a
+        clock zoomed in: not while a gesture is under way or a handle is pulled. A press is used when it does
+        any of these, and the owner is told of no edit of the notes before its release. A key goes to `key`.
         """
         if event.kind == "key":
             return self.key(event)
         self._mouse, self._mods = event.pos, event.mods
         if event.kind == "down":
             # A press while another button is held begins nothing.
-            return ui.held is None and (self._choose(event) or self._press(event))
+            return ui.held is None and (self._grab(event) or self._choose(event) or self._press(event))
         gesture = self._gesture
         if event.kind == "wheel":
-            return gesture is None and self._wheel(event)
-        if gesture is not None:
+            return not self.busy and self._wheel(event)
+        if self._pull is not None:
+            self._haul(event.pos)
+            if event.kind == "up" and event.button == 1:
+                self._let_go()
+        elif gesture is not None:
             self._drag(event.pos)
             if event.kind == "up" and event.button == gesture.button:
                 self._release()
@@ -900,6 +1124,81 @@ class SoundView(Widget):
             return False
         self._see(seen)
         return True
+
+    def _grab(self, event: Event) -> bool:
+        """Take a press that is for what belongs to the kind of the entry, and say whether it was one.
+
+        The right button asks for the menu of the ruler, or of the label of a variant or a part. The left one
+        begins the pull of a handle, with the hand in the part whose label it is, or adds a sound: on the sign
+        after the labels, or in the ruler of an entry of parts with ctrl held.
+        """
+        if not self._spans or event.button not in (1, 3):
+            return False
+        seen, pos = self.map, event.pos
+        second = seen.second_at(pos[0])
+        if event.button == 3:
+            label = self.sound_at(pos) if self.kind == "defs" else self._tab_at(seen, pos)
+            if self.asked is None or not (inside(seen.ruler, pos) or label is not None and self.kind in ADDED):
+                return False
+            if label is None:
+                self.asked(RULER, *self._own(second), pos)
+            else:
+                self.asked(LABEL, label, second, pos)
+            return True
+        hit = self.handle_at(pos)
+        if hit is not None:
+            kind, which = hit
+            if kind == PART:
+                was = self._entry["parts"][which][0]
+            else:
+                was = self._limit if kind == LIMIT else self._entry["held"][kind]
+            self._gesture, self._pull = None, Pull(kind, which, seen, pos, was, self._offers(seen, pos))
+            if kind == PART:
+                self._into(which)
+            return True
+        if self.added is None or self.kind not in ADDED:
+            return False
+        if inside(seen.names, pos) and inside(plus(seen, self._laid), pos):
+            self.added(None)
+        elif self.kind == "parts" and "ctrl" in event.mods and inside(seen.ruler, pos):
+            self.added(on_tick(second))
+        else:
+            return False
+        return True
+
+    def _haul(self, pos: Pos) -> None:
+        """Take the handle that is pulled to where the mouse is: it stands at what a release there leaves it at.
+
+        A part stands on a tick, and at no second before 0. A longest time stands on a step of `LIMIT_STEP`. A
+        border stands on a tick, where `soundedit.held_with` keeps the start or the loop. The wave of a part by
+        itself is asked for when its label is first dragged.
+        """
+        pull = self._pull
+        pull.pos = pos
+        if not pull.dragged and abs(pos[0] - pull.start[0]) > SLACK:
+            pull.dragged = True
+            if pull.kind == PART and self.alone is not None:
+                pull.wave = self.alone(pull.which)
+        if not pull.dragged:
+            return
+        by = (pos[0] - pull.start[0]) / pull.seen.scale
+        if pull.kind == PART:
+            pull.value = on_tick(pull.was + by)
+        elif pull.kind == LIMIT:
+            pull.value = round(max(LIMIT_STEP, pull.was + by), 2)
+        else:
+            ticks = max(0, math.floor(pull.was + by * TICK_HZ + 0.5))
+            try:
+                pull.value = soundedit.held_with(self._entry, pull.kind, ticks, self._instruments,
+                                                 self._rate)["held"][pull.kind]
+            except RowSynthError:
+                pull.value = pull.was
+
+    def _let_go(self) -> None:
+        """End the pull: a handle that stands at another place than it did is told of, for the owner to save."""
+        pull, self._pull = self._pull, None
+        if pull.dragged and pull.value != pull.was and self.handled is not None:
+            self.handled(pull.kind, pull.which, pull.value)
 
     def _into(self, which: int) -> None:
         """Have the hand in a sound of the entry. In another one than before, nothing is picked."""
@@ -995,18 +1294,18 @@ class SoundView(Widget):
         left and right a step of the grid. Ctrl and a picks the notes of the picked voice, and with shift those
         of every voice. Ctrl and c copies the picked notes, and ctrl and v pastes them at the tick under the
         mouse, in the sound whose room the mouse is in, or at the first tick in view when the mouse is off the
-        grid. Escape drops the gesture that is under way, or else what is picked. While a gesture is under way
-        no other key is the view's, and where nothing can be changed none is.
+        grid. Escape drops the gesture that is under way or the handle that is pulled, or else what is picked.
+        While either is under way no other key is the view's, and where nothing can be changed none is.
         """
         if not self._spans:
             return False
         pressed, mods = event.key, event.mods
         if pressed == "escape" and not mods:
-            if self._gesture is None:
+            if not self.busy:
                 self._picked = frozenset()
-            self._gesture = None
+            self._gesture = self._pull = None
             return True
-        if self._gesture is not None:
+        if self.busy:
             return False
         span, picked = self._spans[self._sound], self._picked
         if pressed in ("delete", "backspace") and not mods:
@@ -1061,7 +1360,8 @@ class SoundView(Widget):
             self._give(self._sound, defn, picked, label)
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the ruler, the keys, the grid with its bars, the wave and the playhead: all of it in the rectangle."""
+        """Draw the ruler, the keys, the grid with its bars, the wave, the line of the longest time and the
+        playhead: all of it in the rectangle."""
         seen = self.map
         with canvas.clip(self.rect):
             canvas.box(self.rect, theme.PANEL)
@@ -1072,6 +1372,7 @@ class SoundView(Widget):
                 self._draw_bars(canvas, seen)
                 self._draw_names(canvas, seen)
             self._draw_wave(canvas, seen)
+            self._draw_limit(canvas, seen)
             if self.playhead is not None:
                 _, y, _, h = self.rect
                 with canvas.clip((seen.grid[0], y, seen.grid[2], h)):
@@ -1104,11 +1405,12 @@ class SoundView(Widget):
 
     def _zones(self, seen: Map) -> list[tuple[int, int]]:
         """The zones of a held sound from side to side, each as (x, width): one ends where the next starts, and the
-        last where the clock does. Anything else has none.
+        last where its end does. Anything else has none.
         """
         if self.kind != "held":
             return []
-        edges = [seen.x(start) for _, start, _ in self._laid] + [seen.x(self.seconds)]
+        laid = self._placed()
+        edges = [seen.x(start) for _, start, _ in laid] + [seen.x(laid[-1][1] + laid[-1][2].seconds)]
         return [(left, right - left) for left, right in zip(edges, edges[1:])][:len(ZONES)]
 
     def _draw_grid(self, canvas: Canvas, seen: Map) -> None:
@@ -1201,18 +1503,54 @@ class SoundView(Widget):
         return ZONES[index] if self.kind == "held" and index < len(ZONES) else theme.TEXT
 
     def _draw_names(self, canvas: Canvas, seen: Map) -> None:
-        """A line down the grid where each shape after the first starts, and over the grid the label of each shape."""
+        """A line down the grid where each shape after the first starts, and over the grid the label of each shape.
+
+        Where there are handles, the label of a part is on a tab, lit while it is dragged, with a line down
+        the grid from every one, and each border of a held sound has a grip in the strip of the labels. After
+        the last label of variants and of parts stands the sign that adds one, where somebody is told of it.
+        """
         x, y, w, h = seen.names
         deep = h + seen.grid[3]
-        starts = [seen.x(place) for _, place, _ in self._laid]
+        laid, pull = self._placed(), self._pull
+        starts = [seen.x(place) for _, place, _ in laid]
+        handles = bool(self._spans) and self.handled is not None
+        boxes = tabs(seen, laid) if handles and self.kind == "parts" else []
+        grips = handles and self.kind == "held"
         with canvas.clip((x, y, w, deep)):
-            for index, (label, _, _) in enumerate(self._laid):
-                left = starts[index]
-                if index:
-                    canvas.vline(left, y, deep, theme.TEXT)
+            for index, (label, _, _) in enumerate(laid):
+                # A label that starts at a grip stands clear of it.
+                left = starts[index] + (GRIP if grips and index else 0)
+                if boxes:
+                    pulled = pull is not None and (pull.kind, pull.which) == (PART, index)
+                    canvas.box(boxes[index], theme.LIT if pulled else theme.RAISED)
+                    canvas.frame(boxes[index], theme.LINE)
+                if index or boxes:
+                    canvas.vline(starts[index], y, deep, theme.TEXT)
                 # A label has the room up to the next start there is after its own.
                 room = min((start for start in starts if start > left), default=x + w) - left - 4
                 canvas.text_in(label.upper(), (left + 3, y, max(0, room), h), self._ink(index))
+            if grips:
+                for left in starts[1:]:
+                    canvas.box((left - GRIP, y, 2 * GRIP + 1, h), theme.TEXT)
+            if self._spans and self.added is not None and self.kind in ADDED:
+                sign = plus(seen, laid)
+                canvas.box(sign, theme.RAISED)
+                canvas.frame(sign, theme.LINE)
+                canvas.text_in(ADD, sign, theme.TEXT, "centre")
+
+    def _draw_limit(self, canvas: Canvas, seen: Map) -> None:
+        """The line of the longest time, down the whole of the view in the colour of a fault, where it is on the
+        clock: with a grip in the ruler where it can be dragged."""
+        pull = self._pull
+        limit = pull.value if pull is not None and pull.kind == LIMIT else self._limit
+        left, _, wide, _ = seen.grid
+        _, y, _, h = self.rect
+        with canvas.clip((left, y, wide, h)):
+            for _, second in limit_lines(self._laid, self.kind, limit):
+                x = seen.x(second)
+                canvas.vline(x, y, h, theme.FAULT)
+                if self.handled is not None:
+                    canvas.box((x - GRIP, y, 2 * GRIP + 1, seen.ruler[3]), theme.FAULT)
 
     def _draw_wave(self, canvas: Canvas, seen: Map) -> None:
         """The box of the waves with its name beside it, the line at zero, and of each wave a column for each pixel
@@ -1220,11 +1558,13 @@ class SoundView(Widget):
 
         The box is tinted in the zones of a held sound, and has a line where each variant after the first starts.
         The columns of a wave are made to meet, so it is one line at any zoom. A stale wave is dim: it has
-        `STALE` of its colours.
+        `STALE` of its colours. So have the waves while a part or a border is dragged, and over them the wave
+        of that part by itself is drawn whole, from where its release would leave the part.
         """
         x, y, w, h = seen.wave
-        ink, fault = ((mix(theme.BACKGROUND, colour, STALE) if self.stale else colour)
-                      for colour in (self.colour, theme.FAULT))
+        pull, moving = self._pull, self._moving()
+        whole = (self.colour, theme.FAULT)
+        ink, fault = ((mix(theme.BACKGROUND, colour, STALE) if self.stale or moving else colour) for colour in whole)
         canvas.text_in("WAVE", (self.rect[0], y, KEYS_W - GAP, h), theme.DIM, "right")
         canvas.box(seen.wave, theme.BACKGROUND)
         with canvas.clip((x + 1, y + 1, w - 2, h - 2)):
@@ -1234,10 +1574,12 @@ class SoundView(Widget):
             if self.kind == "defs":
                 for _, place, _ in self._laid[1:]:
                     canvas.vline(seen.x(place), y, h, theme.LINE)
-            for left, columns in self.columns():
-                spans = columns.tolist()
-                ends = joined([seen.column(lowest, highest) for lowest, highest in spans])
-                for column, ((lowest, highest), (upper, lower)) in enumerate(zip(spans, ends)):
-                    clipped = max(highest, -lowest) >= FULL
-                    canvas.vline(left + column, upper, lower - upper + 1, fault if clipped else ink)
+            own = [(pull.value, pull.wave)] if moving and pull.wave is not None else []
+            for waves, inks in ((self._waves, (ink, fault)), (own, whole)):
+                for left, columns in self._columns(seen, waves):
+                    spans = columns.tolist()
+                    ends = joined([seen.column(lowest, highest) for lowest, highest in spans])
+                    for column, ((lowest, highest), (upper, lower)) in enumerate(zip(spans, ends)):
+                        clipped = max(highest, -lowest) >= FULL
+                        canvas.vline(left + column, upper, lower - upper + 1, inks[clipped])
         canvas.frame(seen.wave, theme.LINE)

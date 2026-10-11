@@ -24,7 +24,7 @@ from rowsynth.gui.model import Model
 from rowsynth.gui.session import HOLD, POLL_EVERY, Session
 from rowsynth.gui.soundpanel import HELP, HOLD_HELP, MEANWHILE, SoundPanel, arrange, words, zone
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import places, spans
+from rowsynth.gui.wave import PLUS_GAP, on_tick, places, spans
 from rowsynth.project import Project
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -80,6 +80,12 @@ DRONE = {"held": {"note": solo([0, "c3", 60]), "start": 6, "loop": 30, "join": 3
                   "let_go": 4}, "db": -6}
 OWN = {"instruments": {"tone": {"wave": "tri", "release": 0}, "buzz": {"wave": "saw", "release": 0}},
        "sounds": {"two": TWO, "pair": PAIR, "drone": DRONE}}
+#: A project of one sound of each kind: a plain one of 8 ticks, three variants with a level each, two parts of
+#: which the second starts a tenth of a second in, and the held one, whose note has room for 62 ticks.
+TRIO = {"defs": [solo([0, "c4", 6]), solo([0, "e4", 6]), solo([0, "g4", 6])], "db": [0, -3, -6]}
+BOTH = {"parts": [[0, {"def": solo([0, "c4", 10]), "db": -3}], [0.1, {"def": solo([0, "c5", 6])}]]}
+MIXED = {"instruments": OWN["instruments"],
+         "sounds": {"one": {"def": solo([0, "c4", 6])}, "trio": TRIO, "both": BOTH, "drone": DRONE}}
 #: The time the first write from outside is stamped with, in nanoseconds: none the file gets by being saved.
 STAMP = 1_700_000_000 * 10**9
 
@@ -253,12 +259,14 @@ class Sums(unittest.TestCase):
 
 class Shown(unittest.TestCase):
     def test_the_boxes_the_button_and_the_view_are_inside_the_panel_at_any_size(self) -> None:
-        self.assertEqual(arrange(WIDE), {"head": (4, 4, 654, 17), "hold": (627, 4, 31, 17), "box": (4, 25, 654, 451),
+        self.assertEqual(arrange(WIDE), {"head": (4, 4, 654, 17), "hold": (627, 4, 31, 17), "limits": (576, 4, 43, 17),
+                                         "kind": (519, 4, 55, 17), "box": (4, 25, 654, 451),
                                          "bar": (8, 29, 646, 37), "view": (8, 68, 646, 404)})
         _, ui, panel = panel_on()
-        # The view and the button are the panel's first widgets, and those of the bar come after them.
-        self.assertEqual((ui.widgets, panel.widgets[:2], panel.view.rect, panel.view.help),
-                         (panel.widgets, [panel.view, panel.hold], (28, 78, 384, 194), HELP))
+        # The view and the buttons of the heading are the panel's first widgets, and those of the bar come after.
+        self.assertEqual((ui.widgets, panel.widgets[:4], panel.view.rect, panel.view.help),
+                         (panel.widgets, [panel.view, panel.hold, panel.kinds, panel.limits], (28, 78, 384, 194),
+                          HELP))
         self.assertEqual((panel.hold.rect, panel.hold.text, panel.hold.help), ((385, 14, 31, 17), "HOLD", HOLD_HELP))
         self.assertEqual((panel.bar.voices in panel.widgets, panel.bar.voices.visible), (True, True))
         self.assertTrue(lies_in(panel.bar.echo.rect, arrange(RECT)["bar"]))
@@ -266,7 +274,7 @@ class Shown(unittest.TestCase):
             panel.place(rect)
             self.assertEqual((panel.view.rect, panel.hold.rect), (arrange(rect)["view"], arrange(rect)["hold"]))
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
-            self.assertTrue(all(lies_in(widget.rect, arrange(rect)["bar"]) for widget in panel.widgets[2:]), rect)
+            self.assertTrue(all(lies_in(widget.rect, arrange(rect)["bar"]) for widget in panel.widgets[4:]), rect)
 
     def test_a_sound_is_its_bars_over_an_empty_wave_until_its_render_is_ready(self) -> None:
         stand, _, panel = panel_on()
@@ -536,7 +544,9 @@ class Drawn(unittest.TestCase):
             # The kind starts 5 pixels in, and the name 8 pixels after it. Both boxes have their outline.
             self.assertTrue(self.written(theme.DIM, places["head"], kind, 29))
             self.assertTrue(self.written(colour, places["head"], name, 29 + Font.width(kind) + 8))
-            self.assertEqual(self.colours(places["head"]), {theme.PANEL, theme.LINE, theme.DIM, colour})
+            # A sound has the two buttons of its kind and its limits there as well, raised.
+            buttons = {theme.RAISED, theme.LIT, theme.TEXT} if picked[0] == "sound" else set()
+            self.assertEqual(self.colours(places["head"]), {theme.PANEL, theme.LINE, theme.DIM, colour} | buttons)
             self.assertEqual(self.colours((24, 35, 392, 1)) | self.colours((24, 36, 1, 239)), {theme.LINE})
             # The view is drawn in its box, and nothing is outside the panel.
             self.assertIn(theme.BACKGROUND, self.colours(places["view"]))
@@ -716,8 +726,11 @@ def differing(one: object, other: object, where: str = "") -> list[str]:
     return [] if json.dumps(one) == json.dumps(other) else [where]
 
 
-class Saved(unittest.TestCase):
+class OnAFile(unittest.TestCase):
     """A project file of the test's own, a real session on it with a stand-in player, and the panel on that."""
+
+    #: What the file holds at the start, and the sound of it that is picked.
+    DATA, FIRST = OWN, "two"
 
     def setUp(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -725,8 +738,8 @@ class Saved(unittest.TestCase):
         # No thread of the model is left to run into the next test, or into a folder that is gone.
         self.addCleanup(settle)
         self.folder = Path(folder.name)
-        self.open(OWN)
-        self.pick("two")
+        self.open(self.DATA)
+        self.pick(self.FIRST)
 
     def open(self, data: dict | Path) -> None:
         """Open a session and the panel on a file of the folder: one that holds some data, or a copy of a file."""
@@ -793,6 +806,8 @@ class Saved(unittest.TestCase):
             self.mouse("move", stop, button, *mods)
         self.mouse("up", stops[-1], button, *mods)
 
+
+class Saved(OnAFile):
     def test_a_note_placed_is_in_the_picked_voice_and_in_the_file_and_is_one_step_to_take_back(self) -> None:
         before = self.data()
         self.assertEqual((self.view.drawn, self.view.kind, self.panel.bar.voices.options),
@@ -942,6 +957,269 @@ class Saved(unittest.TestCase):
         for key, mods in (("up", {"shift"}), ("right", set()), ("left", set()), ("down", {"shift"})):
             self.assertTrue(self.ui.handle(Event("key", key=key, mods=frozenset(mods))))
         self.assertEqual(self.data(), before)
+
+
+class Kinds(OnAFile):
+    """The kind of a sound and what belongs to the kind, changed in the window: each change is one save."""
+
+    DATA, FIRST = MIXED, "one"
+
+    def sound(self, name: str) -> dict:
+        """What the file holds now for a sound."""
+        return self.data()["sounds"][name]
+
+    def items(self) -> list[tuple[str, bool]]:
+        """The items of the menu that is open: the text of each, and whether it can be chosen."""
+        return [(item.text, item.enabled) for item in self.ui.modal.items]
+
+    def choose(self, text: str) -> None:
+        """Click the item of the open menu whose text begins with some words."""
+        menu = self.ui.modal
+        self.drag(centre(menu.rows[[item.text.startswith(text) for item in menu.items].index(True)]))
+
+    def type(self, text: str) -> None:
+        """Type a text in the box that is open, in place of what it holds, and press enter."""
+        self.ui.handle(Event("text", text=text) if text else Event("key", key="backspace"))
+        self.ui.handle(Event("key", key="return"))
+
+    def label(self, which: int) -> tuple[int, int]:
+        """A pixel on the label of one of the shapes of the picked sound, counted from 0."""
+        return centre(self.view.tab(which))
+
+    def plus(self) -> tuple[int, int]:
+        """A pixel on the sign after the last label."""
+        entry = self.sound(self.session.model.picked[1])
+        tabs = [self.view.tab(which) for which in range(len(entry.get("defs") or entry["parts"]))]
+        return max(x + w for x, _, w, _ in tabs) + PLUS_GAP + 2, tabs[0][1] + 2
+
+    def ruler(self, second: float) -> tuple[int, int]:
+        """A pixel of the ruler at a second of the clock."""
+        return self.view.map.x(second), self.view.map.ruler[1] + 2
+
+    def test_each_kind_is_made_any_other_from_the_menu_of_the_heading_and_undo_brings_the_old_kind_back(self) -> None:
+        said = {"one": ["ONE", "VARIANTS", "PARTS", "HELD"],
+                "trio": ["ONE (keeps variant 1 only)", "VARIANTS", "PARTS", "HELD (keeps variants 1 and 2 only)"],
+                "both": ["ONE (keeps part 1 only)", "VARIANTS (drops where the parts start)", "PARTS",
+                         "HELD (drops where the parts start)"],
+                "drone": ["ONE (keeps the note only)", "VARIANTS (drops the loop)", "PARTS (drops the loop)", "HELD"]}
+        made = {"def": "made one sound", "defs": "made variants", "parts": "made parts", "held": "made a held sound"}
+        for name, kind in zip(said, made):
+            self.pick(name)
+            before = self.data()
+            self.assertEqual((self.panel.kind, self.panel.kinds.visible, self.panel.kinds.text),
+                             (kind, True, said["one"][list(made).index(kind)]))
+            for to, text in zip(made, said[name]):
+                # The button of the heading opens the menu: what the sound is cannot be chosen, and an item
+                # says what the sound would let go of.
+                self.drag(centre(self.panel.kinds.rect))
+                self.assertEqual(self.items(), [(item, item != said[name][list(made).index(kind)])
+                                                for item in said[name]])
+                if to == kind:
+                    self.ui.handle(Event("key", key="escape"))
+                    continue
+                self.choose(text)
+                # The file was saved through the project's check, so it holds an entry the project accepts.
+                self.assertEqual((entry_kind(Project.load(self.path).sounds[name]), self.session.undo_label,
+                                  self.panel.kind, self.session.message), (to, f"{name}: {made[to]}", to, ""))
+                self.assertTrue(self.session.undo())
+                self.panel.update()
+                self.assertEqual((self.data(), self.panel.kind), (before, kind))
+
+    def test_a_variant_is_added_as_a_copy_of_the_one_the_hand_is_in_and_moved_and_removed_by_its_menu(self) -> None:
+        self.pick("trio")
+        first, second, third = TRIO["defs"]
+        self.drag(self.plus())
+        self.assertEqual((self.sound("trio"), self.session.undo_label, self.view.sound),
+                         ({"defs": [first, second, third, first], "db": [0, -3, -6, 0]}, "trio: variant 4 added", 3))
+        # The right button on its label: the last variant is not moved further right.
+        self.drag(self.label(3), button=3)
+        self.assertEqual(self.items(), [("Remove", True), ("Move left", True), ("Move right", False)])
+        self.choose("Move left")
+        self.assertEqual((self.sound("trio"), self.session.undo_label, self.view.sound),
+                         ({"defs": [first, second, first, third], "db": [0, -3, 0, -6]},
+                          "trio: variant 4 moved left", 2))
+        self.drag(self.label(0), button=3)
+        self.assertEqual(self.items(), [("Remove", True), ("Move left", False), ("Move right", True)])
+        self.choose("Remove")
+        self.assertEqual((self.sound("trio"), self.session.undo_label),
+                         ({"defs": [second, first, third], "db": [-3, 0, -6]}, "trio: variant 1 removed"))
+
+    def test_the_last_variant_and_the_last_part_cannot_be_removed(self) -> None:
+        self.pick("both")
+        self.drag(self.label(1), button=3)
+        self.assertEqual(self.items()[0], ("Remove", True))
+        self.choose("Remove")
+        self.assertEqual((self.sound("both"), self.session.undo_label),
+                         ({"parts": BOTH["parts"][:1]}, "both: part 2 removed"))
+        self.drag(self.label(0), button=3)
+        self.assertEqual(self.items()[0], ("Remove", False))
+        # A press on what cannot be chosen does nothing, and the menu stays open.
+        self.drag(centre(self.ui.modal.rows[0]))
+        self.assertEqual((self.sound("both"), self.ui.modal is None), ({"parts": BOTH["parts"][:1]}, False))
+        self.ui.handle(Event("key", key="escape"))
+        # One sound made variants is one variant, which is not removed and has nowhere to move to.
+        self.pick("one")
+        self.drag(centre(self.panel.kinds.rect))
+        self.choose("VARIANTS")
+        self.drag(self.label(0), button=3)
+        self.assertEqual(self.items(), [("Remove", False), ("Move left", False), ("Move right", False)])
+
+    def test_a_part_dragged_by_its_label_saves_its_new_start_and_nothing_else(self) -> None:
+        self.pick("both")
+        before, scale = self.data(), self.view.map.scale
+        x, y = self.label(1)
+        by = round(0.1 * scale)
+        start = on_tick(0.1 + by / scale)
+        self.drag((x, y), (x + by // 2, y), (x + by, y + 30))
+        self.assertEqual((start, self.sound("both"), differing(before, self.data()), self.session.undo_label),
+                         (0.2, {"parts": [BOTH["parts"][0], [0.2, BOTH["parts"][1][1]]]}, ["sounds.both.parts"],
+                          "both: part 2 moved to 0.2 s"))
+        # It is the part the hand is in. A press on a label that is let go where it was saves nothing.
+        self.assertEqual((self.view.sound, self.view.busy), (1, False))
+        self.drag(self.label(0))
+        self.assertEqual((self.session.undo_label, self.view.sound), ("both: part 2 moved to 0.2 s", 0))
+        # Dragged past the start of the clock, a part starts at second 0.
+        x, y = self.label(1)
+        self.drag((x, y), (x - 2000, y))
+        self.assertEqual((self.sound("both")["parts"][1][0], self.session.undo_label),
+                         (0, "both: part 2 moved to 0 s"))
+
+    def test_a_part_is_added_at_the_end_or_where_the_ruler_is_clicked_with_ctrl_and_copied_by_its_menu(self) -> None:
+        self.pick("both")
+        low, high = (part[1] for part in BOTH["parts"])
+        # The sign adds a copy of the part the hand is in, where the sound ends: 14 ticks in.
+        self.drag(self.plus())
+        self.assertEqual((self.sound("both")["parts"][2:], self.session.undo_label, self.view.sound),
+                         ([[on_tick(14 / 60), low]], "both: part 3 added at 0.233333 s", 2))
+        self.drag(self.label(1))
+        at = self.ruler(0.05)
+        self.drag(at, mods=("ctrl",))
+        self.assertEqual((self.sound("both")["parts"][3:], self.session.undo_label, self.view.sound),
+                         ([[0.05, high]], "both: part 4 added at 0.05 s", 3))
+        # Without ctrl a click in the ruler adds nothing.
+        self.drag(at)
+        self.assertEqual(len(self.sound("both")["parts"]), 4)
+        self.drag(self.label(0), button=3)
+        self.assertEqual([text for text, _ in self.items()], ["Remove", "Copy as a new part", "Level (-3 dB)..."])
+        self.choose("Copy")
+        self.assertEqual((self.sound("both")["parts"][4:], self.session.undo_label, self.view.sound),
+                         ([[0, low]], "both: part 1 copied as part 5", 4))
+
+    def test_the_level_of_a_part_is_typed_in_a_box_over_its_label(self) -> None:
+        self.pick("both")
+        self.drag(self.label(1), button=3)
+        self.choose("Level (0 dB)")
+        self.assertEqual(self.ui.modal.text, "")
+        self.type("-6")
+        self.assertEqual((self.sound("both")["parts"][1][1], self.session.undo_label),
+                         ({**BOTH["parts"][1][1], "db": -6}, "both: part 2 level -6 dB"))
+        # What is no number is said and saves nothing, and an empty box takes the level out of the file.
+        for typed, saved, label, message in (("-", -6, "both: part 2 level -6 dB", "both: '-' is no number"),
+                                             ("", None, "both: part 2 level taken out", "")):
+            self.drag(self.label(1), button=3)
+            self.choose("Level (-6 dB)")
+            self.type(typed)
+            self.assertEqual((self.sound("both")["parts"][1][1].get("db"), self.session.undo_label,
+                              self.session.message), (saved, label, message))
+
+    def test_a_border_of_a_held_sound_is_dragged_to_its_start_or_its_loop_and_stops_where_the_note_ends(self) -> None:
+        self.pick("drone")
+        before = self.data()
+
+        def pull(ticks: float, by: float) -> None:
+            """Drag the border that stands so many ticks into the clock by so many ticks."""
+            seen = self.view.map
+            x, y = seen.x(ticks / 60), seen.names[1] + 2
+            self.drag((x, y), (x + round(by * seen.scale / 60), y))
+
+        pull(6, 2)
+        self.assertEqual((self.sound("drone")["held"]["start"], differing(before, self.data()),
+                          self.session.undo_label), (8, ["sounds.drone.held.start"], "drone: loop starts at tick 8"))
+        pull(38, -10)
+        self.assertEqual((self.sound("drone")["held"]["loop"], self.session.undo_label),
+                         (20, "drone: loop 20 ticks long"))
+        # The note has room for 62 ticks: after a start of 8, the loop is no longer than 54.
+        pull(28, 500)
+        self.assertEqual((self.sound("drone")["held"], self.session.undo_label, self.session.message),
+                         ({**DRONE["held"], "start": 8, "loop": 54}, "drone: loop 54 ticks long", ""))
+        # And the start is dragged no further than leaves the loop in the note.
+        pull(8, 500)
+        self.assertEqual(self.sound("drone")["held"]["start"], 8)
+
+    def test_the_join_and_the_let_go_of_a_held_sound_are_two_knobs_of_the_bar(self) -> None:
+        bar = self.panel.bar
+        self.assertEqual((bar.join.visible, bar.let_go.visible), (False, False))
+        self.pick("drone")
+        self.assertEqual([(knob.visible, knob.text, knob.value, knob.show(knob.value), bool(knob.help))
+                          for knob in (bar.join, bar.let_go)],
+                         [(True, "JOIN", 3, "3 TICKS", True), (True, "LET GO", 4, "4 TICKS", True)])
+        labels = []
+        for knob, up in ((bar.join, 10), (bar.let_go, 10), (bar.join, 60)):
+            x, y = centre(knob.rect)
+            self.drag((x, y), (x, y - up))
+            labels.append(self.session.undo_label)
+        # The join is kept no longer than the start, which is 6 ticks: turned further, nothing more is saved.
+        self.assertEqual(labels, ["drone: loop joined over 6 ticks", "drone: let go in 10 ticks",
+                                  "drone: let go in 10 ticks"])
+        self.assertEqual((self.sound("drone")["held"], bar.join.value),
+                         ({**DRONE["held"], "join": 6, "let_go": 10}, 6))
+
+    def test_the_longest_time_is_set_in_the_ruler_dragged_by_its_line_and_taken_away(self) -> None:
+        before = self.data()
+        self.drag(self.ruler(0.1), button=3)
+        self.assertEqual(self.items(), [("Set a longest time here", True), ("No longest time", False)])
+        self.choose("Set")
+        self.assertEqual((self.sound("one"), self.session.undo_label, self.view.limit),
+                         ({**MIXED["sounds"]["one"], "max_seconds": 0.1}, "one: longest time 0.1 s", 0.1))
+        # The line stands at that second, and is dragged by its grip in the ruler to another.
+        x, y = self.ruler(0.1)
+        self.drag((x, y), (x + round(0.05 * self.view.map.scale), y))
+        self.assertEqual((self.sound("one")["max_seconds"], self.session.undo_label, self.view.limit),
+                         (0.15, "one: longest time 0.15 s", 0.15))
+        # The clock goes on to a line that stands past the end of the sound.
+        self.assertAlmostEqual(self.view.seconds, 0.15 * 1.05)
+        self.drag(self.ruler(0.02), button=3)
+        self.assertEqual(self.items()[1], ("No longest time", True))
+        self.choose("No longest time")
+        self.assertEqual((self.data(), self.session.undo_label, self.view.limit),
+                         (before, "one: no longest time", None))
+
+    def test_the_other_limits_are_numbers_typed_from_the_menu_of_the_heading(self) -> None:
+        self.drag(centre(self.panel.limits.rect))
+        self.assertEqual([text for text, _ in self.items()],
+                         ["Longest time (none)...", "Furthest off zero (0.002, the usual)...",
+                          "Brightest (0.3, the usual)..."])
+        self.choose("Brightest")
+        self.type("0.5")
+        self.drag(centre(self.panel.limits.rect))
+        self.choose("Furthest")
+        self.type("0.01")
+        self.assertEqual((self.sound("one"), self.session.undo_label),
+                         ({**MIXED["sounds"]["one"], "max_bright": 0.5, "max_dc": 0.01}, "one: furthest off zero 0.01"))
+        self.drag(centre(self.panel.limits.rect))
+        self.assertEqual(self.items()[2], ("Brightest (0.5)...", True))
+        self.choose("Brightest")
+        self.type("")
+        self.assertEqual((self.sound("one"), self.session.undo_label),
+                         ({**MIXED["sounds"]["one"], "max_dc": 0.01}, "one: brightest as usual"))
+
+    def test_a_change_from_outside_waits_while_a_handle_is_dragged_and_the_wave_is_stale_until_its_render(self) -> None:
+        self.pick("both")
+        x, y = self.label(1)
+        by = round(0.1 * self.view.map.scale)
+        self.mouse("down", (x, y))
+        self.mouse("move", (x + by, y))
+        self.outside(lambda sounds: sounds["both"]["parts"][0][1].update(db=-9))
+        self.panel.update()
+        # The view goes on with the entry it was shown: the level in the menu of part 1 would still be -3.
+        self.assertEqual((self.view.busy, self.session.message, self.session.model.project.sounds["both"]["parts"][0]
+                          [1]["db"]), (True, "changed outside: both", -9))
+        self.mouse("up", (x + by, y))
+        self.assertEqual((self.sound("both")["parts"], self.session.message),
+                         ([[0, {**BOTH["parts"][0][1], "db": -9}], [0.2, BOTH["parts"][1][1]]], f"both {MEANWHILE}"))
+        self.assertEqual((self.view.busy, self.view.stale), (False, True))
+        self.rendered()
+        self.assertFalse(self.view.stale)
 
 
 if __name__ == "__main__":

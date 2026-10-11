@@ -48,12 +48,22 @@ AFTER = "AFTER"
 LOUD = "LOUD"
 AGAIN = "AGAIN"
 BRIGHT = "BRIGHT"
+#: What the two lengths of a held sound are called that have no handle on its clock: the ticks at the end of its
+#: loop that are faded into what led up to it (its `join`), and the ticks its loop takes to die away once it is
+#: let go (its `let_go`). And what each says of itself.
+JOIN = "JOIN"
+LET_GO = "LET GO"
+JOIN_HELP = "how many ticks at the end of the loop fade into what came before it, so that it goes round without a click"
+LET_GO_HELP = "how many ticks the loop takes to die away once the sound is let go"
 
 #: The travel of each knob: its lowest value, its highest, and how many steps there are between them. A project
 #: may hold any number for each, so the travels are chosen here. A level goes in half decibels up to the 3 that
 #: bring a sound to full scale, the seconds of an echo in hundredths up to a second, its two shares in
-#: hundredths, the second up to the most the engine lets come back, and its low-pass in hundreds of hertz.
+#: hundredths, the second up to the most the engine lets come back, and its low-pass in hundreds of hertz. The
+#: two lengths of a held sound go in whole ticks, up to half a second and up to a second.
 LEVELS = (-30.0, 3.0, 66)
+JOINS = (0.0, 30.0, 30)
+LET_GOS = (0.0, 60.0, 60)
 AFTERS = (0.01, 1.0, 99)
 LOUDS = (0.0, 1.0, 100)
 AGAINS = (0.0, 0.95, 95)
@@ -66,8 +76,10 @@ ABSENT = {"feedback": 0.3, "mix": 0.3, "lp": 3000}
 #: The parts that give way in a bar too narrow for all of them, the first first.
 DROPPED = (("after", "loud", "again", "bright"), ("level",), ("word",), ("echo",), ("inst",), ("add", "drop"),
            ("voices",))
+#: The two knobs of a held sound, which stand after the level. They give way after the knobs of the echo.
+LENGTHS = ("join", "let_go")
 #: The parts that are knobs: they are as high as the bar, and the others as high as a button.
-KNOBS = ("level", "after", "loud", "again", "bright")
+KNOBS = ("level", *LENGTHS, "after", "loud", "again", "bright")
 #: What the knob of the echo's seconds says of itself, and what it says while the echo has several times.
 AFTER_HELP = "how many seconds after itself the sound comes back"
 SEVERAL_HELP = "this echo has several times, which are left as the file has them"
@@ -88,23 +100,31 @@ def db_text(value: float) -> str:
     return f"{plain(value)} DB"
 
 
-def arrange(rect: Rect, voices: int = 1, several: bool = False) -> dict[str, Rect]:
+def ticks_text(value: float) -> str:
+    """A number of ticks as a knob shows it."""
+    return f"{plain(value)} TICKS"
+
+
+def arrange(rect: Rect, voices: int = 1, several: bool = False, held: bool = False) -> dict[str, Rect]:
     """Where the parts of the bar go in its rectangle, each by what it is called, and each cut to the bar.
 
     From the left stand "word", for a sound that is one of `several`, then "voices" with a button for each of
     so many voices and "add" and "drop" close after it, with "voice" over the three, "inst" with "heading" over
-    it, "level", "echo", and the knobs of the echo: "after", "loud", "again" and "bright". A bar too narrow for
-    all of them drops parts in the order of `DROPPED` until the rest fit, so no two ever overlap. A part that
-    was dropped has no width, and neither has a heading with nothing under it.
+    it, "level", "echo", and the knobs of the echo: "after", "loud", "again" and "bright". For a `held` sound
+    "join" and "let_go" stand between the level and the echo, and for any other there are no such parts. A bar
+    too narrow for all of them drops parts in the order of `DROPPED` until the rest fit, those two after the
+    knobs of the echo, so no two ever overlap. A part that was dropped has no width, and neither has a heading
+    with nothing under it.
     """
     x, y, w, h = rect
     widths = {"word": WORD_W, "voices": voices * VOICE_W, "add": VOICE_W, "drop": VOICE_W, "inst": INST_W,
-              "level": KNOB_W, "echo": Font.width(ECHO) + 2 * theme.PAD, "after": KNOB_W, "loud": KNOB_W,
-              "again": KNOB_W, "bright": KNOB_W}
+              "level": KNOB_W, **({part: KNOB_W for part in LENGTHS} if held else {}),
+              "echo": Font.width(ECHO) + 2 * theme.PAD, "after": KNOB_W, "loud": KNOB_W, "again": KNOB_W,
+              "bright": KNOB_W}
     # The two buttons stand close after the voices they add to and take from.
     gaps = {"voices": theme.BUTTON_GAP, "add": theme.BUTTON_GAP}
     kept = [part for part in widths if several or part != "word"]
-    for group in DROPPED:
+    for group in (DROPPED[0], LENGTHS, *DROPPED[1:]):
         # What is kept takes its widths, and after each part but the last the gap to the next.
         if sum(widths[part] for part in kept) + sum(gaps.get(part, SPACE) for part in kept[:-1]) <= w:
             break
@@ -158,6 +178,9 @@ class SoundBar:
     window. From the left it has, for an entry of several sounds, the words for the one it is of, then `voices`
     with `add` and `drop`, `inst`, `level`, `echo`, and while the echo is on its knobs `after`, `loud`, `again`
     and `bright`. `voice` is the picked voice: the one whose instrument `inst` shows, and that `drop` removes.
+    A held sound has two knobs more after its level, `join` and `let_go`: its other two lengths are dragged on
+    its clock. Let go of, such a knob is handed to `lengthed` as the key of the length, its ticks, and a few
+    words for the list of what can be undone.
 
     The bar saves nothing. What a widget makes of the sound is handed to `edited` as the new definition and a
     few words for the list of what can be undone, and a level to `levelled` as the `db` of the entry, None for
@@ -176,20 +199,23 @@ class SoundBar:
 
     def __init__(self, panel: Panel, edited: Callable[[dict, str], object],
                  levelled: Callable[[object, str], object], voiced: Callable[[int], object] | None = None,
-                 clock: Callable[[], float] = time.perf_counter) -> None:
+                 clock: Callable[[], float] = time.perf_counter,
+                 lengthed: Callable[[str, float, str], object] | None = None) -> None:
         """`panel` is the panel the widgets are added through. `clock` times a run of the wheel on a knob."""
         self.session = panel.session
         self.edited = edited
         self.levelled = levelled
         self.voiced = voiced
+        self.lengthed = lengthed
         nowhere = (0, 0, 0, 0)
 
-        def knob(text: str, travel: tuple[float, float, int], usual: float, settled: Callable[[float], object],
-                 help: str, show: Callable[[float], str] = plain) -> Knob:
-            """A knob of the bar: a right click puts it back to `usual`, and let go of, it is `settled`."""
+        def knob(text: str, travel: tuple[float, float, int], usual: float | None,
+                 settled: Callable[[float], object], help: str, show: Callable[[float], str] = plain) -> Knob:
+            """A knob of the bar: a right click puts it back to `usual` where it has one, and let go of, it is
+            `settled`."""
             low, high, steps = travel
-            return panel.add(Knob(nowhere, usual, low, high, default=usual, steps=steps, text=text, show=show,
-                                  help=help, clock=clock, settled=settled))
+            return panel.add(Knob(nowhere, low if usual is None else usual, low, high, default=usual, steps=steps,
+                                  text=text, show=show, help=help, clock=clock, settled=settled))
 
         def echo(text: str, travel: tuple[float, float, int], key: str, words: str, help: str,
                  show: Callable[[float], str] = plain) -> Knob:
@@ -211,6 +237,10 @@ class SoundBar:
         self.level = knob(LEVEL, LEVELS, 0, self._level,
                           "how loud the sound is, in decibels from the level every sound is brought to: a right "
                           "click is 0 again", db_text)
+        self.join = knob(JOIN, JOINS, None, lambda value: self._length("join", value, "loop joined over"),
+                         JOIN_HELP, ticks_text)
+        self.let_go = knob(LET_GO, LET_GOS, None, lambda value: self._length("let_go", value, "let go in"),
+                           LET_GO_HELP, ticks_text)
         self.echo = panel.add(Toggle(nowhere, ECHO, changed=self._switch,
                                      help="the whole sound comes back after itself, quieter each time"))
         self.after = echo(AFTER, AFTERS, "time", "after", AFTER_HELP, seconds_text)
@@ -235,12 +265,13 @@ class SoundBar:
         #: The widgets by the part of the bar each stands in, and those of them that are knobs.
         self._widgets = {"word": self.word, "voice": self.heading_voice, "voices": self.voices, "add": self.add,
                          "drop": self.drop, "heading": self.heading, "inst": self.inst, "level": self.level,
-                         "echo": self.echo, "after": self.after, "loud": self.loud, "again": self.again,
-                         "bright": self.bright}
+                         "join": self.join, "let_go": self.let_go, "echo": self.echo, "after": self.after,
+                         "loud": self.loud, "again": self.again, "bright": self.bright}
         self._knobs = tuple(self._widgets[part] for part in KNOBS)
         self._rect: Rect = nowhere
-        self._parts = arrange(nowhere)
+        self._parts: dict[str, Rect] = {}
         self._on = False
+        self._lay()
         self._see()
 
     @property
@@ -296,6 +327,8 @@ class SoundBar:
             self.inst.picked = names.index(inst) if named else 0
             level = entry.get("db", 0)
             self.level.value = level[self.index] if isinstance(level, list) else level
+            for key in LENGTHS if "held" in entry else ():
+                self._widgets[key].value = entry["held"][key]
             echo = defn.get("echo")
             self.echo.is_on = echo is not None
             # An echo of several times has no one number for the knob of its seconds.
@@ -315,7 +348,10 @@ class SoundBar:
     def _lay(self) -> None:
         """Give each widget its rectangle: its part of the bar, laid out for the voices of the sound that is shown."""
         voices = len(self._defn["voices"]) if self._defn else 1
-        self._parts = arrange(self._rect, voices, bool(self.word.text))
+        self._parts = arrange(self._rect, voices, bool(self.word.text), bool(self._defn) and "held" in self._entry)
+        # A knob of a held sound has no part in the bar of any other, and no width.
+        for part in LENGTHS:
+            self._parts.setdefault(part, self._parts["word"][:2] + (0, 0))
         for part, widget in self._widgets.items():
             widget.rect = self._parts[part]
 
@@ -387,6 +423,12 @@ class SoundBar:
         value = tidy(value)
         self._make(lambda defn: soundedit.with_echo(defn, {**defn.get("echo", {}), key: value}),
                    f"echo {words} {text(value)}")
+
+    def _length(self, key: str, value: float, words: str) -> None:
+        """Hand on the ticks a knob of a held sound was left at, as its length `key`, and show what is then held."""
+        if self.lengthed is not None:
+            self.lengthed(key, tidy(value), f"{words} {ticks_text(tidy(value)).lower()}")
+        self._read()
 
     def _level(self, value: float) -> None:
         """Hand on the level the knob was left at: the entry's own, or that of this variant where each has one."""

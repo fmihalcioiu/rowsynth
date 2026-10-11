@@ -135,6 +135,19 @@ class Sums(unittest.TestCase):
         self.assertEqual((seconds_text(0.09), hertz_text(4000), db_text(-6.5), db_text(0)),
                          ("0.09 S", "4000 HZ", "-6.5 DB", "0 DB"))
 
+    def test_a_held_sound_has_two_knobs_more_after_its_level_which_give_way_after_those_of_the_echo(self) -> None:
+        parts = arrange(BAR, 1, True, True)
+        self.assertEqual([parts[part] for part in ("level", "join", "let_go", "echo", "bright")],
+                         [(206, 29, 47, 37), (259, 29, 47, 37), (312, 29, 47, 37), (365, 41, 31, 13),
+                          (561, 29, 47, 37)])
+        # Any other sound has no such parts, and its bar is as it was.
+        self.assertEqual(("join" in arrange(BAR, 1, True), arrange(BAR, 1, True)["echo"]), (False, (259, 41, 31, 13)))
+        narrow = arrange((8, 29, 400, 37), 1, True, True)
+        self.assertEqual([narrow[part][2] for part in ("after", "bright", "join", "let_go", "level", "echo")],
+                         [0, 0, 47, 47, 47, 31])
+        self.assertEqual([arrange((8, 29, 300, 37), 1, True, True)[part][2] for part in ("join", "let_go", "level")],
+                         [0, 0, 47])
+
     def test_a_narrow_bar_drops_the_knobs_of_the_echo_first_and_the_voices_last_and_no_two_parts_overlap(self) -> None:
         dropped = {}
         for wide in (507, 506, 295, 294, 242, 241, 177, 176, 140, 139, 56, 55, 26, 25, 0):

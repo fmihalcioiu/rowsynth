@@ -5,18 +5,23 @@ import math
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
-from ..bank import entry_kind
+from ..bank import entry_kind, render_entry
+from ..checks.sounds import _BRIGHT, _DC
 from ..errors import RowSynthError
+from ..note import DEFAULT_RATE
 from . import soundbar, soundedit, soundview, theme
 from .font import Font
 from .layout import Rect
 from .panels import Panel, within
+from .popups import Item, Menu, ask
 from .session import HOLD
 from .soundbar import SoundBar
-from .ui import Button, Event, Ui, draw_button
-from .wave import KINDS, SoundView
+from .ui import Button, Event, Pos, Ui, draw_button
+from .wave import KINDS, LIMIT, LIMIT_STEP, PART, RULER, SoundView, called, on_tick
 
 if TYPE_CHECKING:
+    import numpy as np
+
     from ..project import Project
     from .canvas import Canvas
     from .model import Model
@@ -43,6 +48,30 @@ HOLD_HELP = "press and keep pressed to hear the sound held, and let go to hear i
 #: What is said, after its name, of a sound whose edit ended after it was changed outside.
 MEANWHILE = "was changed outside while it was edited here: this edit stands, and undo brings the other back"
 
+#: What each kind of entry is called on the button of the heading and in its menu, what a sound is said to
+#: have been made, and what the button says of itself.
+KIND_WORDS = {"def": "ONE", "defs": "VARIANTS", "parts": "PARTS", "held": "HELD"}
+MADE = {"def": "made one sound", "defs": "made variants", "parts": "made parts", "held": "made a held sound"}
+KIND_HELP = "what kind of sound this is: press to make it one sound, variants, parts on a timeline or a held sound"
+#: The word on the button of the limits, and what it says of itself.
+LIMITS_WORD = "LIMITS"
+LIMITS_HELP = "what the checks hold this sound to: how long it may last, how far off zero and how bright it may be"
+#: The limits an entry can be held to, each as the key of the file, its plain words, the unit its number is in,
+#: what the checks go by where the entry has none, and what the box says in which its number is typed.
+LIMITS = (
+    ("max_seconds", "Longest time", " s", None, "the longest the sound may last, in seconds: empty is no limit"),
+    ("max_dc", "Furthest off zero", "", _DC,
+     "how far the mean of the wave may be off zero before the checks say so: empty is the usual"),
+    ("max_bright", "Brightest", "", _BRIGHT,
+     "the share of the energy that may be above 4 kHz before the checks say so: empty is the usual"))
+#: The least room the heading keeps for its words: one too narrow for that has neither of the two buttons.
+HEAD_WORDS = 160
+#: The characters a number is typed with, and how many of them a box takes.
+NUMBER = "0123456789.-"
+MOST_NUMBER = 10
+#: What a border of a held sound is said to have been dragged to, before the ticks and after them.
+BORDERS = {"start": ("loop starts at tick", ""), "loop": ("loop", " ticks long")}
+
 # What stands for a render that has not come: it is no render, and not the None of one the engine refused.
 _WAITING: dict = {}
 
@@ -61,6 +90,45 @@ def words(kind: str, count: int) -> str:
     if kind in COUNTED:
         return f"{count} {COUNTED[kind][count != 1]}"
     return "held" if kind == "held" else ""
+
+
+def lost(entry: dict, to: str) -> str:
+    """What an entry lets go of when it is made an entry of another kind, in a few words: "" for nothing.
+
+    One sound keeps the first of several, and a held sound the first two. A held sound that is made anything
+    else has no loop any more, and parts that are made anything else all start together.
+    """
+    kind = entry_kind(entry)
+    if kind == to:
+        return ""
+    count = {"def": 1, "held": 2}.get(kind) or len(entry[kind])
+    keeps = {"def": 1, "held": 2}.get(to, count)
+    if keeps < count:
+        if kind == "held":
+            return "keeps the note only"
+        one, more = COUNTED[kind]
+        return f"keeps {one} 1 only" if keeps == 1 else f"keeps {more} 1 and 2 only"
+    if kind == "held":
+        return "drops the loop"
+    if kind == "parts" and any(at for at, _ in entry["parts"]):
+        return "drops where the parts start"
+    return ""
+
+
+def converted(entry: dict, kind: str, rate: int = DEFAULT_RATE) -> dict:
+    """An entry as an entry of another kind, as the rules of `soundedit` make one of it."""
+    if kind == "held":
+        return soundedit.as_held(entry, rate)
+    return {"def": soundedit.as_one, "defs": soundedit.as_variants, "parts": soundedit.as_parts}[kind](entry)
+
+
+def number(typed: str) -> int | float:
+    """The number that was typed in a box, a whole one with nothing after a point. What is none is refused."""
+    try:
+        value = float(typed)
+    except ValueError:
+        raise RowSynthError(f"{typed!r} is no number") from None
+    return int(value) if value == int(value) else value
 
 
 def zone(at: float, lengths: Sequence[float], rounds: int = 1) -> tuple[int, float]:
@@ -82,19 +150,28 @@ def zone(at: float, lengths: Sequence[float], rounds: int = 1) -> tuple[int, flo
 def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the things of the panel go in its rectangle, each by what it is called.
 
-    "head" is the box of the heading, along the top, and "hold" the button at the right end of that box. "box"
-    is the box under it, down to the foot. Inside that box, clear of its outline, "bar" runs along the top,
-    which is where the settings of a sound go as `soundbar.arrange` lays them out, and "view" is what is left
-    under it. Every one is cut to the panel.
+    "head" is the box of the heading, along the top, and "hold" the button at the right end of that box. Before
+    it stand "limits" and before that "kind", the two buttons of a sound that can be changed: a heading that
+    would keep less than `HEAD_WORDS` for its words has neither, and they have no width. "box" is the box under
+    it, down to the foot. Inside that box, clear of its outline, "bar" runs along the top, which is where the
+    settings of a sound go as `soundbar.arrange` lays them out, and "view" is what is left under it. Every one
+    is cut to the panel.
     """
     x, y, w, h = rect
     wide, top = w - 2 * MARGIN, y + 2 * MARGIN + HEAD_H
     button = Font.width(HOLD_WORD) + 2 * theme.PAD
+    hold = x + w - MARGIN - button
+    limits = Font.width(LIMITS_WORD) + 2 * theme.PAD
+    kind = max(Font.width(word) for word in KIND_WORDS.values()) + 2 * theme.PAD
+    at = hold - HEAD_SPACE - limits
+    if at - theme.BUTTON_GAP - kind - HEAD_SPACE - x - MARGIN < HEAD_WORDS:
+        at, limits, kind = hold, 0, 0
     box = (x + MARGIN, top, wide, y + h - MARGIN - top)
     left, upper, inner = box[0] + PAD, box[1] + PAD, box[2] - 2 * PAD
     under = upper + soundbar.HEIGHT + BAR_GAP
     placed = {"head": (x + MARGIN, y + MARGIN, wide, HEAD_H),
-              "hold": (x + w - MARGIN - button, y + MARGIN, button, HEAD_H), "box": box,
+              "hold": (hold, y + MARGIN, button, HEAD_H), "limits": (at, y + MARGIN, limits, HEAD_H),
+              "kind": (at - (theme.BUTTON_GAP + kind if kind else 0), y + MARGIN, kind, HEAD_H), "box": box,
               "bar": (left, upper, inner, soundbar.HEIGHT),
               "view": (left, under, inner, box[1] + box[3] - PAD - under)}
     return {thing: within(place, rect) for thing, place in placed.items()}
@@ -149,6 +226,17 @@ class SoundPanel(Panel):
     shown when the hand has let go. A note that is placed, or moved to another key, is heard where its voice
     names its instrument.
 
+    What kind of entry a sound is, and what belongs to the kind, is changed here as well, each change one save
+    of the whole entry and one step. `kinds`, in the heading, shows the kind and opens a menu of the four: an
+    item says what the sound would let go of. The view tells of the rest. The sign after the labels adds a
+    variant or a part, a copy of the one the hand is in, and a click in the ruler with ctrl held adds a part
+    there. The right button on a label opens a menu: a variant is removed or moved, and a part is removed,
+    copied, or given its level in a box. The label of a part is dragged to where the part is to start, the
+    borders of a held sound to its start and its loop, and the line of the longest time to that. The right
+    button in the ruler sets a longest time or takes it away. `limits`, in the heading, opens a menu of all
+    three limits the checks go by, each typed as a number in a box: the bar has no room for them beside the
+    knobs of a held sound with an echo. The other two lengths of a held sound are knobs of the bar.
+
     `heading` is the kind in capitals and the name of what is shown, or None for nothing, and `words` what the
     heading says after them of a sound of several. `kind` is what the entry of a sound is, as `bank.entry_kind`
     names it. `refusal` is what the engine says of a sound it cannot read, and "" for one it can: the words
@@ -160,11 +248,15 @@ class SoundPanel(Panel):
         self.view = self.add(SoundView((0, 0, 0, 0), HELP))
         self.view.chosen, self.view.edited = self._choose, self._save
         self.view.sounded, self.view.refused = self._sound, self._refuse
+        self.view.added, self.view.asked = self._add, self._ask
+        self.view.handled, self.view.alone = self._handle, self._alone
         self.hold = self.add(Hold((0, 0, 0, 0), HOLD_WORD, self._press, self._let_go, HOLD_HELP))
+        self.kinds = self.add(Button((0, 0, 0, 0), KIND_WORDS[KINDS[0]], action=self._ask_kind, help=KIND_HELP))
+        self.limits = self.add(Button((0, 0, 0, 0), LIMITS_WORD, action=self._ask_limits, help=LIMITS_HELP))
         self.bar = SoundBar(self, lambda defn, label: self._save(self.view.sound, defn, label), self._level,
-                            self._voice)
+                            self._voice, lengthed=self._length)
         # Nothing has been looked at yet, so there is nothing for the view to show.
-        self.view.visible = self.hold.visible = False
+        self.view.visible = self.hold.visible = self.kinds.visible = self.limits.visible = False
         self.heading: tuple[str, str] | None = None
         self.words = ""
         self.kind = KINDS[0]
@@ -207,6 +299,7 @@ class SoundPanel(Panel):
         super().place(rect)
         self._places = arrange(rect)
         self.view.rect, self.hold.rect = self._places["view"], self._places["hold"]
+        self.kinds.rect, self.limits.rect = self._places["kind"], self._places["limits"]
         self.bar.place(self._places["bar"])
 
     def update(self, passed: float = 0.0) -> None:
@@ -234,10 +327,13 @@ class SoundPanel(Panel):
 
     def _turn(self) -> None:
         """Have the view on the window only with something to show, the button only with a held sound, and the
-        bar only with a sound that can be changed."""
+        bar and the two buttons of the kind and the limits only with a sound that can be changed."""
         self.view.visible = self.shown and self.showing
         self.hold.visible = self.view.visible and self.kind == "held"
-        self.bar.seen(self.view.visible and self._entry is not None)
+        changed = self.view.visible and self._entry is not None
+        self.bar.seen(changed)
+        self.kinds.visible = self.limits.visible = changed and self._places["kind"][2] > 0
+        self.kinds.text = KIND_WORDS[self.kind]
 
     def _look(self) -> None:
         """Read the picked thing where it, or the project, is another than the one that was read last."""
@@ -291,7 +387,8 @@ class SoundPanel(Panel):
         if waits and len(rows) not in (1, len(self._shapes)):
             rows = []
         rate = shown["rate"] if rows else self.session.model.rate
-        self.view.show(self._shapes, rows, rate, self.colour, self.kind, self._entry, waits and bool(rows))
+        self.view.show(self._shapes, rows, rate, self.colour, self.kind, self._entry, waits and bool(rows),
+                       held(self.session.model).instruments)
         self._wave = shown if rows else None
         self._settings()
 
@@ -344,6 +441,167 @@ class SoundPanel(Panel):
         except RowSynthError as error:
             return self._refuse(str(error))
         return self._put(entry, label, self.view.sound)
+
+    def _change(self, make: Callable[[dict], dict], label: str, hand: int | None = None) -> bool:
+        """Save the picked entry as a rule makes it of what the project holds now, and say whether it was saved.
+
+        `make` is given the entry and gives the new one, and `label` says what was done. What the rule refuses
+        is not saved, and the session is told why. Saved, the hand is in the sound `hand` of the entry, where
+        one is given. Where the entry is another by now than the one the view was shown, it was changed outside
+        while a handle was dragged here: the session is told, as for a note.
+        """
+        name = self.heading[1]
+        current = held(self.session.model).sounds.get(name)
+        if current is None:
+            return self._refuse("the project has no such sound any more")
+        try:
+            entry = make(current)
+        except RowSynthError as error:
+            return self._refuse(str(error))
+        meanwhile = current != self._entry
+        saved = self._put(entry, label, self.view.sound if hand is None else hand)
+        if saved and hand is not None:
+            self.view.sound = hand
+            self._settings()
+        if saved and meanwhile:
+            self.session.say(f"{name} {MEANWHILE}")
+        return saved
+
+    def _add(self, at: float | None) -> None:
+        """Save the entry with a variant or a part more, a copy of the one the hand is in, which the hand is then in.
+
+        A part starts at a second of the clock, and with None on the tick nearest to where the sound ends.
+        """
+        hand, count = self.view.sound, len(self._shapes)
+        if self.kind == "defs":
+            self._change(lambda entry: soundedit.variant_added(entry, hand), f"variant {count + 1} added", count)
+            return
+        if at is None:
+            at = on_tick(max(place + shape.seconds for _, place, shape in self._shapes))
+        self._change(lambda entry: soundedit.part_added(entry, at, hand), f"part {count + 1} added at {at:g} s",
+                     count)
+
+    def _handle(self, kind: str, which: int, value: float) -> None:
+        """Save what a handle of the view was dragged to: the start of a part, a border, or the longest time."""
+        model = self.session.model
+        instruments, rate = held(model).instruments, model.rate
+        if kind == PART:
+            self._change(lambda entry: soundedit.part_at(entry, which, value),
+                         f"part {which + 1} moved to {value:g} s")
+        elif kind == LIMIT:
+            self._limit("max_seconds", value)
+        else:
+            before, after = BORDERS[kind]
+            self._change(lambda entry: soundedit.held_with(entry, kind, value, instruments, rate),
+                         f"{before} {value:g}{after}")
+
+    def _length(self, key: str, value: float, label: str) -> bool:
+        """Save a length of the held sound that a knob of the bar was left at, kept inside what its note has room for.
+
+        Whether it was saved.
+        """
+        model = self.session.model
+        instruments, rate = held(model).instruments, model.rate
+        return self._change(lambda entry: soundedit.held_with(entry, key, value, instruments, rate), label)
+
+    def _limit(self, key: str, value: float | None) -> bool:
+        """Save a limit of the entry, or with None take it out of the file."""
+        words, unit = next((words.lower(), unit) for name, words, unit, _, _ in LIMITS if name == key)
+        none = "no longest time" if key == "max_seconds" else f"{words} as usual"
+        return self._change(lambda entry: soundedit.with_setting(entry, key, value),
+                            none if value is None else f"{words} {value:g}{unit}")
+
+    def _alone(self, which: int) -> np.ndarray | None:
+        """The wave of one part of the picked sound by itself, at its own level. None where the engine refuses it."""
+        model = self.session.model
+        try:
+            return render_entry(held(model).sound(self.heading[1])["parts"][which][1], model.rate)[0]
+        except (RowSynthError, LookupError):
+            return None
+
+    def _menu(self, items: Sequence[Item | None], at: Pos) -> None:
+        """Open a menu at a place, over everything else. Each item stands for what is done when it is chosen."""
+        self.ui.open(Menu(items, at, chosen=lambda act: act()))
+
+    def _type(self, rect: Rect, value: float | None, entered: Callable[[float | None], object], help: str) -> None:
+        """Open a box over a rectangle that holds a number, or nothing for None, of which `help` says what it is.
+
+        On enter `entered` is given the number in the box, and None for an empty one. What is no number is
+        handed to nobody, and the session says so.
+        """
+        def done(typed: str) -> None:
+            try:
+                entered(number(typed) if typed else None)
+            except RowSynthError as error:
+                self._refuse(str(error))
+
+        ask(self.ui, rect, "" if value is None else f"{value:g}", done, allowed=NUMBER.__contains__,
+            most=MOST_NUMBER, help=f"{help}, enter sets it, escape leaves it")
+
+    def _ask_kind(self) -> None:
+        """Open the menu of the four kinds under its button. An item says what the sound would let go of."""
+        entry, rate = self._entry, self.session.model.rate
+
+        def item(kind: str) -> Item:
+            drops = lost(entry, kind)
+            return Item(f"{KIND_WORDS[kind]} ({drops})" if drops else KIND_WORDS[kind],
+                        lambda: self._change(lambda entry: converted(entry, kind, rate), MADE[kind], 0),
+                        enabled=kind != self.kind)
+
+        x, y, _, h = self.kinds.rect
+        self._menu([item(kind) for kind in KINDS], (x, y + h))
+
+    def _ask_limits(self) -> None:
+        """Open the menu of the limits under its button: each item opens a box that holds the number of one."""
+        entry = self._entry
+
+        def item(key: str, words: str, unit: str, usual: float | None, help: str) -> Item:
+            shown = f"{entry[key]:g}{unit}" if key in entry else "none" if usual is None else f"{usual:g}, the usual"
+            return Item(f"{words} ({shown})...", lambda: self._type(
+                self.limits.rect, entry.get(key), lambda value: self._limit(key, value), help))
+
+        x, y, _, h = self.limits.rect
+        self._menu([item(*limit) for limit in LIMITS], (x, y + h))
+
+    def _ask(self, what: str, which: int, second: float, pos: Pos) -> None:
+        """Open the menu the view asks for at the mouse: that of the ruler, or of the label of a variant or a part.
+
+        The ruler sets the longest time to its second, in hundredths, or takes it away. A variant is removed
+        or moved one place, and a part is removed, copied as a part that starts with it, or given its level in a
+        box over its label. What cannot be done is not enabled: the last of them is not removed, and none is
+        moved past the first or the last.
+        """
+        entry, count, name = self._entry, len(self._shapes), called(self.kind, which)
+        removed = soundedit.variant_dropped if self.kind == "defs" else soundedit.part_dropped
+        remove = Item("Remove", lambda: self._change(lambda entry: removed(entry, which), f"{name} removed"),
+                      enabled=count > 1)
+        if what == RULER:
+            at = round(max(LIMIT_STEP, second), 2)
+            items = [Item("Set a longest time here", lambda: self._limit("max_seconds", at)),
+                     Item("No longest time", lambda: self._limit("max_seconds", None),
+                          enabled="max_seconds" in entry)]
+        elif self.kind == "defs":
+            def move(way: str, to: int) -> Item:
+                return Item(f"Move {way}", lambda: self._change(
+                    lambda entry: soundedit.variant_moved(entry, which, to), f"{name} moved {way}", to),
+                    enabled=0 <= to < count)
+
+            items = [remove, move("left", which - 1), move("right", which + 1)]
+        else:
+            start, level = entry["parts"][which][0], entry["parts"][which][1].get("db")
+
+            def levelled(db: float | None) -> None:
+                self._change(lambda entry: soundedit.part_level(entry, which, db),
+                             f"{name} level taken out" if db is None else f"{name} level {db:g} dB")
+
+            items = [remove,
+                     Item("Copy as a new part", lambda: self._change(
+                         lambda entry: soundedit.part_added(entry, start, which),
+                         f"{name} copied as part {count + 1}", count)),
+                     Item(f"Level ({level or 0:g} dB)...", lambda: self._type(
+                         self.view.tab(which), level, levelled,
+                         f"the level of {name}, in decibels from the level every sound is brought to"))]
+        self._menu(items, pos)
 
     def _put(self, entry: dict, label: str, index: int) -> bool:
         """Put an entry in the file in the place of the picked one, as one step, and show what the file then holds.
@@ -446,8 +704,9 @@ class SoundPanel(Panel):
                 canvas.box(box, theme.PANEL)
                 canvas.frame(box, theme.LINE)
             x, y, w, h = places["head"]
-            # The words end before the button, where there is one.
-            last = places["hold"][0] - HEAD_SPACE if self.hold.visible else x + w - HEAD_PAD
+            # The words end before the first button there is.
+            last = min([x + w - HEAD_PAD, *(button.rect[0] - HEAD_SPACE for button in (self.kinds, self.hold)
+                                             if button.visible)])
             at = x + HEAD_PAD
             for text, colour in zip((*self.heading, self.words), (theme.DIM, self.colour, theme.DIM)):
                 canvas.text_in(text, (at, y, max(0, last - at), h), colour)
