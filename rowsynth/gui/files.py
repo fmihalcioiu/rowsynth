@@ -51,7 +51,7 @@ CHOOSER_HELP = "a double press goes into a folder and takes a file: enter takes 
 
 #: The things of the FILE menu that stand above the files opened last, each as its text and what the app is
 #: asked for. A thing that is added here needs the app to know it by that word.
-MENU = (("New project...", "new"), ("Open...", "open"), ("Save a copy as...", "copy"))
+MENU = (("New project...", "new"), ("Open...", "open"), ("Save a copy as...", "copy"), ("Export...", "export"))
 #: The last thing of the FILE menu, under the files opened last.
 CLOSE = ("Close", "close")
 

@@ -23,6 +23,7 @@ from rowsynth.bank import render_entry
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import files, layout, start, theme
 from rowsynth.gui import model as gui_model
+from rowsynth.gui.exports import Export
 from rowsynth.gui.lists import List
 from rowsynth.gui.popups import Menu
 from rowsynth.gui.ui import Event, Ui
@@ -403,14 +404,23 @@ class InTheWindow(unittest.TestCase):
         self.assertEqual((type(menu), menu.rect[:2]), (Menu, (x, y + h)))
         here = self.folder.name + os.sep
         self.assertEqual([item and item.text for item in menu.items],
-                         ["New project...", "Open...", "Save a copy as...", None, here + "one.json",
-                          here + "two.json", None, "Close"])
+                         ["New project...", "Open...", "Save a copy as...", "Export...", None,
+                          here + "one.json", here + "two.json", None, "Close"])
         for item in menu.items:
             if item is not None:
                 menu.chosen(item.value)
         self.assertEqual(asked.mock_calls, [mock.call.new(), mock.call.open(), mock.call.copy(),
-                                            mock.call.recent(str(one)), mock.call.recent(str(two)),
-                                            mock.call.close()])
+                                            mock.call.export(), mock.call.recent(str(one)),
+                                            mock.call.recent(str(two)), mock.call.close()])
+
+    def test_export_opens_the_window_that_writes_files_over_the_open_project_and_does_nothing_with_none(self) -> None:
+        app = start(self.saved("one.json"), settings=self.settings)
+        app.do(("export",))
+        self.assertIsInstance(app.ui.modal, Export)
+        app.ui.close(app.ui.modal)
+        app.leave()
+        app.do(("export",))
+        self.assertNotIsInstance(app.ui.modal, Export)
 
 
 if __name__ == "__main__":

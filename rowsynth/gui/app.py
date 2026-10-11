@@ -14,6 +14,7 @@ from . import files, layout, sprites, theme
 from .audio import Player
 from .browser import Browser
 from .canvas import Canvas
+from .exports import open_export
 from .font import Font
 from .inspector import Inspector
 from .layout import Rect
@@ -119,7 +120,7 @@ class App:
         self.canvas = Canvas(self.screen.art, Font(sprites.load("font")), sprites.load("icons"))
         self.actions: dict[str, Callable[..., object]] = {
             "new": self.new, "open": self.browse, "copy": self.keep_copy, "recent": self.again,
-            "example": self.example, "close": self.leave}
+            "example": self.example, "export": self.export, "close": self.leave}
         self.model: Model | None = None
         self.session: Session | None = None
         self.first: files.First | None = None
@@ -241,6 +242,11 @@ class App:
         """Do a thing of the FILE menu or of the first screen: `what` is its word, and what goes with the word."""
         word, *more = what
         self.actions[word](*more)
+
+    def export(self) -> None:
+        """Open the window that writes files, for the project that is open. With none open there is nothing to write."""
+        if self.session is not None:
+            open_export(self.ui, self.session)
 
     def say(self, words: str) -> None:
         """Put words in the status bar: through the session where a project is open, and as the app's own if not."""
