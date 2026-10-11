@@ -697,6 +697,18 @@ class Editing(unittest.TestCase):
         self.assertEqual(self.told, [("kit", seen, "3 hits placed")])
         self.assertEqual((self.steps.notes("kit"), self.ui.held), (KIT, None))
 
+    def test_the_steps_are_busy_during_a_drag_and_during_a_run_of_the_wheel(self) -> None:
+        self.assertFalse(self.steps.busy)
+        self.mouse("down", 0, 5, 1)
+        self.assertTrue(self.steps.busy)
+        self.mouse("up", 0, 5, 1)
+        self.assertEqual((self.steps.busy, len(self.told)), (False, 1))
+        self.wheel(1, 4, 1)
+        self.assertTrue(self.steps.busy)
+        self.now += WHEEL_WAIT
+        self.steps.update()
+        self.assertEqual((self.steps.busy, len(self.told)), (False, 2))
+
     def test_a_press_and_release_that_leave_the_notes_as_they_were_call_nothing(self) -> None:
         # The right button on empty squares, clicked and dragged.
         self.click(1, 0, 3)

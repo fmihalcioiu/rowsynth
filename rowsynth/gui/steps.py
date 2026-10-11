@@ -349,12 +349,12 @@ class Steps(Widget):
     letter of its channel has at that row, and a drag puts none in the squares it passes after that where
     another letter has one. Such a square is drawn empty with a dot in it, where the hits can be changed.
 
-    Nothing is saved here. While a gesture is under way the steps show what it would give. When it ends, and a
-    channel's notes are other than `show` gave them, `edited` is called with the name of the channel, its new
-    notes and a few words for the undo list, and the steps show what `show` gave again: their owner saves, and
-    shows the result. A drag ends at the release. A run of the wheel ends when the mouse leaves its square, or
-    `WHEEL_WAIT` seconds after its last step by `clock`: for that their owner calls `update` every frame.
-    `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard.
+    Nothing is saved here. While a gesture is under way `busy` is true, and the steps show what it would give.
+    When it ends, and a channel's notes are other than `show` gave them, `edited` is called with the name of the
+    channel, its new notes and a few words for the undo list, and the steps show what `show` gave again: their
+    owner saves, and shows the result. A drag ends at the release. A run of the wheel ends when the mouse leaves
+    its square, or `WHEEL_WAIT` seconds after its last step by `clock`: for that their owner calls `update` every
+    frame. `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard.
 
     `help` is the widget's own line. While the mouse is on a square it says what a press there would do, with
     the level of a hit and the letter a hit would take the place of. Where nothing can be changed it says what
@@ -433,6 +433,11 @@ class Steps(Widget):
         if channel not in self._notes:
             raise RowSynthError(f"the steps show no channel called {channel!r}")
         return self._given.get(channel, self._notes[channel])
+
+    @property
+    def busy(self) -> bool:
+        """Whether a gesture is under way: a drag that has not been released, or a run of the wheel not yet ended."""
+        return self._gesture is not None
 
     def _look(self) -> None:
         """Work out which squares have a hit, the hits between two rows, and the squares whose row is taken.

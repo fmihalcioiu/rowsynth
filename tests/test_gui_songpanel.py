@@ -1,12 +1,15 @@
-"""Tests for rowsynth.gui.songpanel: where the playing is in a song, the rows of its channels, and the panel itself."""
+"""Tests for rowsynth.gui.songpanel: where the playing is in a song, the rows of its channels, the panel, its saving."""
 from __future__ import annotations
 
 import copy
+import dataclasses
 import json
 import os
+import shutil
 import tempfile
+import threading
 import unittest
-from collections.abc import Hashable
+from collections.abc import Callable, Hashable, Sequence
 from pathlib import Path
 from unittest import mock
 
@@ -16,8 +19,10 @@ from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.model import Model
-from rowsynth.gui.songpanel import SongPanel, arrange, channel_rows, colour_of, first_channel, place_at
+from rowsynth.gui.session import POLL_EVERY, Session
+from rowsynth.gui.songpanel import SongPanel, arrange, channel_rows, colour_of, first_channel, lowest_c, place_at
 from rowsynth.gui.songview import Block, Channel, Note
+from rowsynth.gui.steps import WHEEL_WAIT
 from rowsynth.gui.strips import SongStrip
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -71,6 +76,17 @@ PROJECT = {
     "songs": {"walk": WALK, "bare": BARE},
 }
 
+#: A project for a hand to change: the song above with an instrument of its own for one channel, and the song with
+#: two drum channels.
+EDITED = {
+    "instruments": {**INSTRUMENTS, "buzz": {"wave": "saw"}},
+    "songs": {"walk": {**WALK, "channels": {**WALK["channels"], "low": {"inst": "buzz"}}}, "pair": PAIR},
+}
+#: The rate a project that is changed is rendered at on the threads of its model: a low one, to be quick.
+RATE = 8000
+#: The time the first write from outside is stamped with, in nanoseconds: none the file gets by being saved.
+STAMP = 1_700_000_000 * 10**9
+
 HEADINGS = (Row(("TUNED",), "TUNED", head=True), Row(("DRUMS",), "DRUMS", head=True))
 
 
@@ -84,6 +100,51 @@ class Stand:
 
     def position(self) -> float:
         return self.at
+
+
+class Speaker:
+    """A stand-in for the player: it keeps what it was asked, in order, and plays nothing."""
+
+    def __init__(self) -> None:
+        self.asked: list[tuple] = []
+        self.playing = False
+
+    def play(self, sides: Sequence, loop: bool = False) -> None:
+        self.asked.append(("play", sides, loop))
+        self.playing = True
+
+    def also(self, sides: Sequence) -> None:
+        self.asked.append(("also", sides))
+
+    def stop(self, fade: float = 0.0) -> None:
+        self.asked.append(("stop",))
+        self.playing = False
+
+    def swap(self, sides: Sequence) -> None:
+        self.asked.append(("swap", sides))
+
+    def position(self) -> float:
+        return 0.0
+
+
+def settle() -> None:
+    """Wait for every render and every run of the checks that is still on a thread of a model's."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("rowsynth-"):
+            thread.join()
+
+
+def differing(one: object, other: object, where: str = "") -> list[str]:
+    """The places at which the data of two files differ, each spelt as a change spells its place.
+
+    Two dicts are gone through key by key. Anything else is one place, which differs when it is not written the
+    same in both.
+    """
+    if isinstance(one, dict) and isinstance(other, dict):
+        return [place for key in dict.fromkeys([*one, *other])
+                for place in (differing(one[key], other[key], f"{where}.{key}".lstrip("."))
+                              if key in one and key in other else [f"{where}.{key}".lstrip(".")])]
+    return [] if json.dumps(one) == json.dumps(other) else [where]
 
 
 def changed(pattern: str, channel: str, text: str) -> dict:
@@ -189,6 +250,10 @@ class Listed(unittest.TestCase):
             (still, mute, beat, tuned), (still, mute, beat), (still, mute), (still,), ())],
             ["tuned", "beat", "mute", "still", None])
 
+    def test_the_lowest_c_in_view_is_the_first_c_that_is_no_lower_than_the_lowest_pitch_there(self) -> None:
+        self.assertEqual([lowest_c(view) for view in (range(48, 80), range(49, 80), range(59, 62), range(37, 40))],
+                         [48, 60, 60, 48])
+
 
 class Shown(unittest.TestCase):
     def setUp(self) -> None:
@@ -273,13 +338,14 @@ class Shown(unittest.TestCase):
             self.assertEqual((steps.picked, steps.grid.drums, steps.grid.breaks), (channel, 3, (1,)))
             self.assertEqual([steps.step_at(steps.grid.square(lane, 2)[:2]) for lane in range(3)],
                              [("low", "k", 2), ("top", "k", 2), ("top", "h", 2)])
-        # The lanes are those of the whole song: another pattern has the same ones, with its own hits in them.
+        # The lanes are those of the whole song: another pattern has the same ones, with its own hits in them. The
+        # steps have the drum table of the song, so the help line says what a press would do.
         ui.handle(Event("move", steps.grid.square(1, 4)[:2]))
-        self.assertEqual(ui.help, "k in top, bar 1, step 5: empty")
+        self.assertEqual(ui.help, "put a hit: k in top, bar 1, step 5")
         click(ui, block(panel, 1))
         self.assertEqual((steps.picked, steps.grid.drums, steps.grid.rows), ("top", 3, 16))
         ui.handle(Event("move", steps.grid.square(1, 8)[:2]))
-        self.assertEqual(ui.help, "k in top, bar 1, step 9: hit, level 15")
+        self.assertEqual(ui.help, "take the hit away: k in top, bar 1, step 9 (level 15)")
         # A tuned channel picked is shown in the roll, as with one drum channel.
         click(ui, spot(panel.list, "air"))
         self.assertEqual((panel.channel, steps.visible, panel.roll.visible, panel.roll.channel),
@@ -480,6 +546,329 @@ class Shown(unittest.TestCase):
         self.assertEqual(self.seen(), [])
         self.panel.show(True)
         self.assertEqual(self.seen(), ["strip", "list", "follow", "ghosts", "roll"])
+
+
+class Opened(unittest.TestCase):
+    """What the tests of saving share: a project file of the test's own, a real session on it, and the panel."""
+
+    def opened(self, put: Callable[[Path], object]) -> None:
+        """Have `put` make the file in a folder of the test's own, and open it with a stand-in player and a clock."""
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        # No thread of the model is left to run into the next test, or into a folder that is gone.
+        self.addCleanup(settle)
+        self.path = Path(folder.name) / "project.json"
+        put(self.path)
+        self.now, self.stamp = 100.0, STAMP
+        self.speaker = Speaker()
+        self.session = Session(Model(self.path, RATE), self.speaker, lambda: self.now)
+        self.ui = Ui()
+        self.panel = SongPanel(self.session, self.ui)
+        self.panel.place(RECT)
+        self.panel.update()
+        self.roll, self.steps = self.panel.roll, self.panel.steps
+
+    def data(self) -> dict:
+        """What the file holds now."""
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def text(self, pattern: str, channel: str, song: str = "walk") -> str | None:
+        """The text the file has for a channel in a pattern of a song, or None where it has none."""
+        return self.data()["songs"][song]["patterns"][pattern].get(channel)
+
+    def read(self, pattern: str, channel: str, song: str = "walk") -> tuple[Note, ...]:
+        """The notes of a channel in a pattern of a song, read from the file."""
+        found = songview.pattern(Project.load(self.path).song(song), pattern)
+        return next(held.notes for held in found.channels if held.name == channel)
+
+    def outside(self, pattern: str, channel: str, text: str) -> None:
+        """Have another program write the file with other text for a channel, and the session look at it."""
+        project = self.data()
+        project["songs"]["walk"]["patterns"][pattern][channel] = text
+        self.path.write_text(json.dumps(project), encoding="utf-8")
+        # Stamped as no write before it was, so that the look cannot take the file for the one it knows.
+        self.stamp += 10**9
+        os.utime(self.path, ns=(self.stamp, self.stamp))
+        self.now += POLL_EVERY
+        self.session.tick()
+
+    def at(self, row: int, pitch: int) -> tuple[int, int]:
+        """A pixel in the middle of a row and of a key of the roll, as it is scrolled now."""
+        seen = self.roll.map
+        return seen.x(row) + 4, seen.y(pitch) + 4
+
+    def square(self, lane: int, row: int) -> tuple[int, int]:
+        """A pixel on the square of a step, as the steps are scrolled now."""
+        x, y, _, _ = self.steps.grid.square(lane, row)
+        return x + 2, y + 9
+
+    def mouse(self, kind: str, pos: tuple[int, int], button: int = 0) -> None:
+        """Hand the Ui one thing the mouse did."""
+        self.ui.handle(Event(kind, pos, button=button))
+
+    def drag(self, *stops: tuple[int, int], button: int = 1) -> None:
+        """Press at the first position, move to each of the others in turn, and release at the last."""
+        self.mouse("down", stops[0], button)
+        for stop in stops[1:]:
+            self.mouse("move", stop)
+        self.mouse("up", stops[-1], button)
+
+    def key(self, key: str, *mods: str) -> bool:
+        """Hand the Ui a key, some others held. Whether it was used."""
+        return self.ui.handle(Event("key", key=key, mods=frozenset(mods)))
+
+    def pitches(self) -> list[float]:
+        """The pitches of the notes the roll shows."""
+        return [note.pitch for note in self.roll.notes]
+
+    def kicks(self) -> list[float]:
+        """The rows at which the steps show a hit of the letter k in the channel kit."""
+        return [note.row for note in self.steps.notes("kit") if note.drum == "k"]
+
+    def heard(self) -> list[Sequence]:
+        """The sides of each note the player was asked to sound over what plays, in order."""
+        return [asked[1] for asked in self.speaker.asked if asked[0] == "also"]
+
+    def tone(self, inst: str, pitch: str | float) -> Sequence:
+        """The sides of a note as the model keeps it for the song: the same ones for as long as nothing is loaded."""
+        return self.session.model.tone(inst, pitch, song="walk")["sides"]
+
+
+class Saved(Opened):
+    def setUp(self) -> None:
+        self.opened(lambda path: path.write_text(json.dumps(EDITED), encoding="utf-8"))
+
+    def test_a_click_on_the_empty_grid_puts_a_note_in_the_text_of_its_channel_and_nothing_else_changes(self) -> None:
+        before = self.data()
+        self.assertEqual((self.panel.channel, self.roll.pattern.name, self.pitches()), ("air", "a", [60, 64, 67, 64]))
+        self.drag(self.at(4, 70))
+        # The note is four rows long, and takes the place of the one that began where it does.
+        self.assertEqual(self.text("a", "air"), "o4 l4 c b- g e")
+        self.assertEqual(differing(before, self.data()), ["songs.walk.patterns.a.air"])
+        # The roll shows what the file holds, and the step is called by where it is and by what was done.
+        self.assertEqual((self.pitches(), self.roll.notes), ([60, 70, 67, 64], self.read("a", "air")))
+        self.assertEqual((self.session.undo_label, self.session.message), ("air of pattern a: note placed", ""))
+
+    def test_undo_takes_the_note_out_of_the_file_and_out_of_the_roll_and_redo_brings_it_back(self) -> None:
+        before = self.data()
+        self.drag(self.at(4, 70))
+        self.assertTrue(self.session.undo())
+        self.panel.update()
+        self.assertEqual((self.data(), self.pitches()), (before, [60, 64, 67, 64]))
+        self.assertEqual((self.session.can_undo, self.session.redo_label), (False, "air of pattern a: note placed"))
+        self.assertTrue(self.session.redo())
+        self.panel.update()
+        self.assertEqual((self.text("a", "air"), self.pitches()), ("o4 l4 c b- g e", [60, 70, 67, 64]))
+
+    def test_a_note_that_is_dragged_and_one_that_is_removed_are_each_a_step_in_the_file(self) -> None:
+        self.drag(self.at(12, 64), self.at(12, 66))
+        self.assertEqual((self.text("a", "air"), self.session.undo_label),
+                         ("o4 l4 c e g g-", "air of pattern a: note moved"))
+        self.drag(self.at(0, 60), button=3)
+        self.assertEqual((self.text("a", "air"), self.session.undo_label),
+                         ("o4 l4 r e g g-", "air of pattern a: note removed"))
+        self.assertEqual((self.pitches(), self.roll.notes), ([64, 67, 66], self.read("a", "air")))
+        # Each is taken back by itself.
+        for text in ("o4 l4 c e g g-", "o4 l4 c e g e"):
+            self.session.undo()
+            self.assertEqual(self.text("a", "air"), text)
+        self.panel.update()
+        self.assertEqual(self.pitches(), [60, 64, 67, 64])
+
+    def test_a_hit_put_in_the_steps_is_in_the_text_of_its_own_drum_channel(self) -> None:
+        self.session.pick("song", "pair")
+        self.panel.update()
+        click(self.ui, spot(self.panel.list, "top"))
+        before = self.data()
+        # The lanes are the k of low, and the k and the h of top. The second has no hit in this pattern.
+        self.drag(self.square(1, 0))
+        self.assertEqual((self.text("a", "top", "pair"), self.session.undo_label),
+                         ("l8 k h r h r h r h", "top of pattern a: hit placed"))
+        self.assertEqual(differing(before, self.data()), ["songs.pair.patterns.a.top"])
+        self.assertEqual(self.steps.notes("top"), self.read("a", "top", "pair"))
+        self.drag(self.square(0, 2))
+        self.assertEqual((self.text("a", "low", "pair"), self.session.undo_label),
+                         ("k8 k8 k4 k4 k4", "low of pattern a: hit placed"))
+        self.assertEqual(differing(before, self.data()), ["songs.pair.patterns.a.low", "songs.pair.patterns.a.top"])
+        self.assertEqual(self.steps.notes("low"), self.read("a", "low", "pair"))
+
+    def test_a_channel_the_pattern_has_no_text_for_gets_its_text_and_undo_takes_it_away_again(self) -> None:
+        click(self.ui, spot(self.panel.list, "hush"))
+        before = self.data()
+        self.assertEqual((self.text("a", "hush"), self.roll.notes), (None, ()))
+        self.drag(self.at(4, 60))
+        self.assertEqual((self.text("a", "hush"), self.session.undo_label),
+                         ("o4 r4 c4 r2", "hush of pattern a: note placed"))
+        self.assertEqual(differing(before, self.data()), ["songs.walk.patterns.a.hush"])
+        self.assertEqual(self.roll.notes, (Note(4.0, 4.0, 60, 15, "tone"),))
+        # In the list the channel is no longer one the pattern has no text for.
+        self.assertFalse(next(row for row in self.panel.list.rows if row.key == "hush").dim)
+        self.session.undo()
+        self.panel.update()
+        self.assertEqual((self.data(), self.roll.notes), (before, ()))
+
+    def test_a_change_the_project_refuses_leaves_the_file_and_the_view_and_the_session_says_why(self) -> None:
+        before, notes = self.path.read_text(encoding="utf-8"), self.roll.notes
+        # Notes that cannot be written as text are not saved.
+        with mock.patch.object(songview, "text", side_effect=RowSynthError("row 4: no")):
+            self.drag(self.at(4, 70))
+        self.assertEqual((self.path.read_text(encoding="utf-8"), self.roll.notes, self.session.can_undo),
+                         (before, notes, False))
+        # Text that names an instrument nobody has is what the check of the project refuses.
+        with mock.patch.object(songview, "text", return_value="o4 @nobody c1"):
+            self.drag(self.at(4, 70))
+        self.panel.update()
+        self.assertEqual((self.path.read_text(encoding="utf-8"), self.roll.notes, self.session.can_undo),
+                         (before, notes, False))
+        self.assertEqual(self.session.message, "songs.walk.patterns.a.air: no instrument named 'nobody'")
+        # The next change that is made is saved as any other.
+        self.drag(self.at(4, 70))
+        self.assertEqual((self.text("a", "air"), self.session.message), ("o4 l4 c b- g e", ""))
+
+    def test_a_placed_note_is_heard_with_the_instrument_of_its_channel_and_a_hit_with_what_its_letter_plays(
+            self) -> None:
+        click(self.ui, spot(self.panel.list, "low"))
+        self.drag(self.at(4, 40))
+        self.assertEqual((self.text("a", "low"), len(self.heard())), ("o2 c4 e4 g2", 1))
+        self.assertIs(self.heard()[0], self.tone("buzz", 40))
+        click(self.ui, spot(self.panel.list, "kit"))
+        # The hit is heard as it is put, which is at the press: the lane is the one of the letter h.
+        self.mouse("down", self.square(1, 2), 1)
+        self.assertEqual(len(self.heard()), 2)
+        self.assertIs(self.heard()[1], self.tone("thud", "c6"))
+        self.mouse("up", self.square(1, 2), 1)
+        self.assertEqual((len(self.heard()), self.session.undo_label), (2, "kit of pattern a: hit placed"))
+
+    def test_a_key_of_the_piano_sounds_its_note_from_the_lowest_c_in_view_and_changes_nothing(self) -> None:
+        click(self.ui, spot(self.panel.list, "low"))
+        before = self.path.read_text(encoding="utf-8")
+        # Without the focus the roll is handed no key.
+        self.assertEqual((self.key("x"), self.heard()), (False, []))
+        # A click on a note changes nothing, and the roll has the focus. Its keys go down to c1.
+        self.drag(self.at(0, 36))
+        self.assertEqual((self.ui.focus, lowest_c(self.roll.map.pitches())), (self.roll, 24))
+        # x is the d of the first octave and q the c of the second. With ctrl held, and on f1, no note is played.
+        self.assertEqual([self.key("x"), self.key("q", "shift"), self.key("x", "ctrl"), self.key("f1")],
+                         [True, True, False, False])
+        self.assertEqual(len(self.heard()), 2)
+        self.assertIs(self.heard()[0], self.tone("buzz", 26))
+        self.assertIs(self.heard()[1], self.tone("buzz", 36))
+        # With the keys scrolled up an octave, the piano is an octave higher.
+        self.ui.handle(Event("wheel", self.at(0, 36), wheel=6))
+        self.assertTrue(self.key("z"))
+        self.assertIs(self.heard()[2], self.tone("buzz", 36))
+        self.assertEqual((self.path.read_text(encoding="utf-8"), self.session.can_undo), (before, False))
+
+    def test_the_space_bar_and_the_keys_of_undo_and_redo_are_not_used_up_by_the_roll(self) -> None:
+        # The keys as the app has them.
+        self.ui.keys.update({("space", frozenset()): self.session.toggle,
+                             ("z", frozenset({"ctrl"})): self.session.undo,
+                             ("y", frozenset({"ctrl"})): self.session.redo})
+        self.drag(self.at(4, 70))
+        self.assertIs(self.ui.focus, self.roll)
+        self.assertTrue(self.key("z", "ctrl"))
+        self.panel.update()
+        self.assertEqual((self.text("a", "air"), self.pitches()), ("o4 l4 c e g e", [60, 64, 67, 64]))
+        self.assertTrue(self.key("y", "ctrl"))
+        self.panel.update()
+        self.assertEqual((self.text("a", "air"), self.pitches()), ("o4 l4 c b- g e", [60, 70, 67, 64]))
+        self.assertFalse(self.session.playing)
+        self.assertTrue(self.key("space"))
+        self.assertTrue(self.session.playing)
+        # None of the three was taken for a key of the piano: only the note that was placed was heard.
+        self.assertEqual(len(self.heard()), 1)
+
+    def test_the_notes_an_edit_leaves_picked_are_picked_in_what_its_save_shows(self) -> None:
+        self.drag(self.at(12, 64), self.at(12, 66))
+        self.assertEqual((self.pitches(), self.roll.picked), ([60, 64, 67, 66], {3}))
+        self.panel.update()
+        self.assertEqual(self.roll.picked, {3})
+        # With the focus the roll has the keys. Two in one frame: the second moves what the first one saved.
+        self.assertEqual([self.key("up"), self.key("up", "shift")], [True, True])
+        self.assertEqual((self.pitches(), self.roll.picked), ([60, 64, 67, 79], {3}))
+        self.assertEqual((self.text("a", "air"), self.session.undo_label),
+                         ("o4 l4 c e g > g", "air of pattern a: note moved"))
+
+    def test_a_save_leaves_the_view_where_it_is_and_the_song_playing(self) -> None:
+        for steps, mods in ((2, ()), (-1, ("shift",)), (1, ("ctrl",))):
+            self.ui.handle(Event("wheel", self.at(8, 64), wheel=steps, mods=frozenset(mods)))
+        view = (self.roll.row, self.roll.top, self.roll.row_w)
+        self.assertNotEqual(view, (0.0, 79.0, 9))
+        self.session.play()
+        settle()
+        self.session.tick()
+        self.assertTrue(self.speaker.playing)
+        self.drag(self.at(8, 70))
+        self.assertEqual(self.text("a", "air"), "o4 l4 c e b- e")
+        settle()
+        self.session.tick()
+        self.panel.update()
+        self.assertEqual(((self.roll.row, self.roll.top, self.roll.row_w), self.panel.strip.picked), (view, 0))
+        # The loop was not stopped: it was given the song as it now is, in the place of what it played.
+        self.assertEqual([asked[0] for asked in self.speaker.asked], ["play", "also", "swap"])
+        self.assertTrue(self.session.playing)
+
+    def test_a_change_from_outside_during_a_gesture_in_the_roll_is_shown_when_the_gesture_has_ended(self) -> None:
+        self.mouse("down", self.at(12, 64), 1)
+        self.mouse("move", self.at(12, 66))
+        self.outside("a", "air", "o4 l4 c e g > c")
+        for _ in range(2):
+            self.panel.update()
+        # The note is where the hand has it, among the notes there were.
+        self.assertEqual((self.roll.busy, self.pitches(), [note.pitch for note in self.roll.drawn]),
+                         (True, [60, 64, 67, 64], [60, 64, 67, 66]))
+        # Let go where it was pressed, the gesture changes nothing. The next frame shows what the file holds.
+        self.mouse("move", self.at(12, 64))
+        self.mouse("up", self.at(12, 64), 1)
+        self.assertEqual((self.roll.busy, self.pitches()), (False, [60, 64, 67, 64]))
+        self.panel.update()
+        self.assertEqual((self.pitches(), self.text("a", "air")), ([60, 64, 67, 72], "o4 l4 c e g > c"))
+
+    def test_a_drag_in_the_steps_that_ends_after_a_change_from_outside_stands_and_undo_brings_the_other_back(
+            self) -> None:
+        click(self.ui, spot(self.panel.list, "kit"))
+        self.mouse("down", self.square(0, 2), 1)
+        self.outside("a", "kit", "l4 k k k k")
+        self.panel.update()
+        self.assertEqual((self.steps.busy, self.kicks()), (True, [0.0, 2.0, 8.0]))
+        # The release saves the hits as the hand left them, which is the later of the two changes.
+        self.mouse("up", self.square(0, 2), 1)
+        self.assertEqual((self.text("a", "kit"), self.kicks()), ("k8 k8 h4 k4 h4", [0.0, 2.0, 8.0]))
+        self.session.undo()
+        self.panel.update()
+        self.assertEqual((self.text("a", "kit"), self.kicks()), ("l4 k k k k", [0.0, 4.0, 8.0, 12.0]))
+
+    def test_the_steps_have_the_drum_table_and_a_run_of_the_wheel_is_saved_when_its_time_is_up(self) -> None:
+        click(self.ui, spot(self.panel.list, "kit"))
+        self.steps.clock = lambda: self.now
+        self.mouse("move", self.square(0, 0))
+        self.assertEqual(self.ui.help, "take the hit away: k, bar 1, step 1 (level 15)")
+        for _ in range(3):
+            self.ui.handle(Event("wheel", self.square(0, 0), wheel=-1))
+        self.panel.update()
+        self.assertEqual((self.steps.busy, self.session.can_undo), (True, False))
+        # The panel gives the steps their frame, and the frame after the wait ends the run.
+        self.now += WHEEL_WAIT
+        self.panel.update()
+        self.assertEqual((self.steps.busy, self.text("a", "kit"), self.session.undo_label),
+                         (False, "l4 v12 k v15 h k h", "kit of pattern a: level changed"))
+
+
+class Piece(Opened):
+    def setUp(self) -> None:
+        self.opened(lambda path: shutil.copyfile(EXAMPLES / "piece.json", path))
+
+    def test_one_note_of_the_piece_changed_is_the_text_of_one_channel_of_one_pattern_changed_in_its_file(self) -> None:
+        before, notes = self.data(), self.roll.notes
+        self.assertEqual((self.panel.channel, self.roll.pattern.name, len(notes), notes[0].pitch),
+                         ("lead", "cold", 11, 62))
+        # Its first note goes up a semitone.
+        self.drag(self.at(0, 62), self.at(0, 63))
+        self.assertEqual(differing(before, self.data()), ["songs.piece.patterns.cold.lead"])
+        self.assertEqual(self.session.undo_label, "lead of pattern cold: note moved")
+        # The file read again gives the notes the roll shows, which are the ones there were but for that note.
+        self.assertEqual(self.roll.notes, (dataclasses.replace(notes[0], pitch=63), *notes[1:]))
+        self.assertEqual(self.read("cold", "lead", "piece"), self.roll.notes)
 
 
 @unittest.skipUnless(pygame, NEEDS)

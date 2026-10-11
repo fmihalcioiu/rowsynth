@@ -12,11 +12,12 @@ from .layout import Rect
 from .lists import List, Row
 from .panels import Panel, within
 from .roll import Roll
-from .songview import Block, Channel, Pattern
+from .session import piano
+from .songview import Block, Channel, Note, Pattern
 from .steps import Lane, Steps, lanes
 from .strips import SongStrip
 from .theme import Colour
-from .ui import Label, Toggle, Ui
+from .ui import Event, Label, Toggle, Ui
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -73,6 +74,14 @@ def first_channel(channels: Sequence[Channel]) -> str | None:
     return None if best is None else best.name
 
 
+def lowest_c(pitches: range) -> int:
+    """The lowest c among the pitches a roll has in view, which go up from the lowest of them.
+
+    Where there is no c among them, it is the first c over them.
+    """
+    return -(-pitches.start // 12) * 12
+
+
 def channel_rows(channels: Sequence[Channel]) -> list[Row]:
     """The channels of a song, as one pattern has them, as the rows of a list.
 
@@ -122,6 +131,14 @@ class SongPanel(Panel):
     nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the refusal's
     words. The song is read, and the strip shown it, when another thing is picked and when the model has loaded
     its file again, and at no other time.
+
+    What the mouse and the keys make of the notes in the roll or the steps is saved at once: the channel's notes
+    are written as its text for the pattern, and that is one change to the file, and one step that can be taken
+    back. The song is then read again as after any change, so the views show what the file holds. A change that
+    is refused leaves them as they were, and the session says why. While a gesture is under way in a view the
+    song is not read: what changed meanwhile, here or outside, is shown when the gesture has ended. A note that
+    is placed is heard, and with the focus on the roll the keys of the computer play the instrument of its
+    channel as a piano, from the lowest c the roll has in view.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
@@ -134,8 +151,9 @@ class SongPanel(Panel):
                                       help="the pattern that is shown goes along with the playing"))
         self.ghosts = self.add(Toggle(nowhere, GHOSTS, on=True,
                                       help="the notes of the other channels are drawn dim behind"))
-        self.roll = self.add(Roll(nowhere))
-        self.steps = self.add(Steps(nowhere))
+        self.roll = self.add(Roll(nowhere, edited=lambda notes, label: self._save(self.roll.channel, notes, label),
+                                  sounded=self._sound, typed=self._key))
+        self.steps = self.add(Steps(nowhere, edited=self._save, sounded=self._drum))
         self.fault = self.add(Label(nowhere, "", theme.FAULT, "centre"))
         self.channel: str | None = None
         # What was read last: the picked thing, and the project it was read from.
@@ -169,15 +187,13 @@ class SongPanel(Panel):
     def update(self, passed: float = 0.0) -> None:
         """Read the picked thing if it or the project is another than before, and show where the playing is.
 
-        `passed` is the seconds since the frame before, which the panel has no use for.
+        The steps take their frame first, which ends a run of the wheel whose time is up. While a gesture is
+        under way in the roll or the steps nothing is read, so the notes do not change under the hand. `passed`
+        is the seconds since the frame before, which the panel has no use for.
         """
-        model = self.session.model
-        # The model has no public name for its project. A file that was loaded again is another project.
-        picked, project = model.picked, model.project
-        if picked != self._picked or project is not self._project:
-            fresh = picked != self._picked
-            self._picked, self._project = picked, project
-            self._read(fresh)
+        self.steps.update()
+        if not (self.roll.busy or self.steps.busy):
+            self._look()
         self.roll.ghosts = self.ghosts.is_on
         self._play()
 
@@ -187,6 +203,54 @@ class SongPanel(Panel):
             for part in ("channels", "view"):
                 canvas.box(self._parts[part], theme.PANEL)
                 canvas.frame(self._parts[part], theme.LINE)
+
+    def _look(self) -> None:
+        """Read the picked thing where it, or the project, is another than the one that was read last."""
+        model = self.session.model
+        # A file that was loaded again is another project.
+        picked, project = model.picked, model.project
+        if picked != self._picked or project is not self._project:
+            fresh = picked != self._picked
+            self._picked, self._project = picked, project
+            self._read(fresh)
+
+    def _save(self, channel: str, notes: Sequence[Note], label: str) -> None:
+        """Save the notes a view gave for a channel of the pattern that is shown, and show what the file then holds.
+
+        The notes are written as the channel's text, filling the rows of the pattern, and put in the file as one
+        step: `label` is what the view calls it. A channel the pattern had no text for gets its text. A change
+        the project refuses is not made, and the session's message is the refusal. Notes that cannot be written
+        as text are not saved either.
+        """
+        pattern = self._patterns[self._blocks[self.strip.picked].name]
+        try:
+            text = songview.text(notes, pattern.rows, channel, self._song)
+        except RowSynthError:
+            # The session has no way to be told of a refusal that is not its own: the views stay as they were.
+            return
+        self.session.change(f"songs.{self._picked[1]}.patterns.{pattern.name}.{channel}", text,
+                            f"{channel} of pattern {pattern.name}: {label}")
+        self._look()
+
+    def _sound(self, pitch: float, inst: str) -> None:
+        """Let a note of an instrument of the song be heard, over whatever plays."""
+        self.session.sound(inst, pitch, self._picked[1])
+
+    def _drum(self, channel: str, letter: str) -> None:
+        """Let what a drum letter plays in the song be heard. The channel of the hit makes no difference to it."""
+        self.session.drum(letter, self._picked[1])
+
+    def _key(self, event: Event) -> bool:
+        """Take a key the roll has the focus for and does not use, and say whether it was used.
+
+        A key of the piano sounds its note with the instrument of the channel in the roll, counted from the
+        lowest c the roll has in view. With ctrl held it is no key of the piano.
+        """
+        note = piano(event.key)
+        if note is None or "ctrl" in event.mods:
+            return False
+        self._sound(lowest_c(self.roll.map.pitches()) + note, self._song["channels"][self.roll.channel]["inst"])
+        return True
 
     def _read(self, fresh: bool) -> None:
         """Read the picked thing from the project. Only a song is shown, and one the engine refuses is told."""
@@ -231,7 +295,8 @@ class SongPanel(Panel):
     def _view(self) -> None:
         """Show the picked channel of the pattern at the picked place: in the list, and in the roll or the steps.
 
-        A tuned channel is the roll's one channel. A drum channel is lit among all the drums of the pattern.
+        A tuned channel is the roll's one channel. A drum channel is lit among all the drums of the pattern, which
+        are given the drum table of the song, so that their hits can be changed.
         """
         channels = self._channels()
         self.list.rows = channel_rows(channels)
@@ -241,7 +306,8 @@ class SongPanel(Panel):
         if place is not None:
             pattern = self._patterns[self._blocks[self.strip.picked].name]
             if self._drums:
-                self.steps.show(pattern, self._lanes, self._bar_rows, self._bar_rows // 4)
+                self.steps.show(pattern, self._lanes, self._bar_rows, self._bar_rows // 4,
+                                self._song.get("drums") or {})
                 self.steps.picked = self.channel
             else:
                 self.roll.show(pattern, self.channel, self._bar_rows, colour_of(place))

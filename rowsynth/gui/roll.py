@@ -383,7 +383,9 @@ class Roll(Widget):
     note is placed, and each time the note that the mouse moves comes to another pitch. `grid` is the rows in a
     step of the grid, a whole number of them: a placed note begins on a step, and notes are moved and stretched
     by whole steps. `picked` is the picked notes, and `drawn` the notes as a gesture that is under way would
-    leave them. The owner hands a key on with `key`.
+    leave them: `busy` is whether one is under way. A key that the Ui hands the roll, which it does while the
+    roll has the focus, goes to `key`. One that is not the roll's is handed on to `typed`, which says whether
+    the owner used it.
 
     `ghosts` is whether the notes of the other channels that are not drums are drawn dim behind. `playhead` is the
     row that is playing, which can be a fraction, or None: the owner sets it each frame. `row`, `top` and `row_w`
@@ -392,10 +394,12 @@ class Roll(Widget):
     """
 
     def __init__(self, rect: Rect, help: str = "", edited: Callable[[tuple[Note, ...], str], object] | None = None,
-                 sounded: Callable[[float, str], object] | None = None) -> None:
+                 sounded: Callable[[float, str], object] | None = None,
+                 typed: Callable[[Event], object] | None = None) -> None:
         super().__init__(rect, help)
         self.edited = edited
         self.sounded = sounded
+        self.typed = typed
         self.grid = 1.0
         self.pattern: Pattern | None = None
         self.channel = ""
@@ -450,6 +454,11 @@ class Roll(Widget):
     def drawn(self) -> tuple[Note, ...]:
         """The notes as they are drawn: while a gesture is under way, what a release where the mouse is gives."""
         return self._now()[0]
+
+    @property
+    def busy(self) -> bool:
+        """Whether a gesture is under way: from the press that began it to its release, or until it is dropped."""
+        return self._gesture is not None
 
     def _now(self) -> Picked:
         """The notes to draw and the picked ones among them: what the gesture under way gives, or what there is."""
@@ -530,11 +539,11 @@ class Roll(Widget):
         """Note where the mouse is, begin a gesture at a press and carry it on to its release, and use the wheel.
 
         The wheel scrolls the keys, with shift the rows, and with ctrl it zooms: not while a gesture is under way.
-        A press is used when it begins a gesture, and the owner is told of no edit before its release. No key is
-        used: the owner hands one on with `key`.
+        A press is used when it begins a gesture, and the owner is told of no edit before its release. A key goes
+        to `key`, and one that is not the roll's to `typed`: it is used when either used it.
         """
         if event.kind == "key":
-            return False
+            return self.key(event) or (self.typed is not None and bool(self.typed(event)))
         self._mouse, self._mods = event.pos, event.mods
         if event.kind == "down":
             # A press while another button is held begins nothing.
@@ -627,7 +636,7 @@ class Roll(Widget):
             self.sounded(note.pitch, note.inst)
 
     def key(self, event: Event) -> bool:
-        """Take a key that the owner hands on, and say whether it is one of the roll's.
+        """Take a key, and say whether it is one of the roll's.
 
         Delete and backspace remove the picked notes. Up and down move them a semitone, with shift an octave, and
         left and right a step of the grid. Ctrl and a picks all, ctrl and c copies the picked ones, and ctrl and

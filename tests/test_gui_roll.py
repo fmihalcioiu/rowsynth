@@ -598,10 +598,35 @@ class Edits(unittest.TestCase):
         for key, mods in (("a", ()), ("space", ()), ("z", ("ctrl",)), ("delete", ("ctrl",)), ("up", ("ctrl",)),
                           ("left", ("shift",)), ("escape", ("shift",))):
             self.assertFalse(self.key(key, *mods), (key, mods))
-        # The roll takes no key from the Ui: its owner hands one on.
+        # Without the focus, which no press has given it here, the roll is handed no key by the Ui.
         self.key("a", "ctrl")
         self.assertFalse(self.ui.handle(Event("key", key="delete")))
         self.assertEqual((self.roll.picked, self.roll.notes, self.edits), ({0, 1, 2, 3}, TUNE, []))
+
+    def test_with_the_focus_a_key_from_the_ui_is_the_rolls_and_one_that_is_not_goes_on_to_its_owner(self) -> None:
+        typed: list[str] = []
+        self.roll.typed = lambda event: typed.append(event.key) or event.key == "z"
+        self.drag(self.at(0, 64))
+        self.assertIs(self.ui.focus, self.roll)
+        self.assertTrue(self.ui.handle(Event("key", key="delete")))
+        self.assertEqual((self.edits, typed), ([(TUNE[1:], "note removed")], []))
+        # What the owner says of a key that is not the roll's is what the Ui is told. With no owner it is not used.
+        self.assertEqual([self.ui.handle(Event("key", key=key)) for key in ("z", "space")], [True, False])
+        self.assertEqual(typed, ["z", "space"])
+        self.roll.typed = None
+        self.assertFalse(self.ui.handle(Event("key", key="z")))
+
+    def test_the_roll_is_busy_from_the_press_that_begins_a_gesture_until_it_is_released_or_dropped(self) -> None:
+        self.assertFalse(self.roll.busy)
+        self.mouse("down", self.at(14, 60))
+        self.mouse("move", self.at(16, 62))
+        self.assertTrue(self.roll.busy)
+        self.mouse("up", self.at(16, 62))
+        self.assertEqual((self.roll.busy, len(self.edits)), (False, 1))
+        self.mouse("down", self.at(20, 70), 1, "shift")
+        self.assertTrue(self.roll.busy)
+        self.key("escape")
+        self.assertFalse(self.roll.busy)
 
     def test_ctrl_and_c_copies_the_picked_notes_and_ctrl_and_v_pastes_them_at_the_row_under_the_mouse(self) -> None:
         self.drag(self.at(0, 64))
