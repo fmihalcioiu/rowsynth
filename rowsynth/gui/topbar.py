@@ -1,6 +1,7 @@
-"""The top bar: the file's name, undo and redo, play, stop and loop, the time, a meter, and the count of findings."""
+"""The top bar: the FILE button, the file's name, undo and redo, play, stop and loop, the time, a meter, findings."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from . import theme
@@ -9,7 +10,7 @@ from .font import Font
 from .layout import Rect
 from .panels import Panel, within
 from .theme import Colour
-from .ui import Button, Label, Toggle, Ui, Widget
+from .ui import Button, Label, Pos, Toggle, Ui, Widget
 
 if TYPE_CHECKING:
     from .canvas import Canvas
@@ -21,7 +22,9 @@ WIDEST = "00:00.0 / 00:00.0"
 RUNNING = "..."
 #: What the findings say of themselves, with the mouse on them, where the checks gave none.
 REFUSED = "the checks could not run on this project"
-#: The buttons of the bar from the left, in the groups they stand in: those of a group stand side by side.
+#: What the button at the left end of the bar reads as: the one that opens the menu of what is done with files.
+FILE = "FILE"
+#: The buttons of the bar after the name, in the groups they stand in: those of a group stand side by side.
 GROUPS = (("undo", "redo"), ("play", "stop", "loop"))
 
 
@@ -63,17 +66,19 @@ def verdict(count: int | None, refused: bool = False) -> tuple[str, str, Colour]
 def arrange(rect: Rect, name: str) -> dict[str, Rect]:
     """Where the things of the bar go in its rectangle, each by what it is called.
 
-    "found" stands at the right end. From the left stand "name", then "undo" and "redo" side by side, then
-    "play", "stop" and "loop" side by side, then "time" and then "meter". A bar too narrow for them all has no
-    meter, and one still too narrow has no time either: what has gone has no width. The buttons all stay. The
-    name has the width of its text, or what the others leave it in a bar too narrow even for that. Every thing
-    is cut to the bar.
+    "found" stands at the right end. From the left stand "file", as wide as its word needs, then "name", then
+    "undo" and "redo" side by side, then "play", "stop" and "loop" side by side, then "time" and then "meter".
+    A bar too narrow for them all has no meter, and one still too narrow has no time either: what has gone has
+    no width. The buttons all stay. The name has the width of its text, or what the others leave it in a bar
+    too narrow even for that. Every thing is cut to the bar.
     """
     x, y, w, h = rect
     wide, high = theme.ICON_BUTTON
     top = y + (h - high) // 2
     found = x + w - theme.BAR_MARGIN - theme.FOUND_W
     left = x + theme.BAR_MARGIN
+    file = (left, top, Font.width(FILE) + 2 * theme.PAD, high)
+    left += file[2] + theme.GROUP_GAP
     # What stands after the buttons, each with its width. The last of them is the first to go.
     after = (("time", Font.width(WIDEST) + 2 * theme.PAD), ("meter", theme.BAR_METER_W))
     # Each group of buttons, with the gap that is before it.
@@ -84,7 +89,7 @@ def arrange(rect: Rect, name: str) -> dict[str, Rect]:
         stay -= 1
     room -= sum(width + theme.GROUP_GAP for _, width in after[:stay])
     named = max(0, min(Font.width(name), room))
-    placed = {"name": (left, y, named, h), "found": (found, y, theme.FOUND_W, h)}
+    placed = {"file": file, "name": (left, y, named, h), "found": (found, y, theme.FOUND_W, h)}
     left += named
     for group in GROUPS:
         left += theme.GROUP_GAP
@@ -102,14 +107,21 @@ def arrange(rect: Rect, name: str) -> dict[str, Rect]:
 class TopBar(Panel):
     """The bar along the top: what is open, the steps back and again, what plays it, and what the checks found.
 
+    `file` is the button at the left end. A press on it calls `asked` with the place just under its left
+    corner, for the owner to open the menu of what is done with files there: the bar opens none itself, and
+    with no owner to tell the button does nothing.
+
     `undo` and `redo` are enabled while the session has a step for them, and the help of each names that step.
     `found` is how the findings are shown now, as `verdict` gives it. `sign` lies over them, and draws nothing:
     it has the line of help that says so when the checks could not run.
     """
 
-    def __init__(self, session: Session, ui: Ui) -> None:
+    def __init__(self, session: Session, ui: Ui, asked: Callable[[Pos], object] | None = None) -> None:
         super().__init__(session, ui)
         nowhere = (0, 0, 0, 0)
+        self.asked = asked
+        self.file = ui.add(Button(nowhere, FILE, action=self._file,
+                                  help="a new project, another file, a copy of this one, or the first screen"))
         self.name = ui.add(Label(nowhere, session.model.path.name, theme.TEXT))
         self.undo = ui.add(Button(nowhere, icon="undo", action=session.undo))
         self.redo = ui.add(Button(nowhere, icon="redo", action=session.redo))
@@ -127,6 +139,12 @@ class TopBar(Panel):
         self.found = verdict(None)
         self._places = arrange(nowhere, self.name.text)
 
+    def _file(self) -> None:
+        """Tell the owner where the menu of the FILE button opens: just under the button, at its left."""
+        if self.asked is not None:
+            x, y, _, h = self.file.rect
+            self.asked((x, y + h))
+
     def _loop(self, on: bool) -> None:
         """Tell the session whether a song goes round."""
         self.session.loop = on
@@ -135,7 +153,7 @@ class TopBar(Panel):
         """Take the bar's rectangle, and lay the widgets out in it as `arrange` has them."""
         super().place(rect)
         self._places = arrange(rect, self.name.text)
-        for thing in ("name", "undo", "redo", "play", "stop", "loop", "time", "meter"):
+        for thing in ("file", "name", "undo", "redo", "play", "stop", "loop", "time", "meter"):
             getattr(self, thing).rect = self._places[thing]
         self.sign.rect = self._places["found"]
         # A meter that has gone has no width, and is not drawn.

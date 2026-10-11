@@ -153,3 +153,27 @@ MENU_MIN_W = 48
 TEXT_PAD = 3
 TEXT_BOX_H = 13
 TEXT_BOX_MIN_W = 72
+
+# A press on a row that follows another press on the same row within this many seconds is a double press.
+DOUBLE_PRESS = 0.4
+# The file chooser. How wide and how high its box is, and from a side of it to what it shows. How high the line
+# of its title is, and each of the two under it: the folder it is in, and what it has to say. Between two of its
+# parts. How high the row at its foot is, where the name is typed, and how wide each of the two buttons there.
+CHOOSER = (340, 280)
+CHOOSER_PAD = 8
+CHOOSER_LINE_H = 12
+CHOOSER_GAP = 5
+CHOOSER_FOOT_H = 16
+CHOOSER_BUTTON_W = 54
+# The square before a folder in the chooser, and before a project file.
+FOLDER = MUSTARD
+PROJECT_FILE = SONG
+
+# The first screen, which stands in place of the panels while no project is open. How many times its size the
+# program's name is drawn, and how wide the column under it is. From the name to the two buttons, and from those
+# to the list. How high a button is, and how high the list at the most.
+FIRST_NAME_SCALE = 3
+FIRST_W = 260
+FIRST_GAP = 18
+FIRST_BUTTON_H = 16
+FIRST_LIST_H = 164

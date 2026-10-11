@@ -42,11 +42,13 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
 #: The top bar and the left panel on the art surface the layout is drawn for, and the two in a far smaller window.
 BAR, SIDE = (0, 0, 960, 22), (0, 22, 124, 504)
-SMALL_BAR, SMALL_SIDE = (40, 10, 200, 22), (40, 32, 60, 30)
+SMALL_BAR, SMALL_SIDE = (40, 10, 243, 22), (40, 32, 60, 30)
 #: The level, from 0 to 1, that is 24 decibels under the top: half the way along a meter.
 HALF = 10 ** (-24 / 20)
 #: What stands in the bar from its left end, up to the last of its buttons.
-ROW = ("name", "undo", "redo", "play", "stop", "loop")
+ROW = ("file", "name", "undo", "redo", "play", "stop", "loop")
+#: The air between each of those and the one after it: the FILE button and the name stand alone, the rest in groups.
+GAPS = [theme.GROUP_GAP, theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP, theme.BUTTON_GAP]
 #: A small project: one instrument, and one song of one bar on one channel.
 SMALL = {
     "instruments": {"beep": {"vol": [15, 12, 9, 6]}},
@@ -292,24 +294,23 @@ class Top(unittest.TestCase):
 
     def test_in_a_wide_bar_undo_and_redo_stand_after_the_name_with_a_gap_before_play(self) -> None:
         places = arrange(BAR, "arcade.json")
+        # The FILE button stands at the left end, as wide as its word needs, and the name after it.
         self.assertEqual([places[thing] for thing in ROW],
-                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (131, 3, 17, 16), (150, 3, 17, 16),
-                          (169, 3, 17, 16)])
+                         [(6, 3, 31, 16), (49, 0, 65, 22), (126, 3, 17, 16), (145, 3, 17, 16), (174, 3, 17, 16),
+                          (193, 3, 17, 16), (212, 3, 17, 16)])
         self.assertTrue(all(lies_in(places[thing], BAR) for thing in ROW))
         # Undo and redo are a group as play, stop and loop are: a gap before it, and less between its buttons.
-        self.assertEqual(gaps(places), [theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP,
-                                        theme.BUTTON_GAP])
+        self.assertEqual(gaps(places), GAPS)
 
     def test_in_a_narrow_bar_undo_and_redo_stay_as_the_buttons_of_play_do_and_in_their_order(self) -> None:
         # A bar with no meter, one with no time either, and one in which the name has given way as well.
-        for rect, gone in (((0, 0, 427, 22), ["meter"]), ((0, 0, 353, 22), ["time", "meter"]),
+        for rect, gone in (((0, 0, 470, 22), ["meter"]), ((0, 0, 396, 22), ["time", "meter"]),
                            (SMALL_BAR, ["time", "meter"])):
             places = arrange(rect, "arcade.json")
             self.assertEqual([thing for thing in ("time", "meter") if not places[thing][2]], gone, rect)
-            self.assertEqual([places[thing][2:] for thing in ROW[1:]], [theme.ICON_BUTTON] * 5, rect)
+            self.assertEqual([places[thing][2:] for thing in ROW[2:]], [theme.ICON_BUTTON] * 5, rect)
             self.assertTrue(all(lies_in(places[thing], rect) for thing in ROW), rect)
-            self.assertEqual(gaps(places), [theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP,
-                                            theme.BUTTON_GAP], rect)
+            self.assertEqual(gaps(places), GAPS, rect)
             # The last of the buttons ends a gap before the findings, or sooner.
             self.assertLessEqual(places["loop"][0] + places["loop"][2] + theme.GROUP_GAP, places["found"][0], rect)
 
@@ -406,45 +407,46 @@ class Top(unittest.TestCase):
     def test_a_bar_wide_enough_has_the_meter_after_the_time_as_high_as_the_buttons(self) -> None:
         places = arrange(BAR, "arcade.json")
         self.assertEqual((places["time"], places["meter"], places["found"]),
-                         ((198, 3, 109, 16), (319, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
-        # At 428 pixels everything just fits: the meter ends a gap before the findings.
-        places = arrange((0, 0, 428, 22), "arcade.json")
-        self.assertEqual((places["meter"], places["found"]), ((319, 3, 62, 16), (393, 0, 29, 22)))
+                         ((241, 3, 109, 16), (362, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
+        # At 471 pixels everything just fits: the meter ends a gap before the findings.
+        places = arrange((0, 0, 471, 22), "arcade.json")
+        self.assertEqual((places["meter"], places["found"]), ((362, 3, 62, 16), (436, 0, 29, 22)))
 
     def test_a_bar_too_narrow_for_everything_has_no_meter_and_keeps_the_rest(self) -> None:
-        places = arrange((0, 0, 427, 22), "arcade.json")
+        places = arrange((0, 0, 470, 22), "arcade.json")
         self.assertEqual(places["meter"][2], 0)
         self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "time", "found")],
-                         [(6, 0, 65, 22), (131, 3, 17, 16), (150, 3, 17, 16), (169, 3, 17, 16), (198, 3, 109, 16),
-                          (392, 0, 29, 22)])
+                         [(49, 0, 65, 22), (174, 3, 17, 16), (193, 3, 17, 16), (212, 3, 17, 16), (241, 3, 109, 16),
+                          (435, 0, 29, 22)])
         # The time stays down to the width at which it ends a gap before the findings.
-        self.assertEqual(arrange((0, 0, 354, 22), "arcade.json")["time"], (198, 3, 109, 16))
+        self.assertEqual(arrange((0, 0, 397, 22), "arcade.json")["time"], (241, 3, 109, 16))
 
     def test_a_bar_too_narrow_for_the_time_as_well_has_neither_and_keeps_the_buttons_and_the_findings(self) -> None:
-        places = arrange((0, 0, 353, 22), "arcade.json")
+        places = arrange((0, 0, 396, 22), "arcade.json")
         self.assertEqual((places["time"][2], places["meter"][2]), (0, 0))
         self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "found")],
-                         [(6, 0, 65, 22), (131, 3, 17, 16), (150, 3, 17, 16), (169, 3, 17, 16), (318, 0, 29, 22)])
+                         [(49, 0, 65, 22), (174, 3, 17, 16), (193, 3, 17, 16), (212, 3, 17, 16), (361, 0, 29, 22)])
         # Only after the two have gone does the name give way, and the buttons keep their size.
-        self.assertEqual([arrange((40, 10, 233, 22), "arcade.json")[thing] for thing in ("name", "play")],
-                         [(46, 10, 65, 22), (171, 13, 17, 16)])
+        self.assertEqual([arrange((40, 10, 276, 22), "arcade.json")[thing] for thing in ("name", "play")],
+                         [(89, 10, 65, 22), (214, 13, 17, 16)])
         self.assertEqual([arrange(SMALL_BAR, "arcade.json")[thing] for thing in ("name", "play")],
-                         [(46, 10, 32, 22), (138, 13, 17, 16)])
+                         [(89, 10, 32, 22), (181, 13, 17, 16)])
 
     def test_placed_at_two_sizes_every_widget_is_inside_the_bar(self) -> None:
         _, ui, bar = bar_on()
         places = arrange(BAR, "arcade.json")
-        self.assertEqual(places, {"name": (6, 0, 65, 22), "undo": (83, 3, 17, 16), "redo": (102, 3, 17, 16),
-                                  "play": (131, 3, 17, 16), "stop": (150, 3, 17, 16), "loop": (169, 3, 17, 16),
-                                  "time": (198, 3, 109, 16), "meter": (319, 3, 62, 16), "found": (925, 0, 29, 22)})
+        self.assertEqual(places, {"file": (6, 3, 31, 16), "name": (49, 0, 65, 22), "undo": (126, 3, 17, 16),
+                                  "redo": (145, 3, 17, 16), "play": (174, 3, 17, 16), "stop": (193, 3, 17, 16),
+                                  "loop": (212, 3, 17, 16), "time": (241, 3, 109, 16), "meter": (362, 3, 62, 16),
+                                  "found": (925, 0, 29, 22)})
         things = (*ROW, "time", "meter")
         self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
         self.assertEqual(bar.sign.rect, places["found"])
         # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
-        for rect in (BAR, (0, 0, 427, 22), SMALL_BAR, (0, 0, 30, 5)):
+        for rect in (BAR, (0, 0, 470, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
             # A meter that has gone is not drawn at all.
-            self.assertEqual((len(ui.widgets), bar.meter.visible), (9, rect == BAR))
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (10, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect, "arcade.json").values()), rect)
 
@@ -657,7 +659,7 @@ class Drawn(unittest.TestCase):
                          (w - 2) * (h - 2) - ink(surface, places["time"], theme.TEXT))
 
     def test_the_bar_draws_the_left_side_in_the_upper_bar_of_the_meter_and_no_meter_that_has_gone(self) -> None:
-        rect = (0, 0, 428, theme.TOP_H)
+        rect = (0, 0, 471, theme.TOP_H)
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
@@ -665,7 +667,7 @@ class Drawn(unittest.TestCase):
         meter = arrange(rect, "arcade.json")["meter"]
         upper, lower = bars(meter, 2, lying=True)
         shown = []
-        for wide in (428, 427):
+        for wide in (471, 470):
             bar.place((0, 0, wide, theme.TOP_H))
             surface.fill(theme.PANEL)
             bar.update()
@@ -728,12 +730,14 @@ class InTheApp(unittest.TestCase):
         with open(shot, "rb") as file:
             drawn = pygame.image.load(file, ".png")
         parts = layout.frame(drawn.get_size())
-        x, y, _, h = parts["top"]
-        name = (x + theme.BAR_MARGIN, y, Font.width("arcade.json"), h)
-        self.assertGreater(ink(drawn, name, theme.TEXT), 0)
+        places = arrange(parts["top"], "arcade.json")
+        # The FILE button stands first, and the name after it.
+        x, y, w, h = places["name"]
+        self.assertEqual((places["file"][0], w), (theme.BAR_MARGIN, Font.width("arcade.json")))
+        self.assertGreater(ink(drawn, places["file"], theme.TEXT), 0)
+        self.assertGreater(ink(drawn, places["name"], theme.TEXT), 0)
         # After the name there is air, up to the first button.
-        self.assertEqual(ink(drawn, (name[0] + name[2], y, theme.GROUP_GAP, h - 1), theme.PANEL),
-                         theme.GROUP_GAP * (h - 1))
+        self.assertEqual(ink(drawn, (x + w, y, theme.GROUP_GAP, h - 1), theme.PANEL), theme.GROUP_GAP * (h - 1))
         # The first row of the list in the left panel is the heading of the songs, in their colour.
         x, y, _, _ = parts["left"]
         heading = (x + theme.BROWSER_PAD + theme.LIST_PAD + theme.LIST_SQUARE + theme.LIST_SPACE,
