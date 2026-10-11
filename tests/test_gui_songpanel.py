@@ -1,4 +1,4 @@
-"""Tests for rowsynth.gui.songpanel: where the playing is in a song, the rows of its channels, the panel, its saving."""
+"""Tests for rowsynth.gui.songpanel: where the playing is, the rows of the channels, the panel, saving, the mixer."""
 from __future__ import annotations
 
 import copy
@@ -18,9 +18,11 @@ from rowsynth.gui import channelbar, dials, layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
+from rowsynth.gui.mixer import Strip
 from rowsynth.gui.model import Model
 from rowsynth.gui.session import POLL_EVERY, Session
-from rowsynth.gui.songpanel import SongPanel, arrange, channel_rows, colour_of, first_channel, lowest_c, place_at
+from rowsynth.gui.songpanel import (MIXER, NOTES, SongPanel, arrange, channel_rows, colour_of, first_channel,
+                                    lowest_c, place_at)
 from rowsynth.gui.songview import Block, Channel, Note
 from rowsynth.gui.steps import WHEEL_WAIT
 from rowsynth.gui.strips import SongStrip
@@ -128,6 +130,9 @@ class Speaker:
     def position(self) -> float:
         return self.at
 
+    def level(self) -> tuple[float, float]:
+        return 0.0, 0.0
+
 
 def settle() -> None:
     """Wait for every render and every run of the checks that is still on a thread of a model's."""
@@ -165,6 +170,11 @@ def click(ui: Ui, pos: tuple[int, int]) -> None:
 def middle(rect: layout.Rect) -> tuple[int, int]:
     """The pixel in the middle of a rectangle."""
     return rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+
+
+def choose(ui: Ui, panel: SongPanel, option: str) -> None:
+    """Click NOTES or MIXER in the choice of a panel."""
+    click(ui, middle(panel.choice.cells()[panel.choice.options.index(option)]))
 
 
 def order(panel: SongPanel) -> list[str]:
@@ -240,6 +250,10 @@ class Listed(unittest.TestCase):
             HEADINGS[1],
             Row("kit", "kit", tag="thud", square=theme.MUSTARD),
         ])
+        # A channel that is not among those heard is dim too, and with none heard they all are.
+        self.assertEqual([[row.key for row in channel_rows(channels, heard) if row.dim]
+                          for heard in ({"hush", "air", "kit"}, {"low"}, set())],
+                         [["hush", "low"], ["hush", "air", "kit"], ["hush", "air", "low", "kit"]])
         # A heading stands also over no channel, and the colours start again after the last.
         self.assertEqual(channel_rows(()), list(HEADINGS))
         self.assertEqual([colour_of(4), colour_of(5)], [theme.SONG, theme.SOUND])
@@ -540,11 +554,15 @@ class Shown(unittest.TestCase):
     def test_placed_at_two_sizes_every_widget_is_inside_the_panel_and_the_strip_is_above_the_rest(self) -> None:
         panel, bar = self.panel, self.panel.bar
         self.assertEqual(arrange(RECT), {
-            "strip": (128, 26, 654, 74), "channels": (128, 104, 128, 418), "list": (131, 107, 122, 412),
-            "view": (260, 104, 522, 418), "bar": (263, 107, 516, 37), "body": (263, 146, 516, 373)})
-        # The strip, the list, the eleven widgets of the bar, the roll, the steps and the line of a fault.
-        self.assertEqual(len(panel.widgets), 16)
-        self.assertEqual(self.ui.widgets, panel.widgets)
+            "strip": (128, 26, 654, 74), "channels": (128, 104, 128, 418), "choice": (131, 107, 122, 13),
+            "list": (131, 122, 122, 397), "view": (260, 104, 522, 418), "bar": (263, 107, 516, 37),
+            "body": (263, 146, 516, 373), "mixer": (128, 104, 654, 418), "desk": (131, 122, 648, 397)})
+        # The strip, the choice, the list, the eleven widgets of the bar, the roll, the steps and the line of a
+        # fault, and then those of the mixer: its desk, five of the song's strip, and six for each of four channels.
+        self.assertEqual((len(panel.widgets), len(panel.mixer.widgets)), (17 + 30, 30))
+        self.assertEqual((self.ui.widgets, panel.widgets[17:]), (panel.widgets, panel.mixer.widgets))
+        self.assertEqual((panel.choice.rect, panel.choice.options, panel.mixing), ((131, 107, 122, 13), (NOTES, MIXER),
+                                                                                    False))
         # The bar is laid out along the top of the view, the two toggles at its right end, and all of it fits.
         parts = channelbar.arrange(arrange(RECT)["bar"])
         self.assertEqual((bar.level.rect, bar.pan.rect, bar.follow.rect, bar.ghosts.rect),
@@ -559,9 +577,12 @@ class Shown(unittest.TestCase):
             foot = panel.strip.rect[1] + panel.strip.rect[3]
             self.assertTrue(all(foot <= parts[part][1] for part in ("channels", "view")), rect)
         # In the least panel the strip is as high as in any and the list of the channels as wide, and the view
-        # has what is left.
+        # has what is left. The choice is over the list, and the mixer has all that is under the strip.
         panel.place(SMALL)
-        self.assertEqual((panel.strip.rect, panel.list.rect), ((128, 26, 492, 74), (131, 107, 122, 208)))
+        self.assertEqual({part: arrange(SMALL)[part] for part in ("choice", "list", "mixer", "desk")},
+                         {"choice": (131, 107, 122, 13), "list": (131, 122, 122, 193), "mixer": (128, 104, 492, 214),
+                          "desk": (131, 122, 486, 193)})
+        self.assertEqual((panel.strip.rect, panel.list.rect), ((128, 26, 492, 74), (131, 122, 122, 193)))
         self.assertEqual((panel.roll.rect, panel.steps.rect, panel.fault.rect),
                          ((263, 146, 354, 169), (263, 146, 354, 169), SMALL))
         # There the bar has no room for the pan, which is not seen. The level stays, and so do the toggles.
@@ -966,6 +987,112 @@ class Saved(Opened):
                          (False, {"inst": "tone", "gain": 1.03}, "air: level 1.03"))
 
 
+class Mixed(Opened):
+    def setUp(self) -> None:
+        self.opened(lambda path: path.write_text(json.dumps(EDITED), encoding="utf-8"))
+        self.mixer = self.panel.mixer
+
+    def strip(self, channel: str) -> Strip:
+        """The strip the mixer has for a channel."""
+        return next(strip for strip in self.mixer.strips if strip.channel == channel)
+
+    def dim(self) -> list[Hashable]:
+        """The channels whose rows in the list are dim."""
+        return [row.key for row in self.panel.list.rows if row.dim]
+
+    def test_the_choice_puts_the_mixer_in_place_of_the_notes_and_no_widget_of_the_part_taken_off_has_the_mouse(
+            self) -> None:
+        panel, mixer, before = self.panel, self.mixer, self.data()
+        notes = [widget for widget in panel.widgets if widget.visible]
+        self.assertEqual((panel.mixing, notes[:3], set(notes) & set(mixer.widgets)),
+                         (False, [panel.strip, panel.choice, panel.list], set()))
+        grid, fader, mute = self.at(4, 70), middle(self.strip("hush").fader.rect), middle(self.strip("hush").mute.rect)
+        choose(self.ui, panel, MIXER)
+        self.assertEqual((panel.mixing, [widget for widget in panel.widgets if widget.visible]),
+                         (True, [panel.strip, panel.choice, *mixer.widgets]))
+        # Where the roll was a press places no note, and no key plays one.
+        self.drag(grid)
+        self.assertEqual((self.data(), self.session.can_undo, self.key("z"), self.heard()), (before, False, False, []))
+        # The strip is there with either, and a block picked in it is picked for the notes too.
+        click(self.ui, block(panel, 1))
+        self.assertEqual((panel.strip.picked, panel.mixing), (1, True))
+        choose(self.ui, panel, NOTES)
+        self.assertEqual(([widget for widget in panel.widgets if widget.visible], self.roll.pattern.name),
+                         (notes, "b"))
+        # Where a fader and a toggle of the mixer were, a press sets no level and mutes nothing.
+        click(self.ui, fader)
+        click(self.ui, mute)
+        self.assertEqual((self.data(), self.session.muted), (before, frozenset()))
+
+    def test_the_choice_stays_while_the_song_is_picked_and_another_song_starts_with_its_notes(self) -> None:
+        panel = self.panel
+        choose(self.ui, panel, MIXER)
+        # The song read again, after a change from outside, is the same song.
+        self.outside("a", "air", "o4 l4 c e g a")
+        panel.update()
+        self.assertEqual((panel.mixing, self.mixer.desk.visible, self.pitches()), (True, True, [60, 64, 67, 69]))
+        self.session.pick("song", "pair")
+        panel.update()
+        self.assertEqual((panel.mixing, self.mixer.desk.visible, self.roll.visible), (False, False, True))
+        self.assertEqual([strip.channel for strip in self.mixer.strips], ["air", "low", "top", None])
+
+    def test_a_press_on_the_name_of_a_channel_in_the_mixer_picks_it_and_shows_its_notes(self) -> None:
+        panel = self.panel
+        choose(self.ui, panel, MIXER)
+        self.assertEqual([strip.channel for strip in self.mixer.strips if strip.name.picked], ["air"])
+        click(self.ui, middle(self.strip("low").name.rect))
+        self.assertEqual((panel.mixing, panel.channel, panel.list.picked, self.roll.visible, self.roll.channel),
+                         (False, "low", "low", True, "low"))
+        self.assertEqual([strip.channel for strip in self.mixer.strips if strip.name.picked], ["low"])
+        # The name of a drum channel shows the steps.
+        choose(self.ui, panel, MIXER)
+        click(self.ui, middle(self.strip("kit").name.rect))
+        self.assertEqual((panel.mixing, panel.channel, self.steps.visible, self.steps.picked),
+                         (False, "kit", True, "kit"))
+
+    def test_a_channel_that_is_not_heard_has_a_dim_row_in_the_list_as_one_with_no_text_has(self) -> None:
+        panel, session = self.panel, self.session
+        # The first channel has no text in the first pattern.
+        self.assertEqual(self.dim(), ["hush"])
+        heard = []
+        for hear in (lambda: session.mute("air"), lambda: session.solo("low"), session.hear_all):
+            hear()
+            panel.update()
+            heard.append(self.dim())
+        self.assertEqual(heard, [["hush", "air"], ["hush", "air", "kit"], ["hush"]])
+        # The mixer comes onto the window with what is muted lit and dim, before it has had a frame.
+        session.mute("low")
+        choose(self.ui, panel, MIXER)
+        self.assertEqual([(strip.channel, strip.mute.is_on, strip.dim) for strip in self.mixer.strips[1:3]],
+                         [("air", False, False), ("low", True, True)])
+        # The panel gives the mixer its frame, in which it takes up what the session was told elsewhere.
+        session.mute("low")
+        panel.update()
+        self.assertEqual((self.strip("low").mute.is_on, self.strip("low").dim), (False, False))
+        # A mute made in the mixer is seen in the list when the notes are back, and the pick is where it was.
+        click(self.ui, middle(self.strip("kit").mute.rect))
+        choose(self.ui, panel, NOTES)
+        panel.update()
+        self.assertEqual((self.dim(), panel.list.picked, session.can_undo), (["hush", "kit"], "air", False))
+
+    def test_the_knob_of_the_bar_and_the_fader_of_the_mixer_show_the_level_the_other_saved(self) -> None:
+        panel, level, fader = self.panel, self.panel.bar.level, self.strip("air").fader
+        x, y = middle(level.rect)
+        self.drag((x, y), (x, y - 5))
+        panel.update()
+        self.assertEqual((self.data()["songs"]["walk"]["channels"]["air"], fader.value, self.strip("air").number.text),
+                         ({"inst": "tone", "gain": 1.1}, 1.1, "1.1"))
+        # The fader travels 350 pixels here: 35 of them are a tenth of its travel, which is 0.2.
+        choose(self.ui, panel, MIXER)
+        x, y, w, h = fader.handle()
+        self.drag((x + w // 2, y + h // 2 - 1), (x + w // 2, y + h // 2 + 34))
+        self.assertEqual((self.data()["songs"]["walk"]["channels"]["air"]["gain"], self.session.undo_label),
+                         (0.9, "air: level 0.9"))
+        panel.update()
+        choose(self.ui, panel, NOTES)
+        self.assertEqual((level.visible, level.value, level.show(level.value)), (True, 0.9, "0.9"))
+
+
 class Piece(Opened):
     def setUp(self) -> None:
         self.opened(lambda path: shutil.copyfile(EXAMPLES / "piece.json", path))
@@ -1049,6 +1176,42 @@ class Drawn(unittest.TestCase):
             self.ui.draw(self.canvas)
             self.assertEqual([ink(self.surface, line, theme.ACTIVE) for line in (first, second)], lines)
         self.assertEqual((panel.strip.picked, panel.roll.pattern.name), (1, "b"))
+
+    def test_the_eighteen_names_of_the_piece_are_drawn_in_the_mixer_or_come_into_view_with_the_wheel_none_over_another(
+            self) -> None:
+        panel = SongPanel(Session(Model(EXAMPLES / "piece.json")), self.ui)
+        mixer, views = panel.mixer, {}
+        for size in (RECT[2:], SMALL[2:]):
+            panel.place((0, 0, *size))
+            panel.update()
+            if not panel.mixing:
+                choose(self.ui, panel, MIXER)
+            found = views[size] = []
+            first = None
+            while mixer.first != first:
+                first = mixer.first
+                self.surface.fill(theme.BACKGROUND)
+                panel.update()
+                panel.draw(self.canvas)
+                self.ui.draw(self.canvas)
+                shown = [strip for strip in mixer.strips if strip.name.visible]
+                found.append([strip.channel for strip in shown])
+                # Each name in view is drawn in its colour in its own room, and none of it in the room of the next.
+                self.assertTrue(all(ink(self.surface, strip.name.rect, strip.name.colour) for strip in shown))
+                for one, other in zip(shown, shown[1:]):
+                    self.assertLessEqual(one.name.rect[0] + one.name.rect[2], other.name.rect[0])
+                    self.assertEqual(ink(self.surface, other.name.rect, one.name.colour), 0)
+                self.assertTrue(all(lies_in(strip.name.rect, arrange((0, 0, *size))["desk"]) for strip in shown))
+                # The wheel is turned over a meter, which takes nothing from the mouse, until the view stays.
+                self.ui.handle(Event("wheel", middle(mixer.meter.rect), wheel=-1))
+        names = list(Project.load(EXAMPLES / "piece.json").songs["piece"]["channels"])
+        # In the panel the layout is drawn for all eighteen are in view, the ten tuned ones and then the drums.
+        self.assertEqual(views[RECT[2:]], [names])
+        # In the least panel thirteen are, and three steps of the wheel bring the last into view.
+        self.assertEqual([(len(shown), shown[0], shown[-1]) for shown in views[SMALL[2:]]],
+                         [(13, "lead", "snare"), (13, "lead_low", "hats"), (13, "stab2", "ohat"),
+                          (13, "stab3", "crash")])
+        self.assertEqual({name for shown in views[SMALL[2:]] for name in shown}, set(names))
 
 
 if __name__ == "__main__":

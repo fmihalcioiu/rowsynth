@@ -6,7 +6,8 @@ import time
 from collections.abc import Callable
 from typing import TYPE_CHECKING
 
-from ..edit import NOTHING
+from ..edit import NOTHING, get_in
+from ..errors import RowSynthError
 from . import theme
 from .dials import Knob, Stepper, knob_parts, plain
 from .font import ADVANCE, Font
@@ -19,6 +20,7 @@ from .ui import Label, Toggle
 if TYPE_CHECKING:
     from ..project import Project
     from .panels import Panel
+    from .session import Session
 
 #: How high the bar is: a knob, with the line of its label above it and the line of its value below.
 HEIGHT = 37
@@ -78,6 +80,23 @@ def tidy(value: float) -> int | float:
     """The number a knob was left at as it is written in the file: to two places, and whole without its point."""
     value = round(value, 2)
     return int(value) if value == int(value) else value
+
+
+def save(session: Session, where: str, value: object, label: str, absent: object = NOTHING) -> bool:
+    """Put a value at a place of the project, as one step that is called `label`, and say whether the file is as asked.
+
+    With NOTHING for the value what is there is taken out of the file. So it is with a value that is `absent`,
+    which is what the engine takes for a setting that is left out: that is not written. What the file does not
+    have is not there to take out, and is as was asked already. A change that is refused is not made, and the
+    session's message is the refusal.
+    """
+    if value is not NOTHING and value != absent:
+        return session.change(where, value, label)
+    try:
+        get_in(session.model.project.to_dict(), where)
+    except RowSynthError:
+        return True
+    return session.remove(where, label)
 
 
 def instruments(project: Project, song: str | None) -> list[str]:
@@ -299,20 +318,14 @@ class ChannelBar:
     def _change(self, key: str, value: object, words: str) -> bool:
         """Put a value at a place of the channel that is shown, as one step, and show what the file then holds.
 
-        `key` is the place in the channel, and `words` say what was done there. With NOTHING for the value
-        what is there is taken out of the file, and so it is with a value that is what the engine takes for
-        a setting left out: that is not written. The answer is whether the file is as was asked. A change
+        `key` is the place in the channel, and `words` say what was done there. It is saved as `save` saves:
+        with NOTHING for the value what is there is taken out of the file, and so it is with a value that is
+        what the engine takes for a setting left out. The answer is whether the file is as was asked. A change
         that is refused is not made, the session's message is the refusal, and the widgets show what the file
         holds as before.
         """
-        where, label = f"songs.{self.song}.channels.{self.channel}.{key}", f"{self.channel}: {words}"
-        if key in ABSENT and value == ABSENT[key]:
-            value = NOTHING
-        if value is not NOTHING:
-            saved = self.session.change(where, value, label)
-        else:
-            # What the file does not have is not there to take out: it is as was asked already.
-            saved = key not in (self._channel() or {}) or self.session.remove(where, label)
+        saved = save(self.session, f"songs.{self.song}.channels.{self.channel}.{key}", value,
+                     f"{self.channel}: {words}", ABSENT.get(key, NOTHING))
         self._read()
         return saved
 
