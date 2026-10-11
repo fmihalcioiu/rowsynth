@@ -22,9 +22,11 @@ from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model, inst_of, inst_place, own, things
+from rowsynth.gui.model import SAVE_WAITS, TEST_NOTE, TEST_TICKS, Model, things
+from rowsynth.layers import group_mix, render_groups
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
-from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems
+from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems, up
 
 EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
 
@@ -107,6 +109,18 @@ FIVE = {"row_ticks": 3,
                            "high": "o5 l8 c e g e c e g e", "under": "o2 c1"}},
         "order": ["a"]}
 QUINTET = {"instruments": PROJECT["instruments"], "songs": {"five": FIVE}}
+
+# A layered song of one bar that is built in two keys: a group of two tuned channels, and a group of two drum
+# channels, which a build mixes once for all its keys. With it a song with no layers and a sound.
+KEYED = {"row_ticks": 3, "drums": {"k": {"inst": "beep", "note": "c3"}},
+         "channels": {"tune": {"inst": "beep", "pan": -0.5}, "low": {"inst": "hum", "pan": 0.5},
+                      "kit": {"inst": "beep", "drums": True}, "tap": {"inst": "beep", "drums": True, "pan": 0.3}},
+         "patterns": {"a": {"tune": "l4 c e g > c", "low": "o3 c1", "kit": "l4 k k k k", "tap": "l8 r k r k r k r k"}},
+         "order": ["a"],
+         "layers": {"groups": {"notes": ["tune", "low"], "beat": ["kit", "tap"]},
+                    "versions": {"full": ["notes", "beat"]}, "keys": [0, 3]}}
+LAYERED = {"instruments": PROJECT["instruments"], "sounds": {"ping": PROJECT["sounds"]["ping"]},
+           "songs": {"keyed": KEYED, "tune": song("l4 c e g > c")}}
 
 
 def stems_of(data: dict, name: str = "trio", rate: int = RATE) -> dict[str, dict]:
@@ -542,6 +556,98 @@ class HearTest(ModelCase):
         self.assertEqual([model.render_ready(), model.numbers_ready()], [True, True])
 
 
+class ShiftTest(ModelCase):
+    def test_a_song_at_a_shift_is_group_for_group_what_a_build_mixes_of_it_in_that_key(self):
+        model = self.opened(LAYERED)
+        song = Project.from_dict(LAYERED).song("keyed")
+        built = render_groups(song, RATE)
+        self.assertEqual([model.shift, built["keys"], built["groups"]["beat"]["keyless"]], [0, [0, 3], True])
+        model.shift = 3
+        self.assertEqual(model.shift, 3)
+        # The whole of it is the loop of the song as the engine moves it up, which is another than as written.
+        moved = render_loop(up(song, 3), RATE)
+        self.assert_render(model.render(), [moved["left"], moved["right"]], True)
+        self.assertFalse(np.array_equal(moved["left"], render_loop(song, RATE)["left"]))
+        # The tuned group is its mix in that key. The drums are the one mix a build has of them for every key.
+        for group, channels in KEYED["layers"]["groups"].items():
+            with self.subTest(group=group):
+                model.hear(channels)
+                self.assert_render(model.render(), list(group_mix(built["groups"][group], 3)), True)
+        model.shift = 0
+        self.assert_render(model.render(), list(group_mix(built["groups"]["beat"], 0)), True)
+        # The numbers are those of the song where it is heard, and down is a shift below 0.
+        model.hear(None)
+        written = model.numbers()
+        model.shift = -12
+        self.assertLess(model.numbers()["centroid_hz"], written["centroid_hz"])
+
+    def test_the_render_of_a_shift_is_made_once_on_the_thread_of_a_render_and_kept_with_its_mixes(self):
+        model = self.opened(LAYERED)
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
+            model.render()
+            model.shift = 3
+            self.assertFalse(model.render_ready())
+            model.start_render()
+            (worker,) = model._rendered._workers.values()
+            worker.join()
+            self.assertEqual([worker.name, model.render_ready(), engine.call_count], ["rowsynth-render", True, 2])
+            made = model.render()
+            # The same shift set again, a mix of some channels and the numbers are all made of that one render.
+            model.shift = 3
+            model.numbers()
+            model.hear({"tune"})
+            self.assertIsNot(model.render(), made)
+            model.hear(None)
+            self.assertIs(model.render(), made)
+            self.assertEqual(engine.call_count, 2)
+
+    def test_another_thing_picked_is_heard_as_it_is_written_and_the_same_thing_picked_again_keeps_its_shift(self):
+        model = self.opened(LAYERED)
+        model.shift = 3
+        model.pick("song", "keyed")
+        self.assertEqual(model.shift, 3)
+        for picked in (("song", "tune"), ("song", "keyed")):
+            model.pick(*picked)
+            self.assertEqual(model.shift, 0)
+            self.assert_loop(model.render(), LAYERED, picked[1])
+        # A picked song that is gone from the file leaves nothing picked, and no shift.
+        model.shift = 3
+        model.change("songs.keyed", delete=True)
+        self.assertEqual([model.picked, model.shift], [None, 0])
+
+    def test_a_shift_is_refused_while_no_song_is_picked_and_when_it_is_no_whole_number_and_stays_as_it_was(self):
+        model = self.opened(LAYERED)
+        model.shift = 3
+        for semis in (1.5, "2", True, None):
+            with self.subTest(semis=semis):
+                with self.assertRaises(RowSynthError) as refused:
+                    model.shift = semis
+                self.assertEqual(str(refused.exception),
+                                 f"a song is heard a whole number of semitones up, not {semis!r}")
+        self.assertEqual(model.shift, 3)
+        model.pick("sound", "ping")
+        with self.assertRaises(RowSynthError) as refused:
+            model.shift = 3
+        self.assertEqual(str(refused.exception), "no song is picked, so there is nothing to hear in another key")
+        self.assertEqual(model.shift, 0)
+
+    def test_what_the_engine_refuses_of_a_song_moved_up_is_refused_as_any_render_that_went_wrong(self):
+        model = self.opened(LAYERED)
+        with self.assertRaises(RowSynthError) as engine_said:
+            render_stems(up(Project.from_dict(LAYERED).song("keyed"), 80), RATE)
+        self.assertIn("the note at row 0 is 140", str(engine_said.exception))
+        model.shift = 80
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
+            for ask in (model.render, model.numbers, model.render):
+                with self.assertRaises(RowSynthError) as refused:
+                    ask()
+                self.assertEqual(str(refused.exception), str(engine_said.exception))
+        self.assertEqual([engine.call_count, model.render_ready(), model.levels(0.0)], [1, True, {}])
+        # Brought back to a shift the engine takes, the song is heard again.
+        model.shift = 0
+        self.assert_loop(model.render(), LAYERED, "keyed")
+
+
 class LevelsTest(ModelCase):
     # What the middle channel reads at its loudest: its one sample, 3 dB down.
     MIDDLE = 0.5 * math.cos(math.pi / 4)
@@ -689,11 +795,28 @@ class ToneTest(ModelCase):
         np.testing.assert_array_equal(model.tone("hum", 60)["sides"][0], self.note(after["instruments"]["hum"], 60))
         self.assertFalse(np.array_equal(model.tone("hum", 60)["sides"][0], made["sides"][0]))
 
+    def test_an_instrument_written_in_place_is_heard_as_it_is_written_and_its_tones_are_kept_by_its_json_text(self):
+        model = self.opened()
+        written = {"wave": "saw", "vol": [15, 9, 3]}
+        with mock.patch.object(gui_model, "render_entry", wraps=render_entry) as engine:
+            made = model.tone(written, 64, 3)
+            np.testing.assert_array_equal(made["sides"][0], self.note(written, 64, 3))
+            # Another dict that holds the same is the same instrument, and one that holds something else is not.
+            self.assertIs(model.tone(copy.deepcopy(written), "e4", 3), made)
+            self.assertIsNot(model.tone({**written, "wave": "tri"}, 64, 3), made)
+            self.assertEqual(engine.call_count, 2)
+        # The tone has an instrument of its own: the dict it was made of is another one once it is changed.
+        written["vol"].append(0)
+        np.testing.assert_array_equal(model.tone(written, 64, 3)["sides"][0], self.note(written, 64, 3))
+        self.assertFalse(np.array_equal(model.tone(written, 64, 3)["sides"][0], made["sides"][0]))
+
     def test_a_tone_that_cannot_be_made_is_refused(self):
         model = self.opened()
         for said, asked in (
             ("no instrument named 'bell'", ("bell", 60)),
-            ("no instrument named {'wave': 'saw'}", ({"wave": "saw"}, 60)),
+            ("no instrument named ['hum']", (["hum"], 60)),
+            ("def: voices[0].inst: unknown key 'wav'", ({"wav": "saw"}, 60)),
+            ("an instrument holds what a file can hold, and this one does not: {'vol': {15}}", ({"vol": {15}}, 60)),
             ("not a note: 'x9'", ("hum", "x9")),
             ("the ticks of a note must be a number, not [6]", ("hum", 60, [6])),
             ("def: voices[0].notes[0][2]: must be 0 or more, not -1", ("hum", 60, -1)),

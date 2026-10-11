@@ -101,8 +101,9 @@ class Session:
     `change_many`, and each change is in the file as soon as it is made. Every change is a step that `undo`
     takes back and `redo` makes again, and so is what another program changed in the file.
 
-    The channels of the picked song can be muted and soloed, with `mute` and `solo`. That is a way of listening
-    and no change: nothing of it is in the file, it is no step, and another thing picked has none of it.
+    The channels of the picked song can be muted and soloed, with `mute` and `solo`, and the song can be heard
+    in another key, with `key`. That is a way of listening and no change: nothing of it is in the file, it is
+    no step, and another thing picked has none of it.
     """
 
     def __init__(self, model: Model, player: Player | None = None,
@@ -160,8 +161,8 @@ class Session:
         there is no sound output, said at the first tick and each time something is to play; the things that
         changed outside; what went wrong with the render of the picked thing; what went wrong with the checks;
         why a change, or a step taken back or made again, was refused; that a change made here took the place
-        of one made outside at the same moment; why a single note did not sound; why a mute or a solo was
-        refused; what `say` was given. A pick clears it, and so does a change or a step that is made.
+        of one made outside at the same moment; why a single note did not sound; why a mute, a solo or a key
+        was refused; what `say` was given. A pick clears it, and so does a change or a step that is made.
         """
         return self.model.problem or self._said
 
@@ -250,6 +251,11 @@ class Session:
         return self._soloed
 
     @property
+    def shift(self) -> int:
+        """The semitones up from how it is written that the picked song is heard at, as `key` set them: 0 at first."""
+        return self.model.shift
+
+    @property
     def findings_refused(self) -> bool:
         """Whether the checks are through with no findings to give: they refused the project, or broke on it."""
         return self.model.findings_ready() and self.model.count() is None
@@ -275,7 +281,7 @@ class Session:
 
         A sound or an instrument is played once as soon as its render is ready, unless `audition` is off. What
         the project does not have is refused, and then nothing changes. Another thing than the one that was
-        picked has nothing muted and nothing soloed.
+        picked has nothing muted and nothing soloed, and is heard as it is written.
         """
         before = self.model.picked
         self.model.pick(kind, name)
@@ -408,12 +414,13 @@ class Session:
             self.player.stop(let[1])
             self.player.also(let[2])
 
-    def sound(self, inst: str, pitch: str | float, song: str | None = None) -> None:
+    def sound(self, inst: str | dict, pitch: str | float, song: str | None = None) -> None:
         """Sounds one note of an instrument at once, over whatever plays, which goes on.
 
         `inst` is a name, looked for as `Model.tone` looks: among the instruments of `song` first, if it is a
-        song of the project. With no player nothing happens. A note that is refused, as one of an instrument
-        nobody has, does not sound, and the message is the refusal.
+        song of the project. Or it is the instrument itself, a dict, as a voice of a sound has one that is
+        written in place. With no player nothing happens. A note that is refused, as one of an instrument
+        nobody has or of one the engine refuses, does not sound, and the message is the refusal.
         """
         if self.player is None:
             return
@@ -459,6 +466,28 @@ class Session:
         """Takes every mute and every solo off, so that all channels of the picked song are heard."""
         self._muted = self._soloed = frozenset()
         self._listen()
+
+    def key(self, semis: int) -> bool:
+        """Has the picked song heard in another key, so many semitones up from how it is written: a way of listening.
+
+        0 is the song as written. The model renders the song in the key as a build does, its drum channels
+        playing what they played, on a thread of its own. Nothing in the file changes, and what is muted and
+        soloed stays so. The key is taken up as a mute is: a loop that plays goes on in it from the place it is
+        at, as soon as its render is there, and with nothing playing it is what the next play sounds like.
+
+        Refused are a key while no song is picked and one that is no whole number: the answer is false, the
+        message says why, and the key stays as it was. What the engine refuses of the song in the key, as a
+        note it has no room for, is said as any render that went wrong, and stops what plays.
+        """
+        before = self.model.shift
+        try:
+            self.model.shift = semis
+        except RowSynthError as error:
+            self.say(str(error))
+            return False
+        if self.model.shift != before:
+            self._follow()
+        return True
 
     def levels(self) -> dict[str, float]:
         """How loud each channel of the picked song is at the place it plays at, 0 to 1 by name: for the meters.
@@ -580,14 +609,21 @@ class Session:
     def _listen(self) -> None:
         """Has the mutes and solos heard: by the model now, and by what plays as soon as the mix is there.
 
-        The mix is taken up here where the model has it at once, and else by a later `tick`. Where what is
-        heard stays as it was, as with a channel muted while another is soloed, nothing is taken up again.
+        Where what is heard stays as it was, as with a channel muted while another is soloed, nothing is taken
+        up again.
         """
         if self._hear():
-            self._taken = False
-            self.model.start_render()
-            if self.model.render_ready():
-                self._take()
+            self._follow()
+
+    def _follow(self) -> None:
+        """Has what plays follow another way of listening to the picked song: other channels, or another key.
+
+        The render of it is begun, and is taken up here where the model has it at once, and else by a later `tick`.
+        """
+        self._taken = False
+        self.model.start_render()
+        if self.model.render_ready():
+            self._take()
 
     def _begin(self, which: int | None, holding: bool) -> None:
         """Has the picked thing play as soon as its render is there, in the way `play` or `hold` asked for."""

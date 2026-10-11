@@ -21,7 +21,7 @@ from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import KINDS, Model
 from rowsynth.gui.session import BOTH, GLOW_TIME, HOLD, NOTICE_TIME, POLL_EVERY, Session, joined, piano
 from rowsynth.project import Project
-from rowsynth.song import mix_stems, render_stems
+from rowsynth.song import mix_stems, render_loop, render_stems, up
 
 RATE = 8000
 
@@ -368,6 +368,17 @@ class HearTest(SessionCase):
             session.sound(*asked)
             self.assertEqual(session.message, said)
         self.assertEqual(self.speaker.asked, [])
+
+    def test_an_instrument_written_in_place_sounds_as_it_is_written_and_one_the_engine_refuses_is_the_message(self):
+        session = self.opened(HEARD)
+        written = {"wave": "saw", "vol": 9}
+        session.sound(written, 64)
+        ((sides,),) = self.speaker.did("also")
+        self.assertIs(sides, session.model.tone(written, "e4")["sides"])
+        self.assertFalse(np.array_equal(sides[0], session.model.tone("beep", 64)["sides"][0]))
+        session.sound({"wav": "saw"}, 64)
+        self.assertEqual([session.message, len(self.speaker.did("also"))],
+                         ["def: voices[0].inst: unknown key 'wav'", 1])
 
     def test_a_sound_with_variants_plays_them_in_turn_or_the_one_that_is_asked_for(self):
         session = self.opened(HEARD)
@@ -1176,6 +1187,79 @@ class MuteTest(SessionCase):
         session.tick()
         self.assert_swapped(session.model.render())
         self.assertIs(session.numbers(), numbers)
+
+
+class KeyTest(SessionCase):
+    def moved(self, semis: int) -> dict:
+        """The loop the engine makes of the band of MIXED moved up some semitones."""
+        return render_loop(up(Project.from_dict(MIXED).song("band"), semis), RATE)
+
+    def test_a_loop_that_plays_goes_on_in_another_key_when_the_render_of_it_is_there_and_is_not_begun_again(self):
+        session = self.opened(MIXED)
+        whole = session.model.render()
+        session.play()
+        go = self.held()
+        self.assertEqual(session.shift, 0)
+        self.assertTrue(session.key(2))
+        session.tick()
+        self.assertEqual([session.shift, session.model.shift, self.speaker.did("swap")], [2, 2, []])
+        go.set()
+        settle()
+        session.tick()
+        made = session.model.render()
+        self.assert_swapped(made)
+        self.assert_played((whole, True))
+        self.assertEqual([self.speaker.did("stop"), session.playing, session.message], [[], True, ""])
+        for side, wanted in zip(made["sides"], (self.moved(2)["left"], self.moved(2)["right"]), strict=True):
+            np.testing.assert_array_equal(side, wanted)
+        # The key it is heard in already gives the loop nothing new.
+        self.assertTrue(session.key(2))
+        session.tick()
+        self.assert_swapped(made)
+
+    def test_a_key_set_while_nothing_plays_is_what_the_next_play_sounds_like_and_keeps_what_is_soloed(self):
+        session = self.opened(MIXED)
+        session.solo("bass")
+        self.assertTrue(session.key(-3))
+        settle()
+        self.assertEqual(self.speaker.asked, [])
+        session.play()
+        made = session.model.render()
+        self.assert_played((made, True))
+        self.assertEqual([session.soloed, session.model.heard, session.shift], [{"bass"}, {"bass"}, -3])
+        stems = render_stems(up(Project.from_dict(MIXED).song("band"), -3), RATE)["stems"]
+        bass = mix_stems([stem for stem in stems if stem["name"] == "bass"], BAND_SAMPLES)
+        for side, wanted in zip(made["sides"], bass, strict=True):
+            np.testing.assert_array_equal(side, wanted)
+        # The same thing picked again keeps its key, and another thing is heard as it is written.
+        session.pick("song", "band")
+        self.assertEqual(session.shift, -3)
+        session.pick("song", "tune")
+        self.assertEqual(session.shift, 0)
+
+    def test_a_key_that_is_refused_is_the_message_and_one_the_engine_refuses_is_said_and_stops_what_plays(self):
+        session = self.opened(MIXED)
+        whole = session.model.render()
+        session.play()
+        self.assertFalse(session.key(1.5))
+        self.assertEqual([session.message, session.messages, session.shift],
+                         ["a song is heard a whole number of semitones up, not 1.5", 1, 0])
+        # A key that takes a note past the highest there is: the render of it is refused, and that is said.
+        with self.assertRaises(RowSynthError) as refused:
+            self.moved(80)
+        self.assertTrue(session.key(80))
+        settle()
+        session.tick()
+        self.assertEqual([session.message, session.playing, session.shift, self.speaker.did("stop")],
+                         [str(refused.exception), False, 80, [()]])
+        # In a key the engine takes it is rendered again, and is there to play.
+        self.assertTrue(session.key(0))
+        settle()
+        session.play()
+        self.assert_played((whole, True), (session.model.render(), True))
+        session.pick("sound", "zap")
+        self.assertFalse(session.key(2))
+        self.assertEqual(session.message, "no song is picked, so there is nothing to hear in another key")
 
 
 class NoticeTest(SessionCase):

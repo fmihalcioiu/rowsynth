@@ -380,6 +380,85 @@ class Shown(Opened):
         self.assertEqual((self.song()["layers"]["keys"], self.session.message),
                          ([0, 2], "the song is heard in key 2 already"))
 
+    def test_a_press_on_the_keys_opens_a_menu_to_hear_the_song_in_one_of_them_which_the_field_then_shows(
+            self) -> None:
+        layers, session, model = self.layers, self.session, self.session.model
+        self.click(middle(self.table.play("thin")))
+        settle()
+        session.tick()
+        self.click(middle(layers.keys.rect))
+        self.assertIsInstance(self.ui.modal, Menu)
+        self.assertEqual(([(item.text, item.icon) for item in self.ui.modal.items], self.ui.modal.rect[:2]),
+                         ([("hear in 0", "tick"), ("hear in +2", "")], (272, 135)))
+        self.choose("hear in +2")
+        self.assertEqual((session.shift, layers.keys.picked, self.ui.modal, self.song()), (2, 1, None, TUNE))
+        # The loop goes on in that key when the render of it is there, the channels of the version alone as before.
+        settle()
+        session.tick()
+        self.assertEqual(([asked[0] for asked in self.speaker.asked], model.heard),
+                         (["play", "swap"], frozenset({"kit", "bass"})))
+        self.assertIs(self.speaker.asked[-1][1], model.render()["sides"])
+        self.click(middle(layers.keys.rect))
+        self.assertEqual([item.icon for item in self.ui.modal.items], ["", "tick"])
+        self.ui.handle(Event("key", key="escape"))
+        # While it is another key than the first, the key that is heard stays the one shown, whatever the wheel does.
+        self.assertTrue(self.ui.handle(Event("wheel", middle(layers.keys.rect), wheel=-1)))
+        layers.update()
+        self.assertEqual(layers.keys.picked, 1)
+        # The button of a version and ALL leave the key as it is.
+        self.click(middle(self.table.play("beat")))
+        self.click(middle(layers.all.rect))
+        self.assertEqual((session.shift, model.heard), (2, None))
+        # Heard in its first key again, the song has the field free to show any of its keys.
+        self.click(middle(layers.keys.rect))
+        self.choose("hear in 0")
+        self.assertEqual((session.shift, layers.keys.picked), (0, 0))
+        self.ui.handle(Event("wheel", middle(layers.keys.rect), wheel=1))
+        layers.update()
+        self.assertEqual((session.shift, layers.keys.picked), (0, 1))
+
+    def test_a_key_that_goes_from_the_song_while_the_song_is_heard_in_it_gives_way_to_the_first_key(self) -> None:
+        layers, session = self.layers, self.session
+        self.click(middle(layers.keys.rect))
+        self.choose("hear in +2")
+        self.click(middle(layers.key_drop.rect))
+        self.assertEqual((self.song()["layers"].get("keys"), session.undo_label, session.shift, layers.keys.options),
+                         (None, "tune: key +2 removed", 0, ("0",)))
+        # The first key is one that can go as well: the song is then heard in the key that is the first after it.
+        self.assertTrue(session.undo())
+        layers.update()
+        self.assertEqual((layers.keys.options, layers.keys.picked, session.shift), (("0", "+2"), 0, 0))
+        self.click(middle(layers.key_drop.rect))
+        self.assertEqual((self.song()["layers"]["keys"], session.shift, layers.keys.options, layers.keys.picked),
+                         ([2], 2, ("+2",), 0))
+        # Another song that is shown has lost no key: what is heard stays in the key it was heard in.
+        layers.show("plain")
+        self.assertEqual((session.shift, session.message), (2, ""))
+
+    def test_another_song_is_seen_from_the_top_left_and_what_is_added_to_a_table_is_brought_into_view(self) -> None:
+        layers, table = self.layers, self.table
+        self.assertTrue(self.session.change("songs.twin", TUNE, "twin added"))
+        # One group of the four is in view, and three versions.
+        layers.place((131, 122, 200, 110))
+        self.ui.handle(Event("wheel", middle(table.laid.rows[0]), wheel=-2))
+        self.ui.handle(Event("wheel", middle(table.laid.heads[2]), wheel=-1))
+        self.assertEqual((table.first_group, table.first_version), (2, 1))
+        layers.show("twin")
+        self.assertEqual((table.first_group, table.first_version, [group.name for group in table.groups]),
+                         (0, 0, list(LAYERS["groups"])))
+        # A version and a group that are added are the last of them, which the table then has in view.
+        nothing = (table.rect[0], table.rect[1], 0, 0)
+        self.click(middle(table.laid.add_version))
+        self.assertEqual((table.first_version, len(table.laid.heads), table.versions[-1].name), (2, 3, "version"))
+        self.assertNotEqual(table.play("version"), nothing)
+        self.click(middle(table.laid.add_group))
+        self.assertEqual((table.first_group, len(table.laid.rows), table.groups[-1].name), (4, 1, "group"))
+        self.assertNotEqual(table.cell("group", "version"), nothing)
+        # One that is added to a table that shows all of it leaves the table where it is.
+        layers.place(DESK)
+        self.click(middle(table.laid.add_group))
+        self.assertEqual((table.first_group, table.first_version, len(table.laid.rows)), (0, 0, 6))
+
     def test_the_intro_is_switched_on_its_tail_and_its_patterns_are_set_and_it_is_switched_off(self) -> None:
         layers = self.layers
         self.assertEqual((layers.intro.is_on, layers.tail.visible, layers.picture.visible), (False, False, False))

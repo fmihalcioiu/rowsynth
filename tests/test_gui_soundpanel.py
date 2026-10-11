@@ -832,6 +832,17 @@ class Saved(OnAFile):
         self.panel.update()
         self.assertEqual((self.data(), self.view.drawn, self.session.can_redo), (after, placed, False))
 
+    def test_a_note_placed_in_a_voice_whose_instrument_is_written_in_place_is_heard_in_that_instrument(self) -> None:
+        written = {"wave": "saw", "release": 0}
+        settle()
+        self.open({**OWN, "sounds": {"own": {"def": {"voices": [{"inst": written, "notes": [[0, "c4", 6]]}]}}}})
+        self.pick("own")
+        self.drag(self.at(2, 65))
+        self.assertEqual((self.data()["sounds"]["own"]["def"]["voices"][0], self.session.message),
+                         ({"inst": written, "notes": [[0, "c4", 6], [2, "f4", 6]]}, ""))
+        self.assertEqual((len(self.speaker.notes), self.speaker.played), (1, []))
+        self.assertIs(self.speaker.notes[0], self.session.model.tone(written, 65)["sides"])
+
     def test_a_note_placed_in_the_second_variant_changes_that_variant_alone_and_it_is_the_one_played(self) -> None:
         self.pick("pair")
         self.session.audition = True

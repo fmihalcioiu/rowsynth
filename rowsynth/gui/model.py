@@ -23,7 +23,7 @@ from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
 from ..notes import midi
 from ..project import Project
-from ..song import mix_stems, pan_gains, render_stems
+from ..song import mix_stems, pan_gains, render_stems, up
 
 # What a write to the file answers.
 _Told = TypeVar("_Told")
@@ -251,6 +251,14 @@ def _instrument(project: Project, name: object, song: str | None) -> tuple[tuple
     return (None, found), project.instruments[found]
 
 
+def _written(inst: dict) -> str:
+    """The JSON text of an instrument that is written in place, which its notes are kept by. Refused with none."""
+    try:
+        return json.dumps(inst)
+    except (TypeError, ValueError):
+        raise RowSynthError(f"an instrument holds what a file can hold, and this one does not: {inst!r}") from None
+
+
 def _channels(project: Project, picked: tuple[str, str] | None) -> list[str] | None:
     """The names of the channels of the picked thing where it is a song the project has. None where it is not."""
     kind, name = picked or (None, None)
@@ -262,7 +270,7 @@ def _number(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
+def _make(project: Project, picked: tuple[str, str] | None, rate: int, shift: int = 0) -> dict:
     """One thing of a project as sound, and the numbers of that sound: {"render", "numbers", "stems"}.
 
     The stems are those a song is the mix of, as `render_stems` gives them. A sound or an instrument has None.
@@ -274,8 +282,10 @@ def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
     if kind == "song":
         # The song is played once, into its stems, and the two sides are all of those mixed. So the sides are
         # sample for sample those of `song.render_loop`, and any of the stems mixed again are the song with
-        # only those channels in it.
-        played = render_stems(project.song(name), rate)
+        # only those channels in it. With a shift it is played that many semitones up, moved as it is moved
+        # for a key of a build: its drum channels keep what they play.
+        song = project.song(name)
+        played = render_stems(up(song, shift) if shift else song, rate)
         stems = played["stems"]
         sides = list(mix_stems(stems, played["loop_samples"]))
     elif kind == "sound":
@@ -552,6 +562,47 @@ class Model:
         with self._lock:
             self._heard = only
 
+    # The picked thing, and the semitones up from how it is written that it is heard at while it is a song.
+    _thing: tuple[str, str] | None = None
+    _shift = 0
+
+    @property
+    def _picked(self) -> tuple[str, str] | None:
+        """The picked thing, as `picked` gives it. Another one put in its place is heard as it is written."""
+        return self._thing
+
+    @_picked.setter
+    def _picked(self, picked: tuple[str, str] | None) -> None:
+        if picked != self._thing:
+            self._shift = 0
+        self._thing = picked
+
+    @property
+    def shift(self) -> int:
+        """The semitones up from how it is written that the picked song is heard at: a way of listening.
+
+        It is 0 to start with, the song as written, and is set to any whole number, below 0 for down. The song
+        is then rendered that much higher, moved up as `song.up` moves it for a key of a build: its drum
+        channels play what they played. The render, its stems, its numbers and its levels are those of the
+        song so moved, and a mix of some of its channels is made of those stems. Nothing in the file changes.
+        The shift is part of what a render is kept by: the render of a shift is made once for as long as it
+        stays, on a thread of its own when `start_render` begins it. What the engine refuses of the song moved
+        up, as a note it has no room for, is refused as any render that went wrong.
+
+        Another thing picked is heard as it is written: the shift is 0 again. Refused are a shift while no song
+        is picked and one that is no whole number, and then it stays as it was.
+        """
+        return self._shift
+
+    @shift.setter
+    def shift(self, semis: int) -> None:
+        if _channels(self._project, self._picked) is None:
+            raise RowSynthError("no song is picked, so there is nothing to hear in another key")
+        if isinstance(semis, bool) or not isinstance(semis, int):
+            raise RowSynthError(f"a song is heard a whole number of semitones up, not {semis!r}")
+        with self._lock:
+            self._shift = semis
+
     def render(self) -> dict:
         """The picked thing as sound: {"sides", "rate", "loop", "seconds", "buffers"}. Each side is a float32 array.
 
@@ -581,7 +632,7 @@ class Model:
 
         {"seconds", "peak_db", "rms_db", "dc", "clipped", "head_step", "tail_step", "above_4k", "centroid_hz"}, as
         `measure` and `brightness` give them. They are made with the render and kept with it. Those of a song
-        are of the whole song as it is in the file, whichever of its channels are heard.
+        are of the whole song at the shift it is heard at, whichever of its channels are heard.
         """
         return self._rendered.take()["numbers"]
 
@@ -617,19 +668,21 @@ class Model:
                 read[stem["name"]] = min(1.0, loudest * max(pan_gains(stem["pan"])))
         return read
 
-    def tone(self, inst: str, pitch: str | float, ticks: float = TEST_TICKS, song: str | None = None) -> dict:
+    def tone(self, inst: str | dict, pitch: str | float, ticks: float = TEST_TICKS, song: str | None = None) -> dict:
         """One note of an instrument as sound: {"sides", "rate"}, one side, at the level the bank gives a sound.
 
         `inst` is the name of an instrument: one of the song's own where `song` names a song of the project
-        that has it, and else one of the project's. `pitch` is a note, a name such as "c#4" or a number, and
-        it is held for `ticks`. With the test note and its ticks, the side is the render of the instrument.
+        that has it, and else one of the project's. Or it is the instrument itself, a dict, as a voice of a
+        sound has one that is written in place. `pitch` is a note, a name such as "c#4" or a number, and it is
+        held for `ticks`. With the test note and its ticks, the side is the render of the instrument.
 
         The note is made at once, on the thread that asks. The last `TONES` asked for are kept, by instrument,
         pitch and ticks, until the file is loaded again with something in it changed: one of them asked for
-        again is the same sound, and costs nothing. A name no instrument has is refused, and so is a pitch
-        that is no note, and whatever the engine refuses of the note.
+        again is the same sound, and costs nothing. An instrument written in place is kept by its JSON text.
+        A name no instrument has is refused, and so is a pitch that is no note, and whatever the engine
+        refuses of the note or of an instrument written in place, which it checks as it checks any.
         """
-        where, found = _instrument(self._project, inst, song)
+        where, found = (_written(inst), inst) if isinstance(inst, dict) else _instrument(self._project, inst, song)
         if isinstance(ticks, bool) or not isinstance(ticks, Real):
             raise RowSynthError(f"the ticks of a note must be a number, not {ticks!r}")
         key = (where, midi(pitch), ticks)
@@ -815,8 +868,8 @@ class Model:
         return found
 
     def _render_job(self) -> tuple[tuple, tuple]:
-        """What a render made now would be of, the load of the file and the picked thing, and what it is made from."""
-        return (self._loads, self._picked), (self._project, self._picked, self.rate)
+        """What a render made now would be of, and what it is made from: the load, the picked thing and its shift."""
+        return (self._loads, self._picked, self._shift), (self._project, self._picked, self.rate, self._shift)
 
     def _mix_job(self) -> tuple[tuple, tuple]:
         """What a mix made now would be of, the render of now and the channels heard, and what it is made from."""

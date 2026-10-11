@@ -632,10 +632,9 @@ class SoundPanel(Panel):
     def _sound(self, inst: str | dict, pitch: float) -> None:
         """Let a note of the instrument of a voice be heard, over whatever plays.
 
-        An instrument that is written in place in its voice has no name to ask the session for, and is not heard.
+        The voice names its instrument, or has it written in place: the session is handed either as it is.
         """
-        if isinstance(inst, str):
-            self.session.sound(inst, pitch)
+        self.session.sound(inst, pitch)
 
     def _voice(self, voice: int) -> None:
         """Take the voice that was picked in the bar as the one a new note of the view goes into."""

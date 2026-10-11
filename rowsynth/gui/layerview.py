@@ -244,7 +244,8 @@ class Table(Widget):
     A table too small for all its groups or all its versions shows them from `first_group` and from
     `first_version` on, which are places among all there are. The wheel over the headings moves the versions
     by a column a step, and anywhere else on the table the groups by a row. A small arrow marks each way in
-    which there are more, as `more` has them. What is not in view cannot be pressed.
+    which there are more, as `more` has them. What is not in view cannot be pressed. `to_last` brings the last
+    group or the last version into view, for the owner to call when one was added.
     """
 
     def __init__(self, rect: Rect, flipped: Callable[[str, str], object] | None = None,
@@ -283,6 +284,17 @@ class Table(Widget):
         """Keep the first group and the first version in view to what the table has room for, as `lay` keeps them."""
         laid = self.laid
         self.first_group, self.first_version = laid.first_group, laid.first_version
+
+    def to_last(self, kind: str) -> None:
+        """Bring the last group or the last version into view, by the kind "group" or "version".
+
+        What is in view moves on as far as that takes and no further, and stays where the last one is in it.
+        """
+        if kind == "group":
+            self.first_group = len(self.groups)
+        else:
+            self.first_version = len(self.versions)
+        self._settle()
 
     def _place(self, kind: str, name: str) -> int | None:
         """The place a group or a version in view has among all there are, by its name. None for one not in view."""
@@ -431,6 +443,26 @@ class Table(Widget):
                         canvas.hline(x - step, y + back * step, 2 * step + 1, theme.DIM)
 
 
+class Keys(Stepper):
+    """The keys of a song in a field, one of them shown between two arrows: a stepper that a press asks through.
+
+    The wheel goes through the keys as on any stepper. A press of the left button steps nowhere: let go on the
+    field, it calls `pressed`.
+    """
+
+    def __init__(self, rect: Rect, pressed: Callable[[], object], help: str = "") -> None:
+        super().__init__(rect, ("",), help=help)
+        self.pressed = pressed
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Use the wheel and a press of the left button as a stepper does, and tell of its release on the field."""
+        if event.kind != "up":
+            return super().on(event, ui)
+        if event.button == 1 and ui.held is self and self.hit(event.pos):
+            self.pressed()
+        return False
+
+
 class Picture(Widget):
     """A small picture of an intro: its patterns as blocks before the block the loop begins with.
 
@@ -535,13 +567,20 @@ class Layers:
     opens a menu to name it anew or remove it, and for a group to pick its channels from those of the song: a
     channel is in one group, so one that is picked leaves the group it was in. The menu of a version has each
     key of the song as well, to have the version premixed in it: one more file at the build. Groups and
-    versions the table has no room for are brought into view by the wheel.
+    versions the table has no room for are brought into view by the wheel, and one that is added is brought
+    into view as it is added. Another song is seen from its first group and its first version.
 
     The button in the heading of a version has that version heard alone: the channels of its groups are the
     soloed channels of the session, so it is the sound the solos of the mixer give, with nothing rendered
     again, and the song plays if it did not. The button of another version changes over as the song plays, and
-    `all` has every channel heard again. `keys` shows the keys the song is built in, `key_add` adds one that is
-    typed, and `key_drop` removes the one that is shown. The song is heard as it is written whichever is shown.
+    `all` has every channel heard again. Neither changes the key the song is heard in.
+
+    `keys` shows the keys the song is built in, one at a time, `key_add` adds one that is typed, and `key_drop`
+    removes the one that is shown. A press on `keys` opens a menu with an item for each key, to hear the song
+    in it, with a tick before the one it is heard in: the session has the song rendered in that key as the
+    build renders it, and a loop that plays goes on in it. The key that is chosen is the one shown, and while
+    it is another than the first key it stays the one shown, whatever the wheel or a new key would show. A key
+    that goes from the song while the song is heard in it gives way to the first key.
 
     `intro` is the switch of the intro, with or without layers. While it is on, `order` shows the patterns it
     plays and opens a menu to add one or take the last out, `tail` and `fade` are its two lengths, and
@@ -564,8 +603,8 @@ class Layers:
         self.about = add(Label(nowhere, ABOUT))
         self.all = add(Button(nowhere, ALL, action=self._all, help="hear every channel again, and no version alone"))
         self.keys_word = add(Label(nowhere, KEYS))
-        self.keys = add(Stepper(nowhere, ("",), help="the keys the song is built in, as semitones up: it is heard "
-                                                       "here as it is written"))
+        self.keys = add(Keys(nowhere, self._ask_heard, help="the keys the song is built in, as semitones up: a "
+                                                            "press opens them, to hear the song in one"))
         self.key_add = add(Button(nowhere, icon="plus", action=self._ask_key,
                                   help="one more key: type how many semitones up the song is built as well"))
         self.key_drop = add(Button(nowhere, icon="minus", action=self._drop_key))
@@ -621,12 +660,15 @@ class Layers:
 
         The song that is shown already is read again only where the model has loaded its file again, and not
         while a knob is under the hand. Another song takes the part at once, and what the hand was doing to a
-        knob is dropped, with nothing saved.
+        knob is dropped, with nothing saved. Its table is seen from the top left, and its first key is shown.
         """
         if song != self.song:
             self.tail.drop()
             self.fade.drop()
             self.song = song
+            # Nothing is kept of the song before: where its table was seen from, and the keys it had.
+            self.table.first_group = self.table.first_version = 0
+            self._keys = []
             self._read()
         elif not self.busy and self.session.model.project is not self._project:
             self._read()
@@ -635,24 +677,33 @@ class Layers:
         """Give the knobs their frame, read the song again where the file was loaded again, and light what is heard.
 
         The frame of a knob ends a run of the wheel whose time is up, which saves it. While a knob is under the
-        hand nothing is read. The button of a version is lit while the channels that are heard are its own.
+        hand nothing is read. The button of a version is lit while the channels that are heard are its own, and
+        the key the song is heard in is the one shown while it is another than the first.
         """
         self.tail.update()
         self.fade.update()
         if not self.busy and self.session.model.project is not self._project:
             self._read()
+        key = self.session.model.shift
+        if key in self._keys[1:]:
+            self.keys.picked = self._keys.index(key)
         heard = self.session.model.heard
         self.table.heard = frozenset(name for name, channels in self._channels.items()
                                      if channels and channels == heard)
 
     def _read(self) -> None:
-        """Set every widget from what the project holds for the song now, and lay them out."""
+        """Set every widget from what the project holds for the song now, and lay them out.
+
+        Where the key the song is heard in was one of its keys and is one no longer, the song is heard in the
+        first of the keys it has now.
+        """
         project = self._project = self.session.model.project
         song = self._song = project.songs.get(self.song)
         layers = (song or {}).get("layers")
         intro = (song or {}).get("intro")
         self.use.is_on, self.intro.is_on = layers is not None, intro is not None
         shown = self._keys[self.keys.picked] if self.keys.picked < len(self._keys) else None
+        among = self.session.model.shift in self._keys
         groups: list[Group] = []
         versions: list[Version] = []
         self._keys, self._channels = [0], {}
@@ -669,6 +720,8 @@ class Layers:
         self.table.show(groups, versions)
         self.keys.options = tuple(key_text(key) for key in self._keys)
         self.keys.picked = self._keys.index(shown) if shown in self._keys else 0
+        if among and self.session.model.shift not in self._keys:
+            self.session.key(self._keys[0])
         self.key_drop.enabled = len(self._keys) > 1
         self.key_drop.help = ("the song is no longer built in the key that is shown" if self.key_drop.enabled
                               else "the only key of a song stays")
@@ -760,8 +813,9 @@ class Layers:
                      f"group {group} {'in' if on else 'out of'} version {version}")
 
     def _add(self, kind: str) -> None:
-        """Save the song with one more group or version, which has the next free name."""
-        self._change(_ADDED[kind], lambda made: f"new {kind} {list(made['layers'][f'{kind}s'])[-1]}")
+        """Save the song with one more group or version, which has the next free name and is brought into view."""
+        if self._change(_ADDED[kind], lambda made: f"new {kind} {list(made['layers'][f'{kind}s'])[-1]}"):
+            self.table.to_last(kind)
 
     def _play(self, version: str) -> None:
         """Have a version heard alone, and the song play if it does not go round already.
@@ -849,6 +903,21 @@ class Layers:
                  for channel in song["channels"]]
         if items:
             self._menu(items, at)
+
+    def _ask_heard(self) -> None:
+        """Open the menu of the song's keys under their field: one that is chosen is the key the song is heard in.
+
+        The key it is heard in now has a tick before it.
+        """
+        heard = self.session.model.shift
+        x, y, _, h = self.keys.rect
+        self._menu([Item(f"hear in {key_text(key)}", lambda key=key: self._hear(key), "tick" if key == heard else "")
+                    for key in self._keys], (x, y + h))
+
+    def _hear(self, key: int) -> None:
+        """Have the song heard in one of its keys, which is then the one shown. What plays goes on in it."""
+        if self.session.key(key) and key in self._keys:
+            self.keys.picked = self._keys.index(key)
 
     def _ask_key(self) -> None:
         """Open a box over the keys to type a number of semitones into: enter adds it as a key, which is then shown."""
