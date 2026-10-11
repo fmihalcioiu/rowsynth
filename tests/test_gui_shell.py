@@ -18,7 +18,7 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from rowsynth import checks
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import inspector, layout, run, soundpanel, sprites, start, theme
+from rowsynth.gui import inspector, layout, popups, run, soundpanel, sprites, start, theme
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.browser import Browser, rows_of
 from rowsynth.gui.canvas import Canvas
@@ -671,6 +671,32 @@ class InTheApp(unittest.TestCase):
         self.assertTrue(app.session.playing)
         self.space(app)
         self.assertFalse(app.session.playing)
+
+    def test_a_text_box_over_the_name_in_the_top_bar_takes_what_is_typed_and_the_space_bar_plays_nothing(self) -> None:
+        self.held()
+        with mock.patch("pygame.key.start_text_input") as asked:
+            app = start(EXAMPLES / "arcade.json")
+        # The window asks for what is typed to be told as text, apart from the keys.
+        asked.assert_called_once_with()
+        named: list[str] = []
+        box = popups.ask(app.ui, app.panels["top"].name.rect, "arcade", named.append)
+        # The window tells a key that types twice: as the key that went down, and then as its character.
+        for key, typed in ((pygame.K_a, "a"), (pygame.K_SPACE, " "), (pygame.K_z, "z")):
+            app.handle(pygame.event.Event(pygame.KEYDOWN, key=key, mod=0, unicode=typed))
+            app.handle(pygame.event.Event(pygame.TEXTINPUT, text=typed))
+        self.assertEqual((box.text, app.session.playing, app.ui.modal), ("a z", False, box))
+        # The box is drawn over the bar, where the name stands: its outline is in the colour of what is switched on.
+        art = app.screen.begin()
+        self.assertEqual(ink(art, box.rect, theme.ACTIVE), 0)
+        app.draw(art)
+        self.assertTrue(lies_in(box.rect, layout.frame(art.get_size())["top"]))
+        self.assertGreater(ink(art, box.rect, theme.ACTIVE), 0)
+        app.handle(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, mod=0))
+        self.assertEqual((named, app.ui.modal), (["a z"], None))
+        # With the box closed the space bar is the key that plays again, and its character is nothing.
+        self.space(app)
+        app.handle(pygame.event.Event(pygame.TEXTINPUT, text=" "))
+        self.assertTrue(app.session.playing)
 
     def test_ctrl_and_z_is_undo_and_ctrl_and_y_or_ctrl_and_shift_and_z_is_redo_whatever_has_the_focus(self) -> None:
         self.held()

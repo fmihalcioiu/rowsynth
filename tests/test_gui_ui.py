@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import types
 import unittest
 from unittest import mock
 
@@ -30,16 +31,38 @@ ROW = theme.LIST_ROW_H
 
 
 class Probe(Widget):
-    """A widget that notes the kinds of the events it is offered, and uses those of the kinds it is given."""
+    """A widget that notes the kinds of the events it is offered, and uses those of the kinds it is given.
 
-    def __init__(self, rect: layout.Rect, uses: tuple[str, ...] = (), help: str = "") -> None:
+    It notes the sizes of the art surface it is told as well. `press` is called with the Ui when a button goes
+    down on it.
+    """
+
+    def __init__(self, rect: layout.Rect, uses: tuple[str, ...] = (), help: str = "", press=None) -> None:
         super().__init__(rect, help)
         self.uses = uses
+        self.press = press
         self.seen: list[str] = []
+        self.sizes: list[tuple[int, int]] = []
 
     def on(self, event: Event, ui: Ui) -> bool:
         self.seen.append(event.kind)
+        if event.kind == "down" and self.press is not None:
+            self.press(ui)
         return event.kind in self.uses
+
+    def keep_in(self, size: tuple[int, int]) -> None:
+        self.sizes.append(size)
+
+
+class Field(Probe):
+    """A probe that is typed into."""
+
+    takes_text = True
+
+
+def blank(size: tuple[int, int] = (100, 30)) -> types.SimpleNamespace:
+    """A stand-in for a canvas that nothing is drawn on: the Ui asks it for the size of its surface only."""
+    return types.SimpleNamespace(surface=types.SimpleNamespace(get_size=lambda: size))
 
 
 def click(ui: Ui, pos: tuple[int, int], button: int = 1) -> bool:
@@ -52,12 +75,12 @@ def click(ui: Ui, pos: tuple[int, int], button: int = 1) -> bool:
 class Events(unittest.TestCase):
     def test_an_event_cannot_be_changed_and_what_it_is_not_told_is_empty(self) -> None:
         event = Event("move", (3, 4))
-        self.assertEqual((event.button, event.wheel, event.key, event.mods), (0, 0, "", frozenset()))
+        self.assertEqual((event.button, event.wheel, event.key, event.mods, event.text), (0, 0, "", frozenset(), ""))
         with self.assertRaises(dataclasses.FrozenInstanceError):
             event.pos = (5, 6)
         with self.assertRaises(RowSynthError) as refused:
             Event("drag")
-        self.assertEqual(str(refused.exception), "an event is one of down, up, move, wheel, key, not 'drag'")
+        self.assertEqual(str(refused.exception), "an event is one of down, up, move, wheel, key, text, not 'drag'")
 
 
 class Handing(unittest.TestCase):
@@ -181,10 +204,10 @@ class Focus(unittest.TestCase):
             setattr(probe, gone, True)
             self.assertFalse(ui.handle(Event("key", key="up")))
             self.assertEqual((ui.focus, probe.seen), (None, ["down", "up"]))
-        # Nobody has to ask in between: a frame drawn without the widget is enough. A probe draws on no canvas.
+        # Nobody has to ask in between: a frame drawn without the widget is enough. A probe draws nothing.
         click(ui, (5, 5))
         probe.visible = False
-        ui.draw(None)
+        ui.draw(blank())
         probe.visible = True
         self.assertIsNone(ui.focus)
 
@@ -195,6 +218,94 @@ class Focus(unittest.TestCase):
         click(ui, (5, 0))
         self.assertTrue(ui.handle(Event("key", key="space")))
         self.assertEqual((ui.focus, rows.picked, called), (rows, 0, ["play"]))
+
+
+class Typing(unittest.TestCase):
+    def test_typed_characters_reach_the_widget_with_the_focus_when_it_takes_text_and_nothing_else(self) -> None:
+        ui = Ui()
+        plain, field = ui.add(Probe((0, 0, 5, 5), ("down",))), ui.add(Field((10, 0, 5, 5), ("down", "text")))
+        typed = Event("text", text="a")
+        # With the focus on no widget, and then on one that is not typed into, they are handed to none.
+        self.assertFalse(ui.handle(typed))
+        click(ui, (2, 2))
+        self.assertFalse(ui.handle(typed))
+        self.assertEqual((ui.focus, plain.seen, field.seen, ui.mouse), (plain, ["down", "up"], [], (2, 2)))
+        click(ui, (12, 2))
+        self.assertTrue(ui.handle(typed))
+        self.assertEqual((ui.focus, plain.seen, field.seen), (field, ["down", "up"], ["down", "up", "text"]))
+
+    def test_the_keys_of_a_widget_that_takes_text_are_its_own_and_none_of_them_reaches_keys(self) -> None:
+        ui, called = Ui(), []
+        ui.keys[("space", frozenset())] = lambda: called.append("play")
+        field = ui.add(Field((10, 0, 5, 5), ("down",)))
+        click(ui, (12, 2))
+        # The space bar is a key the field does not use, and after it the character it types.
+        self.assertEqual([ui.handle(Event("key", key="space")), ui.handle(Event("text", text=" "))], [False, False])
+        self.assertEqual((called, field.seen), ([], ["down", "up", "key", "text"]))
+        # With the focus gone from the field the same key is a key, and its character is nothing.
+        click(ui, (40, 2))
+        self.assertEqual([ui.handle(Event("key", key="space")), ui.handle(Event("text", text=" "))], [True, False])
+        self.assertEqual((called, field.seen), (["play"], ["down", "up", "key", "text"]))
+
+    def test_the_character_of_a_key_that_opened_a_widget_to_type_into_is_not_typed_into_it(self) -> None:
+        ui = Ui()
+        field = Field((10, 0, 5, 5))
+        ui.keys[("r", frozenset())] = lambda: ui.open(field)
+        self.assertTrue(ui.handle(Event("key", key="r")))
+        self.assertEqual((ui.modal, ui.focus), (field, field))
+        # The character that comes right after its key says the same key again. What is typed after that goes in.
+        for typed in (Event("text", text="r"), Event("key", key="e"), Event("text", text="e"), Event("text", text="f")):
+            self.assertTrue(ui.handle(typed))
+        self.assertEqual(field.seen, ["key", "text", "text"])
+
+
+class Modal(unittest.TestCase):
+    def test_while_one_is_open_every_event_goes_to_it_alone_and_the_widgets_under_it_are_not_hot(self) -> None:
+        ui, called = Ui(), []
+        ui.keys[("space", frozenset())] = lambda: called.append("play")
+        under = ui.add(Probe((0, 0, 20, 20), ("down", "wheel", "key"), help="under"))
+        click(ui, (5, 5))
+        top = Probe((50, 50, 10, 10), help="top")
+        self.assertIs(ui.open(top), top)
+        self.assertEqual((ui.modal, ui.focus, ui.widgets, top.sizes), (top, top, [under], [theme.DESIGN]))
+        # It uses none of them, and they are used all the same: nothing goes on to what is under it or to `keys`.
+        happened = (Event("move", (5, 5)), Event("down", (5, 5), button=1), Event("up", (5, 5), button=1),
+                    Event("wheel", (5, 5), wheel=1), Event("key", key="space"), Event("text", text=" "))
+        self.assertEqual([ui.handle(event) for event in happened], [True] * 6)
+        self.assertEqual((top.seen, under.seen, called), (["move", "down", "up", "wheel", "key"], ["down", "up"], []))
+        # The line of help is its own wherever the mouse is, and it is hot when the mouse is on it.
+        self.assertEqual((ui.hot, ui.help), (None, "top"))
+        ui.handle(Event("move", (55, 55)))
+        self.assertEqual((ui.hot, ui.help), (top, "top"))
+
+    def test_closing_gives_the_focus_back_and_the_release_of_the_press_that_closed_it_reaches_nothing(self) -> None:
+        ui = Ui()
+        under = ui.add(Probe((0, 0, 20, 20), ("down", "key")))
+        click(ui, (5, 5))
+        first, top = Probe((50, 50, 10, 10)), Probe((50, 50, 10, 10), press=lambda ui: ui.close(top))
+        # Only one is open at a time, and closing one that is not open changes nothing.
+        ui.open(first)
+        ui.open(top)
+        ui.close(first)
+        self.assertEqual((ui.modal, ui.focus), (top, top))
+        ui.handle(Event("down", (5, 5), button=1))
+        self.assertEqual((ui.modal, ui.focus, ui.held, ui.hot), (None, under, top, None))
+        ui.handle(Event("up", (5, 5), button=1))
+        self.assertEqual((ui.held, ui.hot, top.seen, under.seen), (None, under, ["down", "up"], ["down", "up"]))
+        self.assertTrue(ui.handle(Event("key", key="up")))
+        self.assertEqual(under.seen, ["down", "up", "key"])
+
+    def test_a_widget_that_opens_one_on_a_press_gets_its_release_and_has_the_focus_when_it_closes(self) -> None:
+        ui = Ui()
+        top = Probe((50, 50, 10, 10))
+        opener = ui.add(Probe((0, 0, 20, 20), ("down",), press=lambda ui: ui.open(top)))
+        ui.handle(Event("down", (5, 5), button=3))
+        self.assertEqual((ui.modal, ui.focus, ui.held), (top, top, opener))
+        ui.handle(Event("up", (5, 5), button=3))
+        ui.handle(Event("move", (6, 5)))
+        self.assertEqual((opener.seen, top.seen, ui.held), (["down", "up"], ["move"], None))
+        ui.close(top)
+        self.assertIs(ui.focus, opener)
 
 
 class Widgets(unittest.TestCase):
@@ -331,6 +442,22 @@ class Drawn(unittest.TestCase):
         self.assertIn(theme.TEXT, self.colours((11, 6, 46, 10)))
         self.assertEqual(self.colours((59, 6, 28, 10)), {theme.RAISED, theme.LIT, theme.ACTIVE})
 
+    def test_the_modal_widget_is_drawn_over_the_others_and_told_the_size_of_the_surface_when_it_changes(self) -> None:
+        class Patch(Probe):
+            """A probe that fills its rectangle with the colour of what is wrong."""
+
+            def draw(self, canvas: Canvas) -> None:
+                canvas.box(self.rect, theme.FAULT)
+
+        top = self.ui.open(Patch((20, 10, 10, 5)))
+        # A widget that is added while it is open still lies under it.
+        self.ui.add(Button((10, 5, 40, 13), "GO"))
+        self.ui.handle(Event("move", (22, 12)))
+        self.ui.draw(self.canvas)
+        self.assertEqual((self.colours(top.rect), self.at(19, 12), top.hot), ({theme.FAULT}, theme.RAISED, True))
+        self.ui.draw(self.canvas)
+        self.assertEqual((self.ui.size, top.sizes), ((100, 30), [theme.DESIGN, (100, 30)]))
+
 
 def halved(pos: tuple[int, int]) -> tuple[int, int]:
     """A position in a window that shows an art pixel at twice its size, in art pixels."""
@@ -367,6 +494,14 @@ class Translating(unittest.TestCase):
         self.assertEqual(translate(pressed, halved), Event("key", key="z", mods=CTRL))
         space = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_SPACE, mod=pygame.KMOD_LALT | pygame.KMOD_LSHIFT)
         self.assertEqual(translate(space, halved), Event("key", key="space", mods=frozenset({"alt", "shift"})))
+
+    def test_what_is_typed_is_a_text_with_its_characters_and_the_key_that_goes_with_it_is_a_key(self) -> None:
+        # pygame tells a key that types twice: the key that went down, with its character, and then the text.
+        pressed = pygame.event.Event(pygame.KEYDOWN, key=pygame.K_a, mod=pygame.KMOD_LSHIFT, unicode="A")
+        self.assertEqual(translate(pressed, halved), Event("key", key="a", mods=frozenset({"shift"})))
+        self.assertEqual(translate(pygame.event.Event(pygame.TEXTINPUT, text="A"), halved), Event("text", text="A"))
+        # Text that is still being put together, as some keyboards do it, is not typed yet.
+        self.assertIsNone(translate(pygame.event.Event(pygame.TEXTEDITING, text="a", start=0, length=1), halved))
 
 
 if __name__ == "__main__":

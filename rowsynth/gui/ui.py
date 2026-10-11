@@ -16,8 +16,9 @@ if TYPE_CHECKING:
 
     from .canvas import Canvas
 
-#: What an event can be: a mouse button going down or up, the mouse moving, a step of the wheel, a key going down.
-KINDS = ("down", "up", "move", "wheel", "key")
+#: What an event can be: a mouse button going down or up, the mouse moving, a step of the wheel, a key going down,
+#: and characters that were typed.
+KINDS = ("down", "up", "move", "wheel", "key", "text")
 
 #: Where the mouse is taken to be before it has moved: on no widget.
 NOWHERE = (-1, -1)
@@ -31,7 +32,8 @@ class Event:
 
     `pos` is where the mouse is, in art pixels. `button` is 1 for the left, 2 for the middle and 3 for the right.
     `wheel` is in steps, and up is positive. `key` is pygame's name of the key, such as "space" or "z". `mods` holds
-    those of "ctrl", "shift" and "alt" that are held.
+    those of "ctrl", "shift" and "alt" that are held. `text` is the characters of a "text": what was typed, as
+    the system makes it of the keys, which is not the name of a key.
     """
 
     kind: str
@@ -40,6 +42,7 @@ class Event:
     wheel: int = 0
     key: str = ""
     mods: frozenset[str] = frozenset()
+    text: str = ""
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -47,13 +50,20 @@ class Event:
 
 
 def translate(event: pygame.event.Event, to_art: Callable[[Pos], Pos]) -> Event | None:
-    """A pygame event as an `Event`, its position put through `to_art`. None for one the GUI has no use for."""
+    """A pygame event as an `Event`, its position put through `to_art`. None for one the GUI has no use for.
+
+    A key that types a character is told twice by pygame, and is two events here as well: a "key" with the name
+    of the key, and after it a "text" with the character. The `Ui` sees to it that only one of the two is acted
+    on.
+    """
     import pygame
 
     names = (("ctrl", pygame.KMOD_CTRL), ("shift", pygame.KMOD_SHIFT), ("alt", pygame.KMOD_ALT))
     if event.type == pygame.KEYDOWN:
         return Event("key", key=pygame.key.name(event.key),
                      mods=frozenset(name for name, bit in names if event.mod & bit))
+    if event.type == pygame.TEXTINPUT:
+        return Event("text", text=event.text)
     kind = {pygame.MOUSEBUTTONDOWN: "down", pygame.MOUSEBUTTONUP: "up", pygame.MOUSEMOTION: "move",
             pygame.MOUSEWHEEL: "wheel"}.get(event.type)
     if kind is None:
@@ -96,7 +106,12 @@ class Widget:
     `help` is one plain line shown when the mouse rests on it. One that is not `enabled` or not `visible` is
     offered no events, and one that is not visible is not drawn. `hot` (the mouse is on it) and `held` (it is
     pressed) are set by the Ui just before the widget is drawn, for it to ask while drawing.
+
+    A widget that `takes_text` is one that is typed into. It is handed the characters that are typed while it has
+    the focus, and the keys are then its own: none of them goes on to the keys of the Ui.
     """
+
+    takes_text = False
 
     def __init__(self, rect: Rect, help: str = "") -> None:
         self.rect = rect
@@ -114,6 +129,12 @@ class Widget:
         """Take an event, and say whether it was used. One that was not is offered to what lies below."""
         return False
 
+    def keep_in(self, size: tuple[int, int]) -> None:
+        """Take the size of the art surface, to stay inside of. This one stays where it is.
+
+        The Ui tells it to the widget it opens as the modal one, and again when the surface has another size.
+        """
+
     def draw(self, canvas: Canvas) -> None:
         """Draw the widget as it is now."""
 
@@ -123,6 +144,10 @@ class Ui:
 
     `keys` is from (key, mods) to a function, called when that key goes down and the widget that has the focus
     did not use it.
+
+    `modal` is the one widget that is open over all the others, or None: a menu, or a box that is typed into.
+    While there is one, every event goes to it alone, wherever the mouse is. `size` is the size of the art
+    surface, as the last frame was drawn on it.
     """
 
     def __init__(self) -> None:
@@ -131,13 +156,35 @@ class Ui:
         self.mouse: Pos = NOWHERE
         #: The widget that used a "down" whose "up" has not come yet.
         self.held: Widget | None = None
+        self.modal: Widget | None = None
+        self.size: tuple[int, int] = theme.DESIGN
         self._button = 0
         self._focus: Widget | None = None
+        # Whether the event before this one was a key that no widget that takes text was handed.
+        self._was_key = False
 
     def add(self, widget: Widget) -> Widget:
         """Put a widget on top of the others, and give it back."""
         self.widgets.append(widget)
         return widget
+
+    def open(self, widget: Widget) -> Widget:
+        """Open a widget as the modal one, over all the others, and give it back. It has the focus while it is open.
+
+        It is not one of `widgets`, and is told the size of the art surface. Only one is open at a time: one that
+        was open is taken off, and is told nothing.
+        """
+        self.modal = widget
+        widget.keep_in(self.size)
+        return widget
+
+    def close(self, widget: Widget) -> None:
+        """Take the modal widget off. The widget that had the focus before has it again.
+
+        A widget that is not the open one is left alone.
+        """
+        if self.modal is widget:
+            self.modal = None
 
     def _live(self) -> list[Widget]:
         """The widgets that are offered events, the topmost first."""
@@ -148,9 +195,10 @@ class Ui:
         """The widget the keys go to: the one that last used a "down". None while no widget has it.
 
         A press that no widget used takes it away, and a widget that is not visible or not enabled has lost it.
+        While a modal widget is open, that one has it.
         """
         self._settle()
-        return self._focus
+        return self._focus if self.modal is None else self.modal
 
     def _settle(self) -> None:
         """Take the focus from a widget that is not visible or not enabled."""
@@ -159,8 +207,11 @@ class Ui:
 
     @property
     def hot(self) -> Widget | None:
-        """The topmost visible, enabled widget under the mouse. While a widget is held, no other one is hot."""
-        for widget in self._live():
+        """The topmost visible, enabled widget under the mouse. While a widget is held, no other one is hot.
+
+        While a modal widget is open, none of the widgets under it is.
+        """
+        for widget in self._live() if self.modal is None else [self.modal]:
             if widget.hit(self.mouse):
                 return widget if self.held in (None, widget) else None
         return None
@@ -170,8 +221,11 @@ class Ui:
         """The help line of the topmost visible widget under the mouse, and nothing when there is none.
 
         One that is not enabled has its say too, though it is not hot and is offered no events: that is where a
-        button tells why it does nothing. While a widget is held, the line is that widget's or none.
+        button tells why it does nothing. While a widget is held, the line is that widget's or none. While a
+        modal widget is open the line is its own, wherever the mouse is.
         """
+        if self.modal is not None:
+            return self.modal.help
         if self.held is not None:
             return self.held.help if self.held.hit(self.mouse) else ""
         for widget in reversed(self.widgets):
@@ -186,20 +240,31 @@ class Ui:
         used a "down" is held: it gets everything the mouse does up to the "up" of the same button, also when the
         mouse has left it. It has the focus as well, and a "down" that no widget used leaves the focus with none.
         A key is offered to the widget that has the focus and to no other, and then to `keys`.
+
+        Typed characters are handed to the widget that has the focus when it takes text, and to nothing else.
+        The keys of such a widget are its own: what it does not use of them is not looked up in `keys`. So a
+        key that types does one thing only: with the focus on a widget that is typed into it is a character,
+        and anywhere else it is a key. The character comes right after its key, and is dropped when the key
+        was a key: one that opens a box to type into is not typed into that box as well.
+
+        While a modal widget is open, every event goes to it and to nothing else, and counts as used. A widget
+        that was held when it opened still gets what the mouse does up to its release. The release of a press
+        the modal widget was handed is that widget's too, also when the press closed it.
         """
-        if event.kind == "key":
-            focus = self.focus
-            if focus is not None and focus.on(event, self):
-                return True
-            action = self.keys.get((event.key, event.mods))
-            if action is not None:
-                action()
-            return action is not None
+        said, self._was_key = self._was_key, False
+        if event.kind in ("key", "text"):
+            return self._typed(event, said)
         self.mouse = event.pos
         if self.held is not None:
             self.held.on(event, self)
             if event.kind == "up" and event.button == self._button:
                 self.held = None
+            return True
+        if self.modal is not None:
+            modal = self.modal
+            modal.on(event, self)
+            if event.kind == "down":
+                self.held, self._button = modal, event.button
             return True
         for widget in self._live():
             if widget.hit(event.pos) and widget.on(event, self):
@@ -211,15 +276,41 @@ class Ui:
             self._focus = None
         return False
 
+    def _typed(self, event: Event, said: bool) -> bool:
+        """Hand a key or typed characters to the widget that has the focus, and a key it leaves to `keys`.
+
+        `said` is whether the event before was a key that was a key and no character.
+        """
+        focus = self.focus
+        alone = self.modal is not None
+        takes = focus is not None and focus.takes_text
+        if event.kind == "text":
+            # The other widgets know keys and the mouse only, and would take this for something the mouse did.
+            return (takes and not said and bool(focus.on(event, self))) or alone
+        self._was_key = not takes
+        if focus is not None and (focus.on(event, self) or alone):
+            return True
+        action = None if takes else self.keys.get((event.key, event.mods))
+        if action is not None:
+            action()
+        return action is not None
+
     def draw(self, canvas: Canvas) -> None:
         """Draw the visible widgets, the first at the bottom, each told whether it is hot and whether it is held.
 
-        A widget that is not seen in a frame has lost the focus, also when it is seen again in the next.
+        The modal widget is drawn last, over them all. A widget that is not seen in a frame has lost the focus,
+        also when it is seen again in the next. The size of the surface is kept as `size`, and a modal widget
+        that is open is told when it is another than before.
         """
         self._settle()
+        size = canvas.surface.get_size()
+        if size != self.size:
+            self.size = size
+            if self.modal is not None:
+                self.modal.keep_in(size)
         hot = self.hot
-        for widget in self.widgets:
-            if widget.visible:
+        for widget in [*self.widgets, self.modal]:
+            if widget is not None and widget.visible:
                 widget.hot, widget.held = widget is hot, widget is self.held
                 widget.draw(canvas)
 

@@ -78,6 +78,9 @@ class App:
             raise
         self.path = path
         self.screen = Screen(scale=scale)
+        # What is typed comes as text of its own, apart from the keys. Classic pygame and pygame-ce both send it
+        # from the start, and both can be asked to: that changes nothing where it is on, and makes sure of it.
+        pygame.key.start_text_input()
         self.closed = False
         self.canvas = Canvas(self.screen.art, Font(sprites.load("font")), sprites.load("icons"))
         try:
@@ -107,7 +110,8 @@ class App:
             panel.place(parts[name])
 
     def handle(self, event: pygame.event.Event) -> None:
-        """Take in one thing that happened to the window. What the mouse and the keys did goes on to the widgets.
+        """Take in one thing that happened to the window. What the mouse and the keys did, and what was typed,
+        goes on to the widgets.
 
         The window's size is followed by the screen, and needs nothing here.
         """

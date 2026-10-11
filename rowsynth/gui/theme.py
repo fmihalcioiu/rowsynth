@@ -137,3 +137,19 @@ BAR_METER_W = 62
 # The left panel: from its sides and its foot to the list in it, the panel's line not counted, and from its top.
 BROWSER_PAD = 2
 BROWSER_TOP = 4
+
+# A menu that opens at a place. A row of it is this high, and the strip that holds the line between two groups
+# this high. From a side of its box to what a row shows, and from its top and its foot to the first and the last
+# row, the outline counted both times. The side of the square an icon has before the texts, in a menu that has
+# icons. A menu is never narrower than MENU_MIN_W.
+MENU_ROW_H = 12
+MENU_LINE_H = 5
+MENU_PAD = 6
+MENU_EDGE = 2
+MENU_ICON = 9
+MENU_MIN_W = 48
+# A box that is typed into. From a side of it to where the caret stands before the first character, the outline
+# counted. One that opens over a name is this high, and never narrower than TEXT_BOX_MIN_W.
+TEXT_PAD = 3
+TEXT_BOX_H = 13
+TEXT_BOX_MIN_W = 72
