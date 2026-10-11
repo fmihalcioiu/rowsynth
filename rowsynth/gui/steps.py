@@ -40,6 +40,9 @@ LABEL_EDGE = 2
 BARS_H = 13
 #: How wide the mark of a hit that starts between two rows.
 MARK_W = 2
+#: The dot in an empty square whose row another drum of its channel has: how wide it is, and how high.
+DOT_W = 2
+DOT_H = 2
 
 #: How much of its beat's colour an empty square has in its fill and in its outline: the rest is the background.
 EMPTY_FILL = 0.2
@@ -50,6 +53,8 @@ TOP_LEVEL = 15
 #: How much of the colour of text is in the outline of a hit, and in a square that the playhead is in.
 EDGE = 0.3
 GLOW = 0.4
+#: How much of its beat's colour the dot has in a square whose row another drum of its channel has.
+DOT = 0.5
 
 #: The lowest level the wheel brings a hit to: at 0 it would not be heard.
 WHEEL_LEAST = 1
@@ -88,6 +93,16 @@ def paint(colour: Colour, level: int | None, lit: bool = False) -> tuple[Colour,
         fill = hit_colour(colour, level)
         line = mix(fill, theme.TEXT, EDGE)
     return (mix(fill, theme.TEXT, GLOW), mix(line, theme.TEXT, GLOW)) if lit else (fill, line)
+
+
+def dot(square: Rect, colour: Colour, lit: bool = False) -> tuple[Rect, Colour]:
+    """Where the dot is in a square of a beat's colour, and what colour it is: in the middle, and dim.
+
+    The dot is in an empty square whose row another drum of its channel has. `lit`, it is lighter.
+    """
+    x, y, w, h = square
+    shade = mix(theme.BACKGROUND, colour, DOT)
+    return (x + (w - DOT_W) // 2, y + (h - DOT_H) // 2, DOT_W, DOT_H), mix(shade, theme.TEXT, GLOW) if lit else shade
 
 
 @dataclass(frozen=True)
@@ -274,8 +289,10 @@ class Gesture:
 
         `notes` are those of the channel before the gesture, and `letter` is the lane's. The drum table of the
         song, the rows of the pattern and the song's rows to a beat are as `noteedit.hit` takes them. A put
-        fills the squares it passed that had no hit of the letter, and so replaces a hit of another letter at
-        such a row. A take empties those that had one, and the wheel sets the level of its one hit.
+        fills the squares it passed at whose rows the channel played nothing. What the channel plays at a row
+        stays, and no hit is put there: only in the first square, the one that was pressed, does the hit take
+        the place of a hit of another letter. A take empties the squares that had a hit of the letter, and the
+        wheel sets the level of its one hit.
         """
         notes = tuple(notes)
         held = {_whole_rows(note.row): note for note in notes}
@@ -284,7 +301,7 @@ class Gesture:
             mine = there is not None and there.drum == letter
             # A note that is a hair off its row is replaced, and taken away, at the place it has.
             at = float(row) if there is None else there.row
-            if self.kind == "put" and not mine:
+            if self.kind == "put" and not mine and (there is None or row == self.rows[0]):
                 notes = noteedit.hit(notes, at, letter, self.level, drums, rows, rows_per_beat)
             elif self.kind == "take" and mine:
                 notes = noteedit.unhit(notes, at, letter, drums, rows, rows_per_beat)
@@ -328,6 +345,10 @@ class Steps(Widget):
     takes away. A drag stays in the lane it began in. On a hit, with no key held, the wheel does not scroll: it
     changes the level of the hit by one a step, and `level` is the one it set last.
 
+    A channel plays one drum at a time. So a hit that is put by a press takes the place of a hit that another
+    letter of its channel has at that row, and a drag puts none in the squares it passes after that where
+    another letter has one. Such a square is drawn empty with a dot in it, where the hits can be changed.
+
     Nothing is saved here. While a gesture is under way the steps show what it would give. When it ends, and a
     channel's notes are other than `show` gave them, `edited` is called with the name of the channel, its new
     notes and a few words for the undo list, and the steps show what `show` gave again: their owner saves, and
@@ -335,8 +356,9 @@ class Steps(Widget):
     `WHEEL_WAIT` seconds after its last step by `clock`: for that their owner calls `update` every frame.
     `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard.
 
-    `help` is the widget's own line. While the mouse is on a square it says what a press there would do, or what
-    is there where nothing can be changed.
+    `help` is the widget's own line. While the mouse is on a square it says what a press there would do, with
+    the level of a hit and the letter a hit would take the place of. Where nothing can be changed it says what
+    is there.
     """
 
     def __init__(self, rect: Rect, help: str = "", edited: Callable[[str, Notes, str], object] | None = None,
@@ -367,6 +389,8 @@ class Steps(Widget):
         self._hits: dict[tuple[int, int], int] = {}
         #: The place of the lane, the row and the level of each hit that starts between two rows.
         self._marks: list[tuple[int, float, int]] = []
+        #: The empty squares whose row another drum of their channel has, each with the letter of that drum.
+        self._taken: dict[tuple[int, int], str] = {}
         self._mouse: Pos = NOWHERE
 
     def show(self, pattern: Pattern, lanes: Sequence[Lane], bar_rows: int, beat_rows: int,
@@ -411,18 +435,23 @@ class Steps(Widget):
         return self._given.get(channel, self._notes[channel])
 
     def _look(self) -> None:
-        """Work out which squares have a hit, and the hits between two rows, from the notes as they are shown."""
-        places = {(lane.channel, lane.letter): place for place, lane in enumerate(self._lanes)}
-        self._hits, self._marks = {}, []
-        for channel in self._notes:
-            for note in self.notes(channel):
-                place = places.get((channel, note.drum))
+        """Work out which squares have a hit, the hits between two rows, and the squares whose row is taken.
+
+        It is worked out from the notes as they are shown. A row is taken in the other lanes of a channel by
+        what the channel plays there, which is a hit of another letter, or a note that is no hit.
+        """
+        self._hits, self._marks, self._taken = {}, [], {}
+        for place, lane in enumerate(self._lanes):
+            for note in self.notes(lane.channel):
                 # A row that is a hair off a whole one, as adding up triplets leaves it, is that whole row.
                 row = _whole_rows(note.row)
-                if place is not None and float(row).is_integer():
+                if not float(row).is_integer():
+                    if note.drum == lane.letter:
+                        self._marks.append((place, note.row, note.level))
+                elif note.drum == lane.letter:
                     self._hits[place, int(row)] = note.level
-                elif place is not None:
-                    self._marks.append((place, note.row, note.level))
+                else:
+                    self._taken[place, int(row)] = note.drum
 
     @property
     def grid(self) -> Grid:
@@ -433,9 +462,10 @@ class Steps(Widget):
     def help(self) -> str:
         """What a press on the square under the mouse would do, in plain words. Off the squares, the widget's own line.
 
-        Where the hits cannot be changed it is what is at the square, and for a pattern off the grid why it is not
-        changed. The drum is told by its letter, and where the lanes are of more than one channel by its channel
-        as well.
+        On a hit its level comes after, and on a square whose row another drum of the channel has, that the hit
+        would take its place. Where the hits cannot be changed it is what is at the square, and for a pattern off
+        the grid why it is not changed. The drum is told by its letter, and where the lanes are of more than one
+        channel by its channel as well.
         """
         found = self._at(self._mouse)
         if found is None:
@@ -444,8 +474,13 @@ class Steps(Widget):
         bar, step = divmod(row, self._grid.bar_rows)
         drum = f"{lane.letter} in {lane.channel}" if self._several else lane.letter
         where = f"{drum}, bar {bar + 1}, step {step + 1}"
+        if self._open and found in self._hits:
+            return f"take the hit away: {where} (level {self._hits[found]})"
         if self._open:
-            return f"{'take the hit away' if found in self._hits else 'put a hit'}: {where}"
+            other = self._taken.get(found)
+            why = "" if other is None else (f" (takes the place of {other or 'a note'}: "
+                                            f"{lane.channel} plays one drum at a time)")
+            return f"put a hit: {where}{why}"
         between = [level for place, at, level in self._marks if (place, math.floor(at)) == found]
         if found in self._hits:
             what = f"hit, level {self._hits[found]}"
@@ -518,10 +553,11 @@ class Steps(Widget):
         """Take the drag under way on to an x, and show what it would give. Each hit it newly puts is sounded."""
         doing = self._gesture
         lane = self._lanes[doing.drum]
-        put = [row for row in doing.along(self.grid, x) if doing.kind == "put" and (doing.drum, row) not in self._hits]
+        fresh, had = doing.along(self.grid, x), self._hits
         self._try()
-        if self.sounded is not None:
-            for _ in put:
+        for row in fresh:
+            # Not every square on the way gets a hit: one may have had its hit, or another drum of the channel.
+            if self.sounded is not None and (doing.drum, row) in self._hits and (doing.drum, row) not in had:
                 self.sounded(lane.channel, lane.letter)
 
     def _turn(self, event: Event) -> bool:
@@ -573,6 +609,7 @@ class Steps(Widget):
         """Draw the labels, the lines between channels, the bar numbers, the squares, the hits between rows and
         the playhead.
 
+        Where the hits can be changed, a dot is in each empty square whose row another drum of its channel has.
         Nothing is drawn outside the rectangle, and no square where the labels are.
         """
         grid = self.grid
@@ -598,6 +635,8 @@ class Steps(Widget):
                         square = grid.square(drum, row)
                         canvas.box(square, fill)
                         canvas.frame(square, line)
+                        if self._open and (drum, row) in self._taken:
+                            canvas.box(*dot(square, grid.colour(row), lit))
                 for drum, at, level in self._marks:
                     if drum in drums and math.floor(at) in rows:
                         canvas.box((grid.x(at), grid.y(drum), MARK_W, LANE_H),

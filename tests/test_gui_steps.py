@@ -11,9 +11,10 @@ from rowsynth.gui import layout, noteedit, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.songview import Channel, DrumRow, Note, Pattern
-from rowsynth.gui.steps import (BAR_GAP, BARS_H, BEAT_GAP, CHANNEL_GAP, EDGE, EMPTY_FILL, EMPTY_LINE, FAINTEST, GAP,
-                                LABEL_EDGE, LABEL_GAP, LABEL_PAD, LABELS_W, LANE_GAP, LANE_H, MARK_W, OFF_GRID,
-                                SQUARE_W, WHEEL_WAIT, Gesture, Grid, Lane, Steps, begun, hit_colour, lanes, mix, paint)
+from rowsynth.gui.steps import (BAR_GAP, BARS_H, BEAT_GAP, CHANNEL_GAP, DOT, DOT_H, DOT_W, EDGE, EMPTY_FILL,
+                                EMPTY_LINE, FAINTEST, GAP, GLOW, LABEL_EDGE, LABEL_GAP, LABEL_PAD, LABELS_W, LANE_GAP,
+                                LANE_H, MARK_W, OFF_GRID, SQUARE_W, WHEEL_WAIT, Gesture, Grid, Lane, Steps, begun, dot,
+                                hit_colour, lanes, mix, paint)
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
 
@@ -426,11 +427,12 @@ class Gestures(unittest.TestCase):
         drag = Gesture("put", 0, 12, x=grid.x(5))
         self.assertEqual([drag.along(grid, grid.x(row)) for row in (5, 2, 6, 3)], [[5], [2, 3, 4], [6], []])
         self.assertEqual((drag.rows, drag.x), ([5, 2, 3, 4, 6], grid.x(3)))
-        # A put fills the empty squares at its level: the kick that was there stays, and the snare gives way.
+        # A put fills the squares at whose rows the channel has nothing, at its level: the kick that was there
+        # stays as it is, and so does the snare.
         base = beat(("k", 4, 3), ("s", 6, 15))
         self.assertEqual([(note.drum, note.row, note.rows, note.level) for note in drag.gives(base, "k", TABLE, 32.0)],
                          [("k", 2.0, 1.0, 12), ("k", 3.0, 1.0, 12), ("k", 4.0, 1.0, 3), ("k", 5.0, 1.0, 12),
-                          ("k", 6.0, 16.0, 12)])
+                          ("s", 6.0, 2.0, 15)])
         # A take empties the squares that have a hit of its letter, and the wheel sets the level of its one hit.
         drag.kind = "take"
         self.assertEqual(drag.gives(base, "k", TABLE, 32.0), noteedit.unhit(base, 4, "k", TABLE, 32.0))
@@ -446,6 +448,22 @@ class Gestures(unittest.TestCase):
         self.assertEqual([Gesture(kind, 0, 15).label(count) for kind, count
                           in (("put", 1), ("put", 3), ("take", 1), ("take", 2), ("level", 0))],
                          ["hit placed", "3 hits placed", "hit removed", "2 hits removed", "level changed"])
+
+    def test_a_put_takes_the_place_of_what_the_channel_plays_only_in_the_square_that_was_pressed(self) -> None:
+        def left(notes: tuple[Note, ...], *rows: int) -> list[tuple[str, float]]:
+            """The letter and the row of each note that a put of kicks leaves, pressed on the first of some rows."""
+            return [(note.drum, note.row) for note in Gesture("put", 0, 15, [*rows]).gives(notes, "k", TABLE, 32.0)]
+
+        base = beat(("k", 4, 3), ("s", 6, 15), ("H", 8, 9))
+        # Pressed on the snare's row, the kick takes its place. The hat further on is passed, and stays.
+        self.assertEqual(left(base, 6, 7, 8, 9), [("k", 4.0), ("k", 6.0), ("k", 7.0), ("H", 8.0), ("k", 9.0)])
+        # Pressed on a free row and dragged over both, nothing gives way, whichever way the drag went and
+        # wherever it has come to.
+        self.assertEqual(left(base, 5, 6, 7, 8), [("k", 4.0), ("k", 5.0), ("s", 6.0), ("k", 7.0), ("H", 8.0)])
+        self.assertEqual(left(base, 9, 8, 7, 6), [("k", 4.0), ("s", 6.0), ("k", 7.0), ("H", 8.0), ("k", 9.0)])
+        # A note that is no hit is in the way as a hit is, and gives way as one does.
+        tuned = (Note(4.0, 2.0, 60, 15, "kick"),)
+        self.assertEqual((left(tuned, 3, 4), left(tuned, 4, 3)), ([("k", 3.0), ("", 4.0)], [("k", 3.0), ("k", 4.0)]))
 
 
 class Editing(unittest.TestCase):
@@ -500,14 +518,50 @@ class Editing(unittest.TestCase):
         self.assertEqual(self.told, [("kit", (KIT[0], KIT[1], KIT[3]), "hit removed")])
         self.assertEqual(self.steps.notes("kit"), KIT)
 
-    def test_a_drag_puts_a_hit_in_every_empty_square_it_passes_and_in_those_the_mouse_skipped(self) -> None:
+    def test_a_drag_puts_a_hit_in_every_free_square_it_passes_however_far_the_mouse_went_at_once(self) -> None:
         self.mouse("down", 0, 1, 1)
         self.mouse("move", 0, 9)
         self.mouse("move", 0, 6)
         self.mouse("up", 0, 6, 1)
         # Nine squares in one move. The kick that was among them keeps its level, and is no hit that was placed.
-        kicks = tuple(Note(float(row), 1.0, 48, 7 if row == 8 else 15, "kick", "k") for row in range(10))
-        self.assertEqual(self.told, [("kit", (*kicks, KIT[3]), "8 hits placed")])
+        # Neither is one placed at the row of the snare, which stays, cut to the one row it has left.
+        notes = tuple(dataclasses.replace(KIT[1], rows=1.0) if row == 4
+                      else Note(float(row), 1.0, 48, 7 if row == 8 else 15, "kick", "k") for row in range(10))
+        self.assertEqual(self.told, [("kit", (*notes, KIT[3]), "7 hits placed")])
+
+    def test_a_drag_leaves_the_hits_that_other_letters_of_the_channel_have_and_puts_none_at_their_rows(self) -> None:
+        # Along the hat's lane, over the row of the snare and over that of the second kick.
+        self.mouse("down", 2, 3, 1)
+        self.mouse("move", 2, 9)
+        seen = self.steps.notes("kit")
+        self.assertEqual([(note.drum, note.row, note.level) for note in seen],
+                         [("k", 0.0, 15), ("H", 3.0, 15), ("s", 4.0, 9), ("H", 5.0, 15), ("H", 6.0, 15), ("H", 7.0, 15),
+                          ("k", 8.0, 7), ("H", 9.0, 15), ("H", 10.0, 12)])
+        self.mouse("up", 2, 9, 1)
+        self.assertEqual((self.told, self.heard), ([("kit", seen, "5 hits placed")], [("kit", "H")] * 5))
+
+    def test_a_drag_that_began_by_taking_the_place_of_a_hit_leaves_the_others_it_passes(self) -> None:
+        # Pressed on the row of the snare, which gives way, and dragged over the row of the second kick.
+        self.mouse("down", 2, 4, 1)
+        self.mouse("move", 2, 9)
+        self.mouse("move", 2, 4)
+        seen = self.steps.notes("kit")
+        self.assertEqual([(note.drum, note.row) for note in seen], [("k", 0.0), ("H", 4.0), ("H", 5.0), ("H", 6.0),
+                                                                    ("H", 7.0), ("k", 8.0), ("H", 9.0), ("H", 10.0)])
+        self.mouse("up", 2, 4, 1)
+        self.assertEqual(self.told, [("kit", seen, "5 hits placed")])
+
+    def test_a_hit_of_another_channel_at_the_row_is_not_in_the_way_of_a_drag(self) -> None:
+        kick, tops = beat(("k", 0, 15), ("k", 2, 15)), beat(("H", 2, 15), ("k", 4, 9))
+        self.steps.show(band(kick=kick, tops=tops), PAIR, 16, 4, TABLE)
+        # The kick of the other channel is at the first row and at the third, where this one has its hat.
+        self.mouse("down", 1, 0, 1)
+        self.mouse("move", 1, 3)
+        self.mouse("up", 1, 3, 1)
+        (channel, notes, label), = self.told
+        self.assertEqual((channel, label), ("tops", "3 hits placed"))
+        self.assertEqual([(note.drum, note.row) for note in notes],
+                         [("k", 0.0), ("k", 1.0), ("H", 2.0), ("k", 3.0), ("k", 4.0)])
 
     def test_a_drag_that_began_on_a_hit_takes_away_the_hits_it_passes_and_puts_none(self) -> None:
         self.mouse("down", 0, 0, 1)
@@ -604,22 +658,21 @@ class Editing(unittest.TestCase):
         self.wheel(1, 4, -1, SHIFT)
         self.assertEqual((self.view(), [label for _, _, label in self.told]), ((8, 0), ["level changed"]))
 
-    def test_a_hit_put_where_another_letter_of_its_channel_has_one_takes_its_place_in_both_lanes_at_once(
+    def test_a_hit_put_by_a_press_where_another_letter_of_its_channel_has_one_takes_its_place_in_both_lanes_at_once(
             self) -> None:
         self.mouse("move", 1, 4)
-        self.assertEqual(self.ui.help, "take the hit away: s, bar 1, step 5")
-        self.mouse("down", 0, 3, 1)
-        self.mouse("move", 0, 5)
+        self.assertEqual(self.ui.help, "take the hit away: s, bar 1, step 5 (level 9)")
+        self.mouse("down", 0, 4, 1)
         seen = self.steps.notes("kit")
-        self.assertEqual([(note.drum, note.row) for note in seen],
-                         [("k", 0.0), ("k", 3.0), ("k", 4.0), ("k", 5.0), ("k", 8.0), ("H", 10.0)])
+        self.assertEqual(seen, (KIT[0], Note(4.0, 4.0, 48, 15, "kick", "k"), KIT[2], KIT[3]))
         # With the button still down, the snare's square is empty and the kick's has the hit.
         self.mouse("move", 1, 4)
-        self.assertEqual(self.ui.help, "put a hit: s, bar 1, step 5")
+        self.assertEqual(self.ui.help,
+                         "put a hit: s, bar 1, step 5 (takes the place of k: kit plays one drum at a time)")
         self.mouse("move", 0, 4)
-        self.assertEqual(self.ui.help, "take the hit away: k, bar 1, step 5")
+        self.assertEqual(self.ui.help, "take the hit away: k, bar 1, step 5 (level 15)")
         self.mouse("up", 0, 4, 1)
-        self.assertEqual(self.told, [("kit", seen, "3 hits placed")])
+        self.assertEqual(self.told, [("kit", seen, "hit placed")])
 
     def test_hits_of_two_channels_at_one_row_do_not_touch_each_other(self) -> None:
         kick, tops = beat(("k", 0, 15)), beat(("k", 4, 9), ("H", 2, 15))
@@ -634,14 +687,14 @@ class Editing(unittest.TestCase):
         self.assertEqual(self.heard, [("tops", "k"), ("kick", "k")])
 
     def test_what_the_steps_show_during_a_drag_is_what_edited_gets_at_the_release_and_nothing_before(self) -> None:
-        self.mouse("down", 0, 6, 1)
-        self.mouse("move", 0, 2)
+        self.mouse("down", 0, 7, 1)
+        self.mouse("move", 0, 5)
         seen = self.steps.notes("kit")
         self.assertEqual(([note.row for note in seen if note.drum == "k"], self.told),
-                         ([0.0, 2.0, 3.0, 4.0, 5.0, 6.0, 8.0], []))
+                         ([0.0, 5.0, 6.0, 7.0, 8.0], []))
         # The release may be anywhere, also off the steps.
         self.ui.handle(Event("up", (0, 0), button=1))
-        self.assertEqual(self.told, [("kit", seen, "5 hits placed")])
+        self.assertEqual(self.told, [("kit", seen, "3 hits placed")])
         self.assertEqual((self.steps.notes("kit"), self.ui.held), (KIT, None))
 
     def test_a_press_and_release_that_leave_the_notes_as_they_were_call_nothing(self) -> None:
@@ -670,12 +723,12 @@ class Editing(unittest.TestCase):
         self.mouse("move", 0, 3)
         self.mouse("move", 0, 2)
         self.assertEqual(len(self.heard), 3)
-        # Six squares more, of which one had its kick already.
+        # Six squares more, of which one had its kick already, and one gets none as the snare has its row.
         self.mouse("move", 0, 9)
         self.mouse("up", 0, 9, 1)
         self.click(0, 8)
         self.wheel(1, 4, 1)
-        self.assertEqual(self.heard, [("kit", "k")] * 8)
+        self.assertEqual(self.heard, [("kit", "k")] * 7)
 
     def test_a_pattern_off_the_grid_is_shown_and_not_changed_and_the_help_line_says_why(self) -> None:
         self.steps.show(kit(*KIT, hit("H", 20.5, 9)), LANES, 16, 4, TABLE)
@@ -742,18 +795,43 @@ class Editing(unittest.TestCase):
                          [("k", 0.0, 3.0), ("k", 3.0, 1.0), ("k", 4.0, 2.0), ("H", 6.0, 1.0), ("H", 8.0, 1.0)])
         self.assertEqual(songview.pattern(song, "a").channels[0].notes, self.steps.notes("kit"))
 
-    def test_the_help_line_names_what_a_press_on_the_square_under_the_mouse_would_do(self) -> None:
-        for drum, row, said in ((0, 20, "put a hit: k, bar 2, step 5"), (0, 8, "take the hit away: k, bar 1, step 9"),
-                                (2, 10, "take the hit away: H, bar 1, step 11"), (1, 0, "put a hit: s, bar 1, step 1")):
+    def test_the_help_line_names_what_a_press_on_the_square_under_the_mouse_would_do_and_the_level_of_a_hit(
+            self) -> None:
+        for drum, row, said in ((0, 20, "put a hit: k, bar 2, step 5"), (1, 1, "put a hit: s, bar 1, step 2"),
+                                (0, 8, "take the hit away: k, bar 1, step 9 (level 7)"),
+                                (2, 10, "take the hit away: H, bar 1, step 11 (level 12)")):
             self.mouse("move", drum, row)
             self.assertEqual(self.ui.help, said)
+        # The level is the one the wheel has brought the hit to.
+        self.wheel(2, 10, -2)
+        self.assertEqual(self.ui.help, "take the hit away: H, bar 1, step 11 (level 10)")
         # In a gap it is the widget's own line.
         self.ui.handle(Event("move", (self.steps.grid.x(4) - 1, TOP + 3)))
         self.assertEqual(self.ui.help, "the drum steps")
         # With two drum channels the channel of the square is named as well.
         self.steps.show(band(kick=beat(("k", 0, 15)), tops=beat(("H", 2, 15))), PAIR, 16, 4, TABLE)
-        for drum, row, said in ((0, 0, "take the hit away: k in kick, bar 1, step 1"),
+        for drum, row, said in ((0, 0, "take the hit away: k in kick, bar 1, step 1 (level 15)"),
                                 (1, 0, "put a hit: k in tops, bar 1, step 1")):
+            self.mouse("move", drum, row)
+            self.assertEqual(self.ui.help, said)
+
+    def test_the_help_line_says_which_drum_a_hit_would_take_the_place_of(self) -> None:
+        for drum, row, said in (
+                (2, 0, "put a hit: H, bar 1, step 1 (takes the place of k: kit plays one drum at a time)"),
+                (0, 4, "put a hit: k, bar 1, step 5 (takes the place of s: kit plays one drum at a time)"),
+                (1, 10, "put a hit: s, bar 1, step 11 (takes the place of H: kit plays one drum at a time)")):
+            self.mouse("move", drum, row)
+            self.assertEqual(self.ui.help, said)
+        # A note of the channel that is no hit is in the way as well, though no lane shows it.
+        self.steps.show(kit(*KIT, Note(20.0, 2.0, 60.0, 15, "kick")), LANES, 16, 4, TABLE)
+        self.mouse("move", 0, 20)
+        self.assertEqual(self.ui.help,
+                         "put a hit: k, bar 2, step 5 (takes the place of a note: kit plays one drum at a time)")
+        # With two drum channels it is the square's own channel that plays one drum, and the other is not in the way.
+        self.steps.show(band(kick=beat(("k", 2, 15)), tops=beat(("H", 2, 15))), PAIR, 16, 4, TABLE)
+        for drum, row, said in (
+                (1, 2, "put a hit: k in tops, bar 1, step 3 (takes the place of H: tops plays one drum at a time)"),
+                (0, 2, "take the hit away: k in kick, bar 1, step 3 (level 15)")):
             self.mouse("move", drum, row)
             self.assertEqual(self.ui.help, said)
 
@@ -795,6 +873,17 @@ class Drawn(unittest.TestCase):
         outline = {self.at(*pos) for pos in block(rect) - block((x + 1, y + 1, w - 2, h - 2))}
         self.assertEqual((len(inside), len(outline)), (1, 1))
         return inside.pop(), outline.pop()
+
+    def dot_in(self, rect: layout.Rect, colour: tuple[int, ...]) -> bool:
+        """Whether an empty square of a beat's colour is drawn with the dot in it. But for the dot it is as any."""
+        x, y, w, h = rect
+        fill, line = paint(colour, None)
+        where, shade = dot(rect, colour)
+        inside = block((x + 1, y + 1, w - 2, h - 2))
+        found = self.inked(rect, shade)
+        self.assertIn(found, (set(), block(where)))
+        self.assertEqual((self.inked(rect, line), self.inked(rect, fill)), (block(rect) - inside, inside - found))
+        return bool(found)
 
     def test_a_hit_is_filled_with_the_colour_of_its_beat_and_an_empty_square_is_not(self) -> None:
         grid = self.draw(shown(hit("k", 0), hit("k", 6), hit("s", 9), hit("H", 14), hit("k", 16), rect=TALL))
@@ -1009,16 +1098,56 @@ class Drawn(unittest.TestCase):
         ui.handle(Event("down", (grid.x(2) + 2, grid.y(0) + 9), button=1))
         ui.handle(Event("move", (grid.x(5) + 2, grid.y(0) + 9)))
         self.draw(steps)
-        self.assertEqual([self.square(grid.square(0, row)) for row in range(1, 7)],
-                         [paint(theme.FAULT, None), *(paint(grid.colour(row), 15) for row in (2, 3, 4, 5)),
-                          paint(theme.ACTIVE, None)])
-        # The snare that the kick of the fifth row takes the place of is gone from its own lane at once.
-        self.assertEqual(self.square(grid.square(1, 4)), paint(theme.ACTIVE, None))
+        self.assertEqual([self.square(grid.square(0, row)) for row in (1, 2, 3, 5, 6)],
+                         [paint(theme.FAULT, None), paint(theme.FAULT, 15), paint(theme.FAULT, 15),
+                          paint(theme.ACTIVE, 15), paint(theme.ACTIVE, None)])
+        # The snare keeps the fifth row: it is drawn as before, and the kick's square there is empty, with its dot.
+        self.assertEqual(self.square(grid.square(1, 4)), paint(theme.ACTIVE, 9))
+        self.assertTrue(self.dot_in(grid.square(0, 4), theme.ACTIVE))
+        # The kicks that are painted are in the way in the snare's lane at once.
+        self.assertEqual([self.dot_in(grid.square(1, row), grid.colour(row)) for row in (1, 2, 3, 5, 6)],
+                         [False, True, True, True, False])
         ui.handle(Event("up", (grid.x(5) + 2, grid.y(0) + 9), button=1))
         self.draw(steps)
         self.assertEqual([self.square(grid.square(0, row)) for row in (2, 5)],
                          [paint(theme.FAULT, None), paint(theme.ACTIVE, None)])
-        self.assertEqual(self.square(grid.square(1, 4)), paint(theme.ACTIVE, 9))
+        self.assertFalse(self.dot_in(grid.square(1, 2), theme.FAULT))
+
+    def test_a_dot_is_in_an_empty_square_whose_row_another_drum_of_its_channel_has_and_in_no_other(self) -> None:
+        self.assertEqual(dot((10, 20, SQUARE_W, LANE_H), theme.FAULT),
+                         ((12, 34, DOT_W, DOT_H), mix(theme.BACKGROUND, theme.FAULT, DOT)))
+        steps = Steps(TALL)
+        steps.show(kit(*KIT), LANES, 16, 4, TABLE)
+        grid = self.draw(steps)
+        # The first kick is in the way in the two other lanes, the snare in the kick's and the hat's, and so on.
+        for drum, row in ((1, 0), (2, 0), (0, 4), (2, 4), (1, 8), (0, 10)):
+            self.assertTrue(self.dot_in(grid.square(drum, row), grid.colour(row)))
+        # No hit of the channel is at the row of these, and a square with a hit has no dot.
+        for drum, row in ((0, 1), (1, 1), (2, 1), (0, 20), (2, 23)):
+            self.assertFalse(self.dot_in(grid.square(drum, row), grid.colour(row)))
+        self.assertEqual([self.square(grid.square(drum, row)) for drum, row in ((0, 0), (1, 4))],
+                         [paint(theme.FAULT, 15), paint(theme.ACTIVE, 9)])
+        # Where the playhead is the dot is lighter, as its square is.
+        steps.playhead = 4.0
+        grid = self.draw(steps)
+        x, y, _, _ = grid.square(2, 4)
+        self.assertEqual((self.at(x + 2, y + 14), self.at(x + 3, y + 15), self.at(x + 2, y + 13)),
+                         (*[mix(mix(theme.BACKGROUND, theme.ACTIVE, DOT), theme.TEXT, GLOW)] * 2,
+                          paint(theme.ACTIVE, None, True)[0]))
+
+    def test_no_dot_is_in_a_channel_of_one_letter_nor_where_the_hits_cannot_be_changed(self) -> None:
+        # Two channels of one letter each, with hits at the same row and at rows of their own.
+        steps = Steps(TALL)
+        steps.show(band(kick=beat(("k", 0, 15), ("k", 4, 15)), tops=beat(("k", 4, 9), ("k", 6, 9))),
+                   [Lane("kick", "k", "kick"), Lane("tops", "k", "kick")], 16, 4, TABLE)
+        grid = self.draw(steps)
+        for drum, row in ((1, 0), (0, 6), (0, 1), (1, 1)):
+            self.assertFalse(self.dot_in(grid.square(drum, row), grid.colour(row)))
+        # Without the drum table no hit can be put, and neither can one in a pattern that is off the grid.
+        for notes, table in ((KIT, None), ((*KIT, hit("H", 20.5, 9)), TABLE)):
+            steps.show(kit(*notes), LANES, 16, 4, table)
+            grid = self.draw(steps)
+            self.assertFalse(self.dot_in(grid.square(1, 0), theme.FAULT))
 
     def test_the_drums_of_the_first_pattern_of_the_arcade_example(self) -> None:
         song = Project.load(EXAMPLES / "arcade.json").song("tune")
