@@ -9,7 +9,7 @@ from collections.abc import Hashable, Iterable
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font, fit
-from rowsynth.gui.lists import List, Row, Scroll, lay, mix
+from rowsynth.gui.lists import DIMMED, List, Row, Scroll, lay, mix
 from rowsynth.gui.ui import Event, Ui
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -407,6 +407,59 @@ class Drawn(unittest.TestCase):
         self.draw()
         self.assertEqual(self.colours(self.band(rows, 0)), {theme.PANEL, theme.TEXT})
         self.assertEqual(min(x for x, _ in self.ink(self.band(rows, 0), theme.TEXT)), 16)
+
+    def test_a_row_with_a_colour_of_its_own_has_its_square_and_its_strip_when_picked_in_it(self) -> None:
+        rows = self.ui.add(List(self.RECT, [TREE[0], Row("own", "own", square=theme.SALMON),
+                                            Row("other", "other", square=theme.MUSTARD)], "own"))
+        self.draw()
+        own, other = self.band(rows, "own"), self.band(rows, "other")
+        self.assertEqual(self.colours(own), {theme.LIT, theme.SALMON, theme.TEXT})
+        self.assertEqual(self.colours(other), {theme.PANEL, theme.MUSTARD, theme.TEXT})
+        # The square is where any row has it, and the strip is down the left side of the picked row.
+        self.assertEqual(self.ink(other, theme.MUSTARD),
+                         {(10 + PAD + column, other[1] + 3 + row) for column in range(6) for row in range(6)})
+        self.assertEqual(len(self.ink(own, theme.SALMON)), 6 * 6 + theme.LIST_STRIP * ROW)
+        self.assertEqual(self.colours((10, own[1], theme.LIST_STRIP, ROW)), {theme.SALMON})
+        # With no heading above it, it has its square all the same, and its text starts after it.
+        rows.rows = [Row("own", "own", square=theme.SALMON)]
+        self.draw()
+        self.assertEqual(self.colours(self.band(rows, "own")), {theme.LIT, theme.SALMON, theme.TEXT})
+        self.assertEqual(min(x for x, _ in self.ink(self.band(rows, "own"), theme.TEXT)), 27)
+
+    def test_a_row_with_no_colour_of_its_own_has_its_headings_beside_one_that_has(self) -> None:
+        self.assertEqual((Row("key", "name").square, Row("key", "name").dim), (None, False))
+        rows = self.ui.add(List(self.RECT, [TREE[0], Row("own", "own", square=theme.SALMON), Row("plain", "plain"),
+                                            TREE[2], Row("coin", "coin")], "plain"))
+        self.draw()
+        self.assertEqual(self.colours(self.band(rows, "plain")), {theme.LIT, theme.SONG, theme.TEXT})
+        self.assertEqual(self.colours((10, self.band(rows, "plain")[1], theme.LIST_STRIP, ROW)), {theme.SONG})
+        self.assertEqual(self.colours(self.band(rows, "own")), {theme.PANEL, theme.SALMON, theme.TEXT})
+        self.assertEqual(self.colours(self.band(rows, "coin")), {theme.PANEL, theme.SOUND, theme.TEXT})
+        # A heading has no square: one that is given a colour for it is in its own colour as before.
+        rows.rows = [dataclasses.replace(TREE[0], square=theme.SALMON, dim=True), Row("tune", "tune")]
+        self.draw()
+        self.assertEqual(self.colours(self.band(rows, "SONGS")), {theme.PANEL, theme.SONG})
+        self.assertEqual(self.colours(self.band(rows, "tune")), {theme.PANEL, theme.SONG, theme.TEXT})
+
+    def test_a_dim_row_has_its_text_dim_its_tag_dimmer_and_its_square_mixed_towards_the_panel(self) -> None:
+        rows = self.ui.add(List(self.RECT, [TREE[0], Row("own", "own", tag="12", square=theme.SALMON, dim=True),
+                                            Row("plain", "plain", tag="12", dim=True),
+                                            Row("clear", "clear", tag="12")], "own"))
+        self.draw()
+        own, plain, clear = (self.band(rows, key) for key in ("own", "plain", "clear"))
+        faded = [mix(theme.PANEL, colour, DIMMED) for colour in (theme.SALMON, theme.SONG)]
+        self.assertEqual(self.colours(own), {theme.LIT, faded[0], theme.DIM, theme.LINE})
+        self.assertEqual(self.colours(plain), {theme.PANEL, faded[1], theme.DIM, theme.LINE})
+        self.assertEqual(self.colours(clear), {theme.PANEL, theme.SONG, theme.TEXT, theme.DIM})
+        # The square keeps its size, and the strip of a picked dim row is as dim as its square.
+        self.assertEqual((len(self.ink(plain, faded[1])), len(self.ink(own, faded[0]))),
+                         (6 * 6, 6 * 6 + theme.LIST_STRIP * ROW))
+        # The name is where the name of any row is, and the tag where the tag of any row is.
+        for band in (own, plain):
+            name, tag = self.ink(band, theme.DIM), self.ink(band, theme.LINE)
+            self.assertEqual(min(x for x, _ in name), 27)
+            self.assertLess(max(x for x, _ in name), min(x for x, _ in tag))
+            self.assertEqual({x for x, _ in tag}, {x for x, _ in self.ink(clear, theme.DIM)})
 
     def test_the_tag_is_at_the_right_end_and_a_name_too_long_for_the_room_before_it_is_cut(self) -> None:
         name = "a very long name of a thing"

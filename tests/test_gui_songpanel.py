@@ -14,10 +14,9 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
-from rowsynth.gui.lists import List, Row, mix
+from rowsynth.gui.lists import List, Row
 from rowsynth.gui.model import Model
-from rowsynth.gui.songpanel import (DIMMED, ChannelRow, Channels, Order, SongPanel, arrange, channel_rows, colour_of,
-                                    first_channel, place_at)
+from rowsynth.gui.songpanel import Order, SongPanel, arrange, channel_rows, colour_of, first_channel, place_at
 from rowsynth.gui.songview import Block, Channel, Note
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -55,6 +54,16 @@ WALK = {
     "order": ["a", "b", "a"],
 }
 BARE = {"row_ticks": 6, "channels": {}, "patterns": {}, "order": []}
+#: A song with two drum channels. The first plays one letter. The second plays two, one of them only further on.
+PAIR = {
+    "row_ticks": 6,
+    "drums": {"k": {"inst": "thud", "note": "c2"}, "h": {"inst": "thud", "note": "c6"}},
+    "channels": {"air": {"inst": "tone"}, "low": {"inst": "thud", "drums": True},
+                 "top": {"inst": "thud", "drums": True}},
+    "patterns": {"a": {"air": "o4 l4 c e g e", "low": "l4 k k k k", "top": "l8 r h r h r h r h"},
+                 "b": {"air": "o4 l2 g e", "top": "l4 k h k h"}},
+    "order": ["a", "b"],
+}
 PROJECT = {
     "instruments": INSTRUMENTS,
     "sounds": {"ping": {"def": {"voices": [{"inst": "tone", "notes": [[0, "c5", 6]]}]}}},
@@ -151,11 +160,11 @@ class Listed(unittest.TestCase):
         channels = songview.pattern(Project.from_dict(PROJECT).song("walk"), "a").channels
         self.assertEqual(channel_rows(channels), [
             HEADINGS[0],
-            ChannelRow("hush", "hush", colour=theme.SONG, tag="tone", dim=True),
-            ChannelRow("air", "air", colour=theme.SOUND, tag="tone"),
-            ChannelRow("low", "low", colour=theme.SALMON, tag="tone"),
+            Row("hush", "hush", tag="tone", square=theme.SONG, dim=True),
+            Row("air", "air", tag="tone", square=theme.SOUND),
+            Row("low", "low", tag="tone", square=theme.SALMON),
             HEADINGS[1],
-            ChannelRow("kit", "kit", colour=theme.MUSTARD, tag="thud"),
+            Row("kit", "kit", tag="thud", square=theme.MUSTARD),
         ])
         # A heading stands also over no channel, and the colours start again after the last.
         self.assertEqual(channel_rows(()), list(HEADINGS))
@@ -228,7 +237,7 @@ class Shown(unittest.TestCase):
         self.assertEqual((panel.order.picked, panel.roll.pattern.name), (1, "b"))
         self.assertEqual([note.pitch for note in panel.roll.notes], [67, 65, 64, 62])
         # The list is of the channels as that pattern has them.
-        self.assertEqual([row.key for row in panel.list.rows if getattr(row, "dim", False)], ["low"])
+        self.assertEqual([row.key for row in panel.list.rows if row.dim], ["low"])
         click(self.ui, middle(panel.order.cells()[2]))
         self.assertEqual((panel.order.picked, panel.roll.pattern.name), (2, "a"))
 
@@ -243,11 +252,39 @@ class Shown(unittest.TestCase):
         self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
         click(self.ui, spot(panel.list, "kit"))
         self.assertEqual(self.seen(), ["order", "list", "follow", "steps"])
-        # A lane for each drum letter of the song, and a square for each row of the pattern.
+        # A lane for each letter the drum channel plays, and a square for each row of the pattern.
         self.assertEqual((panel.steps.grid.drums, panel.steps.grid.rows, panel.steps.grid.beat_rows), (2, 16, 4))
-        self.assertEqual(panel.steps.rect, panel.roll.rect)
+        self.assertEqual((panel.steps.rect, panel.steps.picked), (panel.roll.rect, "kit"))
         click(self.ui, spot(panel.list, "air"))
         self.assertEqual(self.seen(), ["order", "list", "follow", "ghosts", "roll"])
+
+    def test_either_of_two_drum_channels_picked_shows_the_drums_of_both_with_its_own_labels_lit(self) -> None:
+        self.path.write_text(json.dumps({"instruments": INSTRUMENTS, "songs": {"pair": PAIR}}), encoding="utf-8")
+        ui = Ui()
+        panel = SongPanel(Stand(Model(self.path)), ui)
+        panel.place(RECT)
+        panel.update(0.016)
+        steps = panel.steps
+        self.assertEqual((panel.channel, steps.visible, panel.roll.visible), ("air", False, True))
+        for channel in ("top", "low", "top"):
+            click(ui, spot(panel.list, channel))
+            panel.update(0.016)
+            self.assertEqual((panel.channel, steps.visible, panel.roll.visible), (channel, True, False))
+            # A lane for the letter of the first, then air, and a lane for each of the two letters of the second.
+            self.assertEqual((steps.picked, steps.grid.drums, steps.grid.breaks), (channel, 3, (1,)))
+            self.assertEqual([steps.step_at(steps.grid.square(lane, 2)[:2]) for lane in range(3)],
+                             [("low", "k", 2), ("top", "k", 2), ("top", "h", 2)])
+        # The lanes are those of the whole song: another pattern has the same ones, with its own hits in them.
+        ui.handle(Event("move", steps.grid.square(1, 4)[:2]))
+        self.assertEqual(ui.help, "k in top, bar 1, step 5: empty")
+        click(ui, middle(panel.order.cells()[1]))
+        self.assertEqual((steps.picked, steps.grid.drums, steps.grid.rows), ("top", 3, 16))
+        ui.handle(Event("move", steps.grid.square(1, 8)[:2]))
+        self.assertEqual(ui.help, "k in top, bar 1, step 9: hit, level 15")
+        # A tuned channel picked is shown in the roll, as with one drum channel.
+        click(ui, spot(panel.list, "air"))
+        self.assertEqual((panel.channel, steps.visible, panel.roll.visible, panel.roll.channel),
+                         ("air", False, True, "air"))
 
     def test_the_channel_stays_picked_when_the_pattern_changes(self) -> None:
         panel = self.panel
@@ -402,23 +439,32 @@ class Drawn(unittest.TestCase):
         self.canvas = Canvas(self.surface, Font(sprites.load("font")), sprites.load("icons"))
         self.ui = Ui()
 
-    def test_a_channel_has_its_square_in_its_own_colour_and_a_dim_one_is_written_dim(self) -> None:
-        rows = [HEADINGS[0], ChannelRow("air", "air", colour=theme.SOUND, tag="tone"),
-                ChannelRow("hush", "hush", colour=theme.SALMON, tag="tone", dim=True)]
-        self.ui.add(Channels((10, 10, 120, 60), rows, picked="air"))
+    def test_the_drums_of_the_piece_are_drawn_together_with_the_picked_channel_lit_in_the_list_and_the_steps(
+            self) -> None:
+        panel = SongPanel(Stand(Model(EXAMPLES / "piece.json")), self.ui)
+        panel.place((0, 0, RECT[2], RECT[3]))
+        panel.update()
+        panel.order.pick(panel.order.options.index("band"))
+        click(self.ui, spot(panel.list, "snare"))
+        panel.draw(self.canvas)
         self.ui.draw(self.canvas)
-        # A row is 12 high: the heading, then the picked channel, then the dim one.
-        air, hush = (10, 22, 120, 12), (10, 34, 120, 12)
-        square = theme.LIST_SQUARE * theme.LIST_SQUARE
-        self.assertEqual(ink(self.surface, air, theme.SOUND), square + theme.LIST_STRIP * 12)
-        self.assertEqual(ink(self.surface, (10 + theme.LIST_PAD, 25, theme.LIST_SQUARE, theme.LIST_SQUARE),
-                             theme.SOUND), square)
-        self.assertEqual(ink(self.surface, hush, mix(theme.PANEL, theme.SALMON, DIMMED)), square)
-        self.assertEqual(ink(self.surface, (10, 10, 120, 60), theme.SALMON), 0)
-        # The name of the one is in the colour of text and its tag dim. The other has its name dim, its tag dimmer.
-        inks = [[ink(self.surface, row, colour) > 0 for colour in (theme.TEXT, theme.DIM, theme.LINE)]
-                for row in (air, hush)]
-        self.assertEqual(inks, [[True, True, False], [False, True, True]])
+        steps, grid = panel.steps, panel.steps.grid
+        # Eight drum channels of one letter each: eight lanes, all in view, each parted from the next.
+        self.assertEqual((grid.drums, grid.drums_in_view(), grid.breaks), (8, range(0, 8), tuple(range(1, 8))))
+        self.assertEqual([steps.step_at(grid.square(lane, 0)[:2])[:2] for lane in range(8)],
+                         [("kick", "k"), ("hkick", "k"), ("snare", "s"), ("hsnare", "s"), ("hats", "h"),
+                          ("shaker", "h"), ("ohat", "H"), ("crash", "t")])
+        x = steps.rect[0]
+        self.assertEqual([lane for lane in range(8) if self.surface.get_at((x + 1, grid.y(lane) + 1))[:3] == theme.LIT],
+                         [2])
+        # The kick is on the first row and the snare on the fifth, each in its own lane and not in the other's.
+        hit = [[self.surface.get_at((grid.x(row) + 2, grid.y(lane) + 2))[:3] == grid.colour(row) for row in (0, 4)]
+               for lane in (0, 1, 2, 3)]
+        self.assertEqual(hit, [[True, False], [False, False], [False, True], [False, False]])
+        # In the list the picked channel has its strip, and the square of one with no text here is dimmer.
+        snare, crash = (*spot(panel.list, "snare"), 20, 12), (*spot(panel.list, "crash"), 20, 12)
+        self.assertEqual((ink(self.surface, snare, theme.SONG), ink(self.surface, crash, theme.SOUND)),
+                         (theme.LIST_SQUARE ** 2 + theme.LIST_STRIP * 12, 0))
 
     def test_the_lead_of_the_arcade_tune_is_drawn_in_its_colour_where_its_first_note_is(self) -> None:
         panel = SongPanel(Stand(Model(EXAMPLES / "arcade.json")), self.ui)

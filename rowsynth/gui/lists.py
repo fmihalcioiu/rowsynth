@@ -16,6 +16,8 @@ if TYPE_CHECKING:
 
 #: The keys that move the pick of a list.
 KEYS = ("up", "down", "home", "end")
+#: How much of its colour the square of a dim row keeps. The rest is the colour of the panel.
+DIMMED = 0.4
 
 
 def _nearest(above: int, below: int) -> int:
@@ -86,6 +88,10 @@ class Row:
     heading: it cannot be picked, and a click on it folds the rows under it away. `colour` is of a heading: its
     text is in it, and so is the small square before each row under it. `tag` is a short text at the right end,
     such as a count. `indent` is how many steps the row stands in from the left.
+
+    `square` and `dim` are of a row that is no heading. `square` is a colour of its own for its square, and for
+    its strip when it is picked: with None they have the heading's. A `dim` row has its text in `theme.DIM`, its
+    tag dimmer still, and its square mixed towards the panel.
     """
 
     key: Hashable
@@ -94,6 +100,8 @@ class Row:
     colour: Colour = theme.DIM
     tag: str = ""
     indent: int = 0
+    square: Colour | None = None
+    dim: bool = False
 
 
 class Place(NamedTuple):
@@ -290,12 +298,21 @@ class List(Widget):
                 canvas.box(bar[1], theme.LINE)
 
     def _draw_row(self, canvas: Canvas, place: Place, rect: Rect, lit: bool) -> None:
-        """Draw one row: its background, what stands before its text, its tag at the right, and its text between."""
+        """Draw one row: its background, what stands before its text, its tag at the right, and its text between.
+
+        The square of a row, and its strip when it is picked, are in the row's own colour where it has one, and
+        in its heading's where it has none. A dim row is drawn dim.
+        """
         row, _, colour = place
         x, y, w, h = rect
         picked = not row.head and row.key == self.picked
+        dim = row.dim and not row.head
         ground = theme.LIT if picked else theme.RAISED if lit else theme.PANEL
         canvas.box(rect, mix(ground, theme.ACTIVE, self.glow.get(row.key, 0)))
+        if not row.head and row.square is not None:
+            colour = row.square
+        if dim and colour is not None:
+            colour = mix(theme.PANEL, colour, DIMMED)
         if picked and colour is not None:
             canvas.box((x, y, theme.LIST_STRIP, h), colour)
         left = x + theme.LIST_PAD + row.indent * theme.LIST_INDENT
@@ -308,10 +325,11 @@ class List(Widget):
             left += theme.LIST_SQUARE + theme.LIST_SPACE
         if row.tag:
             width = Font.width(row.tag)
-            canvas.text_in(row.tag, (right - width, y, width, h), theme.DIM)
+            canvas.text_in(row.tag, (right - width, y, width, h), theme.LINE if dim else theme.DIM)
             right -= width + theme.LIST_SPACE
         # A text too long for the room between is cut there, as `font.fit` cuts it.
-        canvas.text_in(row.text, (left, y, max(0, right - left), h), row.colour if row.head else theme.TEXT)
+        ink = row.colour if row.head else theme.DIM if dim else theme.TEXT
+        canvas.text_in(row.text, (left, y, max(0, right - left), h), ink)
 
 
 def _mark(canvas: Canvas, x: int, y: int, folded: bool, colour: Colour) -> None:

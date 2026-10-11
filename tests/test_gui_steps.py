@@ -1,4 +1,4 @@
-"""Tests for rowsynth.gui.steps: the sums that place the drum steps, the widget that shows them, and what it draws."""
+"""Tests for rowsynth.gui.steps: the lanes of a song, the sums that place the steps, the widget, and what it draws."""
 from __future__ import annotations
 
 import dataclasses
@@ -11,9 +11,9 @@ from rowsynth.gui import layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.songview import Channel, DrumRow, Note, Pattern
-from rowsynth.gui.steps import (BAR_GAP, BARS_H, BEAT_GAP, EDGE, EMPTY_FILL, EMPTY_LINE, FAINTEST, GAP, LABEL_EDGE,
-                                LABEL_GAP, LABEL_PAD, LABELS_W, LANE_GAP, LANE_H, MARK_W, SQUARE_W, Grid, Steps,
-                                hit_colour, mix, paint)
+from rowsynth.gui.steps import (BAR_GAP, BARS_H, BEAT_GAP, CHANNEL_GAP, EDGE, EMPTY_FILL, EMPTY_LINE, FAINTEST, GAP,
+                                LABEL_EDGE, LABEL_GAP, LABEL_PAD, LABELS_W, LANE_GAP, LANE_H, MARK_W, SQUARE_W, Grid,
+                                Lane, Steps, hit_colour, lanes, mix, paint)
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
 
@@ -44,6 +44,9 @@ LINE_H = (LANE_H - 2 * LABEL_EDGE) // 2
 BAR_W = 16 * PITCH + 3 * (BEAT_GAP - GAP) + BAR_GAP - GAP
 
 DRUMS = [DrumRow("k", "kick", 48.0), DrumRow("s", "a very long snare", 72.0), DrumRow("H", "hat", 96.0)]
+# The lanes of one drum channel that plays all three, and those of two: one that plays a letter, and one two.
+LANES = [Lane("kit", "k", "kick"), Lane("kit", "s", "a very long snare"), Lane("kit", "H", "hat")]
+PAIR = [Lane("kick", "k", "kick"), Lane("tops", "k", "kick"), Lane("tops", "H", "hat")]
 
 
 def hit(letter: str, row: float, level: int = 15) -> Note:
@@ -51,16 +54,28 @@ def hit(letter: str, row: float, level: int = 15) -> Note:
     return Note(row, 1.0, 60.0, level, "kick", letter)
 
 
-def kit(*notes: Note, rows: float = 32.0) -> Pattern:
-    """A pattern with a tuned channel and a drum channel, which has those hits. It is two bars unless told."""
+def band(rows: float = 32.0, **hits: tuple[Note, ...]) -> Pattern:
+    """A pattern with a tuned channel, and a drum channel of each name with its hits. Two bars unless told."""
     return Pattern("a", rows, (Channel("lead", "lead", False, (Note(0.0, 4.0, 60.0, 15, "lead"),), rows, True),
-                               Channel("kit", "kick", True, notes, rows, True)))
+                               *(Channel(name, "kick", True, notes, rows, True) for name, notes in hits.items())))
+
+
+def kit(*notes: Note, rows: float = 32.0) -> Pattern:
+    """A pattern with a tuned channel and one drum channel, which has those hits. It is two bars unless told."""
+    return band(rows, kit=notes)
 
 
 def shown(*notes: Note, rect: layout.Rect = RECT) -> Steps:
-    """The steps showing a drum channel with those hits, sixteen rows to a bar and four to a beat."""
+    """The steps showing one drum channel with those hits, sixteen rows to a bar and four to a beat."""
     steps = Steps(rect, help="the drum steps")
-    steps.show(kit(*notes), "kit", DRUMS, 16, 4)
+    steps.show(kit(*notes), LANES, 16, 4)
+    return steps
+
+
+def paired(rect: layout.Rect = TALL) -> Steps:
+    """The steps showing two drum channels that play one letter at other rows, and one of them a letter more."""
+    steps = Steps(rect, help="the drum steps")
+    steps.show(band(kick=(hit("k", 0), hit("k", 9.5)), tops=(hit("k", 4, 9), hit("H", 2))), PAIR, 16, 4)
     return steps
 
 
@@ -163,6 +178,23 @@ class Sums(unittest.TestCase):
         self.assertEqual(fits.scrolled(rows=5, drums=2), fits)
         self.assertEqual(Grid(RECT, 0, 0, 16, 4).scrolled(rows=3, drums=3), Grid(RECT, 0, 0, 16, 4))
 
+    def test_the_first_lane_of_another_channel_has_more_air_above_it_which_no_lane_is_in(self) -> None:
+        grid = Grid((10, 20, 296, 300), 32, 4, 16, 4, breaks=(1, 3))
+        self.assertEqual([grid.y(drum) - TOP for drum in range(4)],
+                         [0, LANE + CHANNEL_GAP, 2 * LANE + CHANNEL_GAP, 3 * LANE + 2 * CHANNEL_GAP])
+        self.assertEqual([grid.drum_at(y) for y in (grid.y(0) + LANE_H, grid.y(1) - 1, grid.y(1), grid.y(2) - 1,
+                                                    grid.y(3) - 1, grid.y(3) + LANE_H - 1, grid.y(3) + LANE_H)],
+                         [None, None, 1, None, None, 3, None])
+        self.assertEqual(grid.square(3, 0), (LEFT, TOP + 3 * LANE + 2 * CHANNEL_GAP, SQUARE_W, LANE_H))
+        # The air above the lane at the top of the view is out of view with the lanes above it.
+        moved = dataclasses.replace(grid, first_drum=1)
+        self.assertEqual([moved.y(drum) - TOP for drum in (1, 2, 3)], [0, LANE, 2 * LANE + CHANNEL_GAP])
+        # The furthest the view goes counts the air: the last three lanes fit this room with it, and not one less.
+        room = BARS_H + 2 * LANE + CHANNEL_GAP + LANE_H
+        for height, breaks, first in ((room, (1, 3), 1), (room - 1, (1, 3), 2), (room - 1, (), 1)):
+            short = Grid((10, 20, 296, height), 32, 4, 16, 4, breaks=breaks)
+            self.assertEqual(short.scrolled(drums=99).first_drum, first)
+
     def test_a_bar_or_a_beat_of_no_rows_is_refused(self) -> None:
         for bar_rows, beat_rows in ((0, 4), (16, 0)):
             with self.assertRaises(RowSynthError) as refused:
@@ -188,6 +220,32 @@ class Sums(unittest.TestCase):
                 for level in (None, 8):
                     self.assertTrue(all(total(lit) > total(plain) for lit, plain
                                         in zip(paint(colour, level, True), paint(colour, level))))
+
+
+class Lanes(unittest.TestCase):
+    def test_one_drum_channel_that_plays_three_letters_has_a_lane_for_each_in_the_order_of_the_table(self) -> None:
+        first, second = kit(hit("H", 0), hit("k", 4), Note(8.0, 1.0, 60.0, 15, "kick")), kit(hit("s", 2), hit("k", 0))
+        self.assertEqual(lanes([first, second], DRUMS), LANES)
+        # The patterns can be had one at a time, and a note that is no drum letter has no lane.
+        self.assertEqual(lanes(iter([first]), DRUMS), [LANES[0], LANES[2]])
+
+    def test_three_drum_channels_of_one_letter_each_have_a_lane_each_in_the_order_of_the_song(self) -> None:
+        found = lanes([band(hats=(hit("H", 0), hit("H", 2)), kick=(hit("k", 0),), snare=(hit("s", 4),))], DRUMS)
+        self.assertEqual(found, [Lane("hats", "H", "hat"), Lane("kick", "k", "kick"),
+                                 Lane("snare", "s", "a very long snare")])
+
+    def test_a_channel_that_plays_two_letters_has_its_two_lanes_together_among_the_others(self) -> None:
+        # What a channel plays in any pattern counts, and two channels can play the same letter.
+        found = lanes([band(kick=(hit("k", 0),), tops=(hit("H", 2),), snare=()),
+                       band(kick=(), tops=(hit("k", 4),), snare=(hit("s", 4),))], DRUMS)
+        self.assertEqual(found, PAIR + [Lane("snare", "s", "a very long snare")])
+
+    def test_a_drum_channel_that_plays_nothing_anywhere_has_a_lane_for_every_letter(self) -> None:
+        found = lanes([band(kick=(hit("k", 0),), spare=()), band(kick=(), spare=())], DRUMS)
+        self.assertEqual(found, [Lane("kick", "k", "kick"), *(Lane("spare", drum.letter, drum.inst) for drum in DRUMS)])
+        # A song with no drum channel has no lanes, and neither has one with no patterns or with no letters.
+        tuned = Pattern("a", 16.0, (Channel("lead", "lead", False, (), 16.0, True),))
+        self.assertEqual([lanes([tuned], DRUMS), lanes([], DRUMS), lanes([kit()], [])], [[], [], []])
 
 
 class Pointing(unittest.TestCase):
@@ -235,31 +293,33 @@ class Pointing(unittest.TestCase):
 
     def test_showing_another_pattern_keeps_the_view_as_far_as_that_one_reaches(self) -> None:
         self.wheel(-1, SHIFT)
-        self.steps.show(kit(hit("k", 0)), "kit", DRUMS, 16, 4)
+        self.steps.show(kit(hit("k", 0)), LANES, 16, 4)
         self.assertEqual(self.view(), (4, 0))
-        self.steps.show(kit(hit("k", 0), rows=16.0), "kit", DRUMS[:1], 16, 4)
+        self.steps.show(kit(hit("k", 0), rows=16.0), LANES[:1], 16, 4)
         self.assertEqual((self.view(), self.steps.grid.rows, self.steps.grid.drums), ((0, 0), 16, 1))
         # A count of rows a hair off a whole one is that whole one, and half a row more is a square more.
         for rows, squares in ((15.9999999, 16), (16.0000001, 16), (16.5, 17)):
-            self.steps.show(kit(rows=rows), "kit", DRUMS, 16, 4)
+            self.steps.show(kit(rows=rows), LANES, 16, 4)
             self.assertEqual(self.steps.grid.rows, squares)
 
-    def test_step_at_is_the_letter_and_the_row_on_a_square_and_none_in_a_gap_and_in_the_labels(self) -> None:
+    def test_step_at_is_the_channel_the_letter_and_the_row_on_a_square_and_none_in_a_gap_and_in_the_labels(
+            self) -> None:
         x, y, w, h = self.grid.square(1, 5)
         self.assertEqual([self.steps.step_at(pos) for pos in ((x, y), (x + w - 1, y + h - 1), (LEFT, TOP),
                                                              (x, self.grid.y(2)))],
-                         [("s", 5), ("s", 5), ("k", 0), ("H", 5)])
+                         [("kit", "s", 5), ("kit", "s", 5), ("kit", "k", 0), ("kit", "H", 5)])
         # Right of the square and above it, in the strip of the bar numbers, on a label and just before the squares.
         self.assertEqual([self.steps.step_at(pos) for pos in ((x + w, y), (x, y - 1), (x, RECT[1] + 2),
                                                              (RECT[0] + 5, y + 5), (LEFT - 1, y))],
                          [None, None, None, None, None])
         # A hit a hair off a whole row is on that row, and after a scroll the same place is another step.
-        self.steps.show(kit(hit("s", 4.9999999, 7)), "kit", DRUMS, 16, 4)
+        self.steps.show(kit(hit("s", 4.9999999, 7)), LANES, 16, 4)
         self.ui.handle(Event("move", (x, y)))
-        self.assertEqual((self.steps.step_at((x, y)), self.ui.help), (("s", 5), "s, bar 1, step 6: hit, level 7"))
+        self.assertEqual((self.steps.step_at((x, y)), self.ui.help),
+                         (("kit", "s", 5), "s, bar 1, step 6: hit, level 7"))
         self.wheel(-1)
         self.wheel(-1, SHIFT)
-        self.assertEqual(self.steps.step_at((LEFT, TOP)), ("s", 4))
+        self.assertEqual(self.steps.step_at((LEFT, TOP)), ("kit", "s", 4))
 
     def test_the_help_line_says_what_is_at_the_square_under_the_mouse(self) -> None:
         self.assertEqual(self.ui.help, "")
@@ -281,14 +341,31 @@ class Pointing(unittest.TestCase):
         self.wheel(-1, SHIFT, pos=(LEFT + 2, TOP + 3))
         self.assertEqual(self.ui.help, "k, bar 1, step 5: empty")
 
-    def test_a_channel_the_pattern_does_not_have_and_one_that_is_no_drum_channel_are_refused(self) -> None:
+    def test_with_two_drum_channels_step_at_and_the_help_line_say_which_channel_a_square_is_of(self) -> None:
+        steps = self.ui.add(paired((0, 200, 296, 130)))
+        grid = steps.grid
+        self.assertEqual((grid.drums, grid.breaks), (3, (1,)))
+        for drum, row, step, said in ((0, 0, ("kick", "k", 0), "k in kick, bar 1, step 1: hit, level 15"),
+                                      (1, 0, ("tops", "k", 0), "k in tops, bar 1, step 1: empty"),
+                                      (1, 4, ("tops", "k", 4), "k in tops, bar 1, step 5: hit, level 9"),
+                                      (0, 9, ("kick", "k", 9), "k in kick, bar 1, step 10: hit off the grid, level 15"),
+                                      (1, 9, ("tops", "k", 9), "k in tops, bar 1, step 10: empty"),
+                                      (2, 18, ("tops", "H", 18), "H in tops, bar 2, step 3: empty")):
+            x, y, _, _ = grid.square(drum, row)
+            self.ui.handle(Event("move", (x + 2, y + 9)))
+            self.assertEqual((steps.step_at((x + 2, y + 9)), self.ui.help), (step, said))
+        # In the air between the two channels there is no step, and the line is the widget's own.
+        self.ui.handle(Event("move", (grid.x(0), grid.y(1) - 1)))
+        self.assertEqual((steps.step_at((grid.x(0), grid.y(1) - 1)), self.ui.help), (None, "the drum steps"))
+
+    def test_a_lane_of_a_channel_the_pattern_does_not_have_or_of_one_that_is_no_drum_channel_is_refused(self) -> None:
         for channel, said in (("bass", "pattern 'a' has no channel called 'bass'"),
                               ("lead", "channel 'lead' is not a drum channel")):
             with self.assertRaises(RowSynthError) as refused:
-                self.steps.show(kit(), channel, DRUMS, 16, 4)
+                self.steps.show(kit(), [LANES[0], Lane(channel, "k", "kick")], 16, 4)
             self.assertEqual(str(refused.exception), said)
         with self.assertRaises(RowSynthError):
-            self.steps.show(kit(), "kit", DRUMS, 16, 0)
+            self.steps.show(kit(), LANES, 16, 0)
         # What it showed before is still there.
         self.ui.handle(Event("move", (LEFT, TOP)))
         self.assertEqual(self.ui.help, "k, bar 1, step 1: hit, level 15")
@@ -316,10 +393,11 @@ class Drawn(unittest.TestCase):
         """The pixels of a rectangle that are of a colour."""
         return {pos for pos in block(rect) if self.at(*pos) == colour}
 
-    def written(self, text: str, rect: layout.Rect, colour: tuple[int, ...]) -> set[tuple[int, int]]:
+    def written(self, text: str, rect: layout.Rect, colour: tuple[int, ...],
+                align: str = "left") -> set[tuple[int, int]]:
         """The pixels of a rectangle that are of a colour when nothing but a text is drawn in it, in that colour."""
         kept, self.surface = self.surface, pygame.Surface(self.SIZE)
-        Canvas(self.surface, self.canvas.font).text_in(text, rect, colour)
+        Canvas(self.surface, self.canvas.font).text_in(text, rect, colour, align)
         found, self.surface = self.inked(rect, colour), kept
         return found
 
@@ -385,6 +463,82 @@ class Drawn(unittest.TestCase):
                 self.assertEqual(self.inked((x + width, y, LABEL_GAP, LANE_H), theme.PANEL),
                                  block((x + width, y, LABEL_GAP, LANE_H)))
 
+    def test_with_two_drum_channels_a_label_has_the_name_of_its_channel_too_and_with_one_it_has_not(self) -> None:
+        steps = paired()
+        steps.show(band(kick=(), tops=(), a_long_channel=()), PAIR + [Lane("a_long_channel", "s", "snare")], 16, 4)
+        grid = self.draw(steps)
+        width = LABELS_W - LABEL_GAP
+        for drum, letter, channel in ((0, "k", "kick"), (1, "k", "tops"), (2, "H", "tops")):
+            x, y = TALL[0], grid.y(drum)
+            upper = (x + LABEL_PAD, y + LABEL_EDGE, width - 2 * LABEL_PAD, LINE_H)
+            beside = (x + 2 * LABEL_PAD + Font.width(letter), y + LABEL_EDGE,
+                      width - 3 * LABEL_PAD - Font.width(letter), LINE_H)
+            with self.subTest(drum=drum):
+                # The letter and the instrument are where they are with one channel, and the name ends at the right.
+                self.assertEqual(self.inked((x, y, width, LANE_H), theme.TEXT), self.written(letter, upper, theme.TEXT))
+                self.assertEqual(self.inked((x, y, width, LANE_H), theme.DIM),
+                                 self.written(channel, beside, theme.DIM, "right"))
+                self.assertTrue(self.inked((x, y + LABEL_EDGE + LINE_H, width, LINE_H), theme.INSTRUMENT))
+        # A name too long for the room beside the letter is cut, and stays clear of the letter.
+        scroll(steps, drums=1)
+        grid = self.draw(steps)
+        x, y = TALL[0], grid.y(3)
+        beside = (x + 2 * LABEL_PAD + Font.width("s"), y + LABEL_EDGE, width - 3 * LABEL_PAD - Font.width("s"), LINE_H)
+        self.assertEqual(self.inked((x, y, width, LANE_H), theme.DIM),
+                         self.written("a_long_ch..", beside, theme.DIM, "right"))
+        # With one drum channel no label has a name in it.
+        self.draw(shown(rect=TALL))
+        self.assertEqual(self.inked((TALL[0], TOP, width, TALL[3] - BARS_H), theme.DIM), set())
+
+    def test_the_labels_of_the_lanes_of_the_picked_channel_are_lit(self) -> None:
+        steps = paired()
+        for picked, lit in ((None, ()), ("tops", (1, 2)), ("kick", (0,)), ("lead", ())):
+            steps.picked = picked
+            grid = self.draw(steps)
+            with self.subTest(picked=picked):
+                self.assertEqual([self.at(TALL[0] + 1, grid.y(drum) + 1) for drum in range(3)],
+                                 [theme.LIT if drum in lit else theme.RAISED for drum in range(3)])
+                # The outline of a lit label is that of any label.
+                self.assertEqual({self.at(TALL[0], grid.y(drum)) for drum in range(3)}, {theme.LINE})
+        # The one drum channel of a song has all the labels.
+        one = shown(rect=TALL)
+        one.picked = "kit"
+        grid = self.draw(one)
+        self.assertEqual({self.at(TALL[0] + 1, grid.y(drum) + 1) for drum in range(3)}, {theme.LIT})
+
+    def test_a_faint_line_runs_between_the_lanes_of_one_channel_and_those_of_the_next_and_none_inside_one(
+            self) -> None:
+        steps = paired(RECT)
+        grid = self.draw(steps)
+        self.assertEqual((grid.y(1) - grid.y(0) - LANE_H, grid.y(2) - grid.y(1) - LANE_H),
+                         (LANE_GAP + CHANNEL_GAP, LANE_GAP))
+        # In the middle of the air between the two channels, from side to side of the widget.
+        line = (RECT[0], grid.y(0) + LANE_H + (LANE_GAP + CHANNEL_GAP) // 2, RECT[2], 1)
+        self.assertEqual(self.inked(RECT, theme.LIT), block(line))
+        between = (RECT[0], grid.y(1) + LANE_H, RECT[2], LANE_GAP)
+        self.assertEqual(self.inked(between, theme.PANEL), block(between))
+        # Scrolled so that the first lane of the second channel is at the top, the line has gone with the air.
+        scroll(steps, drums=1)
+        self.assertEqual(self.draw(steps).first_drum, 1)
+        self.assertEqual(self.inked(RECT, theme.LIT), set())
+
+    def test_a_hit_is_in_the_lane_of_its_own_channel_and_not_in_that_of_another_channel_with_its_letter(self) -> None:
+        grid = self.draw(paired())
+        # Both channels play k: the one at the first row and between two rows further on, the other at the fifth.
+        self.assertEqual(self.square(grid.square(0, 0)), (theme.FAULT, mix(theme.FAULT, theme.TEXT, EDGE)))
+        self.assertEqual(self.square(grid.square(1, 0)), paint(theme.FAULT, None))
+        self.assertEqual(self.square(grid.square(1, 4))[0], hit_colour(theme.ACTIVE, 9))
+        self.assertEqual(self.square(grid.square(0, 4)), paint(theme.ACTIVE, None))
+        self.assertEqual(self.square(grid.square(2, 2))[0], theme.FAULT)
+        self.assertEqual(self.inked((LEFT, TOP, AREA_W, TALL[3] - BARS_H), theme.MUSTARD),
+                         block((grid.x(9.5), grid.y(0), MARK_W, LANE_H)))
+        # A channel that has no lane shows nothing, in the lane of its letter that another channel has.
+        steps = paired()
+        steps.show(band(kick=(hit("k", 0),), tops=(hit("k", 4, 9), hit("H", 2))), PAIR[1:], 16, 4)
+        grid = self.draw(steps)
+        self.assertEqual([self.square(grid.square(0, row)) for row in (0, 1)], [paint(theme.FAULT, None)] * 2)
+        self.assertEqual(self.square(grid.square(0, 4))[0], hit_colour(theme.ACTIVE, 9))
+
     def test_a_drum_with_no_hits_is_a_lane_of_empty_squares(self) -> None:
         grid = self.draw(shown(hit("k", 0), hit("H", 3), rect=TALL))
         whole = grid.rows_in_view()[:-1]
@@ -393,7 +547,7 @@ class Drawn(unittest.TestCase):
                          [paint(grid.colour(row), None) for row in whole])
         # A pattern with no rows has the labels and no squares, and no bar is numbered.
         bare = Steps(TALL)
-        bare.show(kit(rows=0.0), "kit", DRUMS, 16, 4)
+        bare.show(kit(rows=0.0), LANES, 16, 4)
         self.draw(bare)
         room = (LEFT, TALL[1], AREA_W, TALL[3])
         self.assertEqual(self.inked(room, theme.PANEL), block(room))
@@ -420,7 +574,7 @@ class Drawn(unittest.TestCase):
                 self.assertEqual(self.inked(TALL, theme.ACTIVE), set())
                 self.assertEqual(self.square(grid.square(1, 9)), paint(theme.MUSTARD, None))
         # Nor past the end of a pattern, where one bar leaves room in the view for a second.
-        steps.show(kit(rows=16.0), "kit", DRUMS, 16, 4)
+        steps.show(kit(rows=16.0), LANES, 16, 4)
         steps.playhead = 16.0
         self.draw(steps)
         self.assertEqual(self.inked(TALL, theme.ACTIVE), set())
@@ -460,11 +614,13 @@ class Drawn(unittest.TestCase):
                                  block((LEFT - LABEL_GAP, RECT[1], LABEL_GAP, RECT[3])))
                 self.assertEqual(self.inked((LEFT, RECT[1], AREA_W, BARS_H), theme.FAULT), set())
 
-    def test_the_drum_channel_of_the_first_pattern_of_the_arcade_example(self) -> None:
+    def test_the_drums_of_the_first_pattern_of_the_arcade_example(self) -> None:
         song = Project.load(EXAMPLES / "arcade.json").song("tune")
         found = songview.pattern(song, "a")
+        made = lanes([songview.pattern(song, name) for name in song["order"]], songview.drum_rows(song))
+        self.assertEqual(made, [Lane("kit", "k", "kick"), Lane("kit", "s", "snare"), Lane("kit", "h", "hat")])
         steps = Steps((0, 0, 660, 120))
-        steps.show(found, "kit", songview.drum_rows(song), songview.bar_rows(song), song.get("rows_per_beat", 4))
+        steps.show(found, made, songview.bar_rows(song), song.get("rows_per_beat", 4))
         self.surface = self.canvas.surface = pygame.Surface((660, 120))
         grid = self.draw(steps)
         self.assertEqual((grid.rows_in_view(), grid.drums_in_view()), (range(0, 64), range(0, 3)))

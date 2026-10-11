@@ -1,8 +1,7 @@
-"""The middle of the window for a song: its order, its channels, and one channel of a pattern as a roll or as steps."""
+"""The middle of the window for a song: its order, its channels, and a pattern as the roll of a channel or its drums."""
 from __future__ import annotations
 
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
@@ -10,11 +9,11 @@ from ..note import TICK_HZ
 from . import songview, theme
 from .font import Font
 from .layout import Rect
-from .lists import List, Place, Row, mix
+from .lists import List, Row
 from .panels import Panel, within
 from .roll import Roll
 from .songview import Block, Channel, Pattern
-from .steps import Steps
+from .steps import Lane, Steps, lanes
 from .theme import Colour
 from .ui import Choice, Label, Toggle, Ui, share
 
@@ -33,8 +32,6 @@ CHANNELS_W = 128
 INSET = 3
 #: From the top of the view's part to the roll or the steps: the room the toggles stand in.
 HEAD_H = 20
-#: How much of its own colour the square of a dim channel keeps. The rest is the colour of the panel.
-DIMMED = 0.4
 
 #: What the two toggles over the view are called, and what the two headings of the list of channels read.
 FOLLOW = "FOLLOW"
@@ -72,25 +69,18 @@ def first_channel(channels: Sequence[Channel]) -> str | None:
     return None if best is None else best.name
 
 
-@dataclass(frozen=True)
-class ChannelRow(Row):
-    """One channel in the list of the channels. `colour` is the channel's own, and `dim` is for one with no text."""
-
-    dim: bool = False
-
-
 def channel_rows(channels: Sequence[Channel]) -> list[Row]:
     """The channels of a song, as one pattern has them, as the rows of a list.
 
     The tuned ones stand under the heading TUNED and the drum channels under DRUMS, each heading there whether
     or not it has a channel. A channel is known by its name, and a heading by its text in a tuple, which no name
-    is. A channel has the colour of its place in the song and its instrument as its tag. One the pattern has no
-    text for is dim.
+    is. A channel has its square in the colour of its place in the song, and its instrument as its tag. One the
+    pattern has no text for is dim.
     """
     rows: list[Row] = []
     for drums, heading in ((False, TUNED), (True, DRUMS)):
         rows.append(Row((heading,), heading, head=True))
-        rows.extend(ChannelRow(held.name, held.name, colour=colour_of(place), tag=held.inst, dim=not held.written)
+        rows.extend(Row(held.name, held.name, tag=held.inst, square=colour_of(place), dim=not held.written)
                     for place, held in enumerate(channels) if held.drums == drums)
     return rows
 
@@ -148,42 +138,15 @@ class Order(Choice):
         return cells
 
 
-class Channels(List):
-    """A list of the channels of a song: a `ChannelRow` has its square, and its strip when picked, in its own colour.
-
-    A dim one is written dim, and its square is dimmer. A heading is drawn as any list draws it.
-    """
-
-    def _draw_row(self, canvas: Canvas, place: Place, rect: Rect, lit: bool) -> None:
-        """Draw one row: a channel as a list draws a row, but in the row's own colour and dim where the row is."""
-        row = place.row
-        if row.head:
-            super()._draw_row(canvas, place, rect, lit)
-            return
-        x, y, w, h = rect
-        picked = row.key == self.picked
-        ground = theme.LIT if picked else theme.RAISED if lit else theme.PANEL
-        canvas.box(rect, mix(ground, theme.ACTIVE, self.glow.get(row.key, 0)))
-        colour = mix(theme.PANEL, row.colour, DIMMED) if row.dim else row.colour
-        if picked:
-            canvas.box((x, y, theme.LIST_STRIP, h), colour)
-        left = x + theme.LIST_PAD
-        canvas.box((left, y + (h - theme.LIST_SQUARE) // 2, theme.LIST_SQUARE, theme.LIST_SQUARE), colour)
-        left += theme.LIST_SQUARE + theme.LIST_SPACE
-        right = x + w - theme.LIST_PAD - Font.width(row.tag)
-        canvas.text_in(row.tag, (right, y, Font.width(row.tag), h), theme.LINE if row.dim else theme.DIM)
-        canvas.text_in(row.text, (left, y, max(0, right - theme.LIST_SPACE - left), h),
-                       theme.DIM if row.dim else theme.TEXT)
-
-
 class SongPanel(Panel):
-    """The middle of the window: the picked song as its order, its channels, and one channel of one pattern.
+    """The middle of the window: the picked song as its order, its channels, and one pattern of it.
 
     `order.picked` is the picked place in the order, and `channel` the name of the picked channel. A tuned channel
-    is shown in `roll` and a drum channel in `steps`, one of the two at a time. While a sound, an instrument or
-    nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the refusal's
-    words. The song is read when another thing is picked and when the model has loaded its file again, and at no
-    other time.
+    is shown in `roll`. With a drum channel picked, `steps` shows the drums of the pattern from all its drum
+    channels together, the picked one's labels lit. One of the two is seen at a time. While a sound, an instrument
+    or nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault` has the
+    refusal's words. The song is read when another thing is picked and when the model has loaded its file again,
+    and at no other time.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
@@ -193,7 +156,7 @@ class SongPanel(Panel):
         # three things: `show` for the names, `pick` for the picked place, and `changed` for when it is another.
         self.order = self.add(Order(nowhere, changed=lambda place: self._view(),
                                     help="the patterns in the order they play: a click shows one"))
-        self.list = self.add(Channels(nowhere, changed=self._pick))
+        self.list = self.add(List(nowhere, changed=self._pick))
         self.follow = self.add(Toggle(nowhere, FOLLOW, on=True,
                                       help="the pattern that is shown goes along with the playing"))
         self.ghosts = self.add(Toggle(nowhere, GHOSTS, on=True,
@@ -209,7 +172,7 @@ class SongPanel(Panel):
         self._song: dict | None = None
         self._blocks: list[Block] = []
         self._patterns: dict[str, Pattern] = {}
-        self._drum_rows: list[songview.DrumRow] = []
+        self._lanes: list[Lane] = []
         self._bar_rows = 16
         # Whether the channel that is shown is a drum channel. None while no channel is shown.
         self._drums: bool | None = None
@@ -230,8 +193,11 @@ class SongPanel(Panel):
         self.roll.rect = self.steps.rect = parts["body"]
         self.fault.rect = rect
 
-    def update(self) -> None:
-        """Read the picked thing if it or the project is another than before, and show where the playing is."""
+    def update(self, passed: float = 0.0) -> None:
+        """Read the picked thing if it or the project is another than before, and show where the playing is.
+
+        `passed` is the seconds since the frame before, which the panel has no use for.
+        """
         model = self.session.model
         # The model has no public name for its project. A file that was loaded again is another project.
         picked, project = model.picked, model.project
@@ -267,7 +233,8 @@ class SongPanel(Panel):
         """
         blocks, _ = songview.blocks(song)
         self._patterns = {block.name: songview.pattern(song, block.name) for block in blocks}
-        self._drum_rows, self._bar_rows = songview.drum_rows(song), songview.bar_rows(song)
+        self._lanes = lanes(self._patterns.values(), songview.drum_rows(song))
+        self._bar_rows = songview.bar_rows(song)
         self._blocks = blocks
         place = 0 if fresh or self.order.picked >= len(blocks) else self.order.picked
         self.order.show([block.name for block in blocks], place)
@@ -286,7 +253,10 @@ class SongPanel(Panel):
         self._view()
 
     def _view(self) -> None:
-        """Show the picked channel of the pattern at the picked place: in the list, and as the roll or the steps."""
+        """Show the picked channel of the pattern at the picked place: in the list, and in the roll or the steps.
+
+        A tuned channel is the roll's one channel. A drum channel is lit among all the drums of the pattern.
+        """
         channels = self._channels()
         self.list.rows = channel_rows(channels)
         self.list.picked = self.channel
@@ -295,7 +265,8 @@ class SongPanel(Panel):
         if place is not None:
             pattern = self._patterns[self._blocks[self.order.picked].name]
             if self._drums:
-                self.steps.show(pattern, self.channel, self._drum_rows, self._bar_rows, self._bar_rows // 4)
+                self.steps.show(pattern, self._lanes, self._bar_rows, self._bar_rows // 4)
+                self.steps.picked = self.channel
             else:
                 self.roll.show(pattern, self.channel, self._bar_rows, colour_of(place))
         self._seen()

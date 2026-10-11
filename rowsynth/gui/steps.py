@@ -1,14 +1,15 @@
-"""The drum steps: one drum channel of a pattern as a lane of squares for each drum, and the sums that place them."""
+"""The drum steps: the drums of a pattern as lanes of squares, one for each letter of a drum channel, and the sums."""
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..checks import _whole_rows
 from ..errors import RowSynthError
 from . import theme
+from .font import Font
 from .layout import Rect
 from .theme import Colour
 from .ui import NOWHERE, Event, Pos, Ui, Widget
@@ -24,8 +25,9 @@ LANE_H = 30
 GAP = 2
 BEAT_GAP = 3
 BAR_GAP = 6
-#: What is left free between the lanes of two drums.
+#: What is left free between two lanes, and how much more between the lanes of one channel and those of the next.
 LANE_GAP = 8
+CHANNEL_GAP = 7
 #: The strip down the left that the labels stand in, and how much of it is left free before the first square.
 LABELS_W = 92
 LABEL_GAP = 4
@@ -80,12 +82,39 @@ def paint(colour: Colour, level: int | None, lit: bool = False) -> tuple[Colour,
 
 
 @dataclass(frozen=True)
+class Lane:
+    """One lane of the steps: a drum channel, one drum letter it plays, and the instrument that letter plays."""
+
+    channel: str
+    letter: str
+    inst: str
+
+
+def lanes(patterns: Iterable[Pattern], drums: Sequence[DrumRow]) -> list[Lane]:
+    """The lanes of a song: for each of its drum channels, in the song's order, a lane for each letter it plays.
+
+    `patterns` are the patterns the song plays, and `drums` its drum letters. The letters of a channel are those
+    it plays in any of the patterns, in the order `drums` has them. A drum channel that plays none anywhere has a
+    lane for every letter, so that it is seen and can be filled.
+    """
+    played: dict[str, set[str]] = {}
+    for pattern in patterns:
+        for channel in pattern.channels:
+            if channel.drums:
+                played.setdefault(channel.name, set()).update(note.drum for note in channel.notes if note.drum)
+    return [Lane(channel, drum.letter, drum.inst) for channel, letters in played.items()
+            for drum in drums if drum.letter in letters or not letters]
+
+
+@dataclass(frozen=True)
 class Grid:
     """Where the steps of a pattern are in a rectangle: the sums, with nothing drawn.
 
-    rect is the widget's rectangle. rows is the whole rows of the pattern and drums how many drums it has a lane
-    for. bar_rows and beat_rows are the rows in a bar and in a beat. The view is first_row and first_drum: the row
-    whose squares are the first from the left, and the drum whose lane is at the top.
+    rect is the widget's rectangle. rows is the whole rows of the pattern and drums how many lanes it has, each
+    the lane of one drum, counted from 0 at the top. bar_rows and beat_rows are the rows in a bar and in a beat.
+    The view is first_row and first_drum: the row whose squares are the first from the left, and the drum whose
+    lane is at the top. breaks are the drums whose lane is the first of another channel than the lane above it:
+    each has `CHANNEL_GAP` more air above it.
     """
 
     rect: Rect
@@ -95,6 +124,7 @@ class Grid:
     beat_rows: int
     first_row: int = 0
     first_drum: int = 0
+    breaks: tuple[int, ...] = ()
 
     def __post_init__(self) -> None:
         if self.bar_rows < 1 or self.beat_rows < 1:
@@ -140,18 +170,20 @@ class Grid:
             return None
         return row
 
+    def _down(self, drum: int) -> int:
+        """From the top of the first lane to the top of a drum's lane: the lanes above it and the air between."""
+        return drum * (LANE_H + LANE_GAP) + CHANNEL_GAP * sum(first <= drum for first in self.breaks)
+
     def y(self, drum: int) -> int:
-        """The y of the top of a drum's lane. The drum is counted from 0 in the order of the song."""
-        return self.area[1] + (drum - self.first_drum) * (LANE_H + LANE_GAP)
+        """The y of the top of a drum's lane. The air above the lane at the top of the view is not in view."""
+        return self.area[1] + self._down(drum) - self._down(self.first_drum)
 
     def drum_at(self, y: int) -> int | None:
         """The drum whose lane a y is on. None between two lanes, off the squares' room, and under the last lane."""
         _, top, _, height = self.area
         if not top <= y < top + height:
             return None
-        lanes, down = divmod(y - top, LANE_H + LANE_GAP)
-        drum = self.first_drum + lanes
-        return None if down >= LANE_H or drum >= self.drums else drum
+        return next((drum for drum in self.drums_in_view() if self.y(drum) <= y < self.y(drum) + LANE_H), None)
 
     def square(self, drum: int, row: int) -> Rect:
         """The square of one step: one row of one drum."""
@@ -185,52 +217,65 @@ class Grid:
         _, _, width, height = self.area
         over = self._along(self.rows - 1) + SQUARE_W - width
         last_row = next((row for row in range(self.rows) if self._along(row) >= over), max(0, self.rows - 1))
-        whole_lanes = max(1, (height + LANE_GAP) // (LANE_H + LANE_GAP))
+        under = self._down(self.drums - 1) + LANE_H - height
+        last_drum = next((drum for drum in range(self.drums) if self._down(drum) >= under), max(0, self.drums - 1))
         return replace(self, first_row=min(max(0, self.first_row + rows), last_row),
-                       first_drum=min(max(0, self.first_drum + drums), max(0, self.drums - whole_lanes)))
+                       first_drum=min(max(0, self.first_drum + drums), last_drum))
 
 
 class Steps(Widget):
-    """One drum channel of one pattern: a lane of squares for each drum of the song, a square a row.
+    """The drums of one pattern, from all its drum channels together: a lane of squares for each `Lane`, a square a row.
 
-    `playhead` is the row that is playing, which may be between two rows, or None: its owner sets it each frame.
-    The wheel scrolls the drums, and with shift the rows. `help` is the widget's own line, and while the mouse is
-    on a square it says what is there.
+    The lanes of one channel stand together, with more air and a faint line before those of the next. `picked` is
+    the name of a channel, or None: the labels of its lanes are lit. `playhead` is the row that is playing, which
+    may be between two rows, or None. Their owner sets both. The wheel scrolls the lanes, and with shift the rows.
+    `help` is the widget's own line, and while the mouse is on a square it says what is there.
     """
 
     def __init__(self, rect: Rect, help: str = "") -> None:
         super().__init__(rect, help)
         self.playhead: float | None = None
+        self.picked: str | None = None
         self._grid = Grid(rect, 0, 0, 1, 1)
-        self._drums: tuple[DrumRow, ...] = ()
-        #: The level of each hit that starts on a whole row, by its letter and its row.
-        self._hits: dict[tuple[str, int], int] = {}
-        #: The letter, the row and the level of each hit that starts between two rows.
-        self._marks: list[tuple[str, float, int]] = []
+        self._lanes: tuple[Lane, ...] = ()
+        #: Whether the lanes are of more than one channel: a lane is then told by its channel as well.
+        self._several = False
+        #: The level of each hit that starts on a whole row, by the place of its lane and its row.
+        self._hits: dict[tuple[int, int], int] = {}
+        #: The place of the lane, the row and the level of each hit that starts between two rows.
+        self._marks: list[tuple[int, float, int]] = []
         self._mouse: Pos = NOWHERE
 
-    def show(self, pattern: Pattern, channel: str, drums: Sequence[DrumRow], bar_rows: int, beat_rows: int) -> None:
-        """Show one drum channel of a pattern. `drums` are the drum letters of the song, a lane each.
+    def show(self, pattern: Pattern, lanes: Sequence[Lane], bar_rows: int, beat_rows: int) -> None:
+        """Show the drums of a pattern. Each lane is one letter of one of its drum channels, as `lanes` makes them.
 
-        The view stays where it is, as far as the pattern reaches. A channel the pattern does not have is refused,
-        and so is one that is not a drum channel.
+        The view stays where it is, as far as the pattern reaches. A lane of a channel the pattern does not have
+        is refused, and so is one of a channel that is not a drum channel.
         """
-        found = next((held for held in pattern.channels if held.name == channel), None)
-        if found is None:
-            raise RowSynthError(f"pattern {pattern.name!r} has no channel called {channel!r}")
-        if not found.drums:
-            raise RowSynthError(f"channel {channel!r} is not a drum channel")
-        self._grid = Grid(self.rect, math.ceil(_whole_rows(pattern.rows)), len(drums), bar_rows, beat_rows,
-                          self._grid.first_row, self._grid.first_drum)
-        self._drums = tuple(drums)
+        lanes = tuple(lanes)
+        held = {channel.name: channel for channel in pattern.channels}
+        for lane in lanes:
+            if lane.channel not in held:
+                raise RowSynthError(f"pattern {pattern.name!r} has no channel called {lane.channel!r}")
+            if not held[lane.channel].drums:
+                raise RowSynthError(f"channel {lane.channel!r} is not a drum channel")
+        breaks = tuple(place for place in range(1, len(lanes)) if lanes[place].channel != lanes[place - 1].channel)
+        self._grid = Grid(self.rect, math.ceil(_whole_rows(pattern.rows)), len(lanes), bar_rows, beat_rows,
+                          self._grid.first_row, self._grid.first_drum, breaks)
+        self._lanes = lanes
+        places = {(lane.channel, lane.letter): place for place, lane in enumerate(lanes)}
+        channels = dict.fromkeys(lane.channel for lane in lanes)
+        self._several = len(channels) > 1
         self._hits, self._marks = {}, []
-        for note in found.notes:
-            # A row that is a hair off a whole one, as adding up triplets leaves it, is that whole row.
-            row = _whole_rows(note.row)
-            if note.drum and float(row).is_integer():
-                self._hits[note.drum, int(row)] = note.level
-            elif note.drum:
-                self._marks.append((note.drum, note.row, note.level))
+        for channel in channels:
+            for note in held[channel].notes:
+                place = places.get((channel, note.drum))
+                # A row that is a hair off a whole one, as adding up triplets leaves it, is that whole row.
+                row = _whole_rows(note.row)
+                if place is not None and float(row).is_integer():
+                    self._hits[place, int(row)] = note.level
+                elif place is not None:
+                    self._marks.append((place, note.row, note.level))
 
     @property
     def grid(self) -> Grid:
@@ -239,33 +284,45 @@ class Steps(Widget):
 
     @property
     def help(self) -> str:
-        """What is at the square the mouse is on, in plain words. Off the squares, the widget's own line."""
-        found = self.step_at(self._mouse)
+        """What is at the square the mouse is on, in plain words. Off the squares, the widget's own line.
+
+        The drum is told by its letter, and where the lanes are of more than one channel by its channel as well.
+        """
+        found = self._at(self._mouse)
         if found is None:
             return self._help
-        letter, row = found
+        lane, row = self._lanes[found[0]], found[1]
         bar, step = divmod(row, self._grid.bar_rows)
-        between = [level for drum, at, level in self._marks if (drum, math.floor(at)) == found]
+        between = [level for place, at, level in self._marks if (place, math.floor(at)) == found]
         if found in self._hits:
             what = f"hit, level {self._hits[found]}"
         elif between:
             what = f"hit off the grid, level {between[0]}"
         else:
             what = "empty"
-        return f"{letter}, bar {bar + 1}, step {step + 1}: {what}"
+        drum = f"{lane.letter} in {lane.channel}" if self._several else lane.letter
+        return f"{drum}, bar {bar + 1}, step {step + 1}: {what}"
 
     @help.setter
     def help(self, text: str) -> None:
         self._help = text
 
-    def step_at(self, pos: Pos) -> tuple[str, int] | None:
-        """The drum letter and the row of the square a position is on, or None when it is on no square."""
+    def _at(self, pos: Pos) -> tuple[int, int] | None:
+        """The place of the lane and the row of the square a position is on, or None when it is on no square."""
         grid = self.grid
         row, drum = grid.row_at(pos[0]), grid.drum_at(pos[1])
-        return None if row is None or drum is None else (self._drums[drum].letter, row)
+        return None if row is None or drum is None else (drum, row)
+
+    def step_at(self, pos: Pos) -> tuple[str, str, int] | None:
+        """The channel, the drum letter and the row of the square a position is on, or None when it is on none."""
+        found = self._at(pos)
+        if found is None:
+            return None
+        lane = self._lanes[found[0]]
+        return lane.channel, lane.letter, found[1]
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Follow the mouse, and scroll at the wheel: the drums by one, and with shift the rows by a beat.
+        """Follow the mouse, and scroll at the wheel: the lanes by one, and with shift the rows by a beat.
 
         A step of the wheel is used when it moved the view.
         """
@@ -282,46 +339,54 @@ class Steps(Widget):
         return self._grid != grid
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the labels, the bar numbers, the squares, the hits between rows and the playhead.
+        """Draw the labels, the lines between channels, the bar numbers, the squares, the hits between rows and
+        the playhead.
 
         Nothing is drawn outside the rectangle, and no square where the labels are.
         """
         grid = self.grid
         rows, drums = grid.rows_in_view(), grid.drums_in_view()
-        x, y, _, h = self.rect
+        x, y, w, h = self.rect
         left, _, width, _ = grid.area
         playing = self.playhead if self.playhead is not None and 0 <= self.playhead < grid.rows else None
         with canvas.clip(self.rect):
             for drum in drums:
-                self._label(canvas, (x, grid.y(drum), LABELS_W - LABEL_GAP, LANE_H), self._drums[drum])
+                # The line is in the middle of the air above the first lane of a channel, where that air is in view.
+                if drum in grid.breaks and drum > drums.start:
+                    canvas.hline(x, grid.y(drum) - (LANE_GAP + CHANNEL_GAP + 1) // 2, w, theme.LIT)
+                self._label(canvas, (x, grid.y(drum), LABELS_W - LABEL_GAP, LANE_H), self._lanes[drum])
             with canvas.clip((left, y, width, h)):
                 for bar in range(rows.start // grid.bar_rows, -(-rows.stop // grid.bar_rows)):
                     start = bar * grid.bar_rows
                     bar_w = grid.x(start + grid.bar_rows) - BAR_GAP - grid.x(start)
                     canvas.text_in(f"BAR {bar + 1}", (grid.x(start), y, bar_w, BARS_H), theme.DIM)
                 for drum in drums:
-                    letter = self._drums[drum].letter
                     for row in rows:
                         lit = playing is not None and math.floor(playing) == row
-                        fill, line = paint(grid.colour(row), self._hits.get((letter, row)), lit)
+                        fill, line = paint(grid.colour(row), self._hits.get((drum, row)), lit)
                         square = grid.square(drum, row)
                         canvas.box(square, fill)
                         canvas.frame(square, line)
-                lanes = {found.letter: drum for drum, found in enumerate(self._drums)}
-                for letter, at, level in self._marks:
-                    if lanes.get(letter) in drums and math.floor(at) in rows:
-                        canvas.box((grid.x(at), grid.y(lanes[letter]), MARK_W, LANE_H),
+                for drum, at, level in self._marks:
+                    if drum in drums and math.floor(at) in rows:
+                        canvas.box((grid.x(at), grid.y(drum), MARK_W, LANE_H),
                                    hit_colour(grid.colour(math.floor(at)), level))
                 if playing is not None and drums:
                     canvas.vline(grid.x(playing), y, grid.y(drums[-1]) + LANE_H - y, theme.ACTIVE)
 
-    @staticmethod
-    def _label(canvas: Canvas, box: Rect, drum: DrumRow) -> None:
-        """Draw the label of a drum in its box: its letter, and under it the name of the instrument it plays."""
+    def _label(self, canvas: Canvas, box: Rect, lane: Lane) -> None:
+        """Draw the label of a lane in its box: its letter, and under it the name of the instrument it plays.
+
+        Where the lanes are of more than one channel, the name of its channel stands at the right of the letter.
+        The box of a lane of the picked channel is lit.
+        """
         x, y, w, h = box
-        canvas.box(box, theme.RAISED)
+        canvas.box(box, theme.LIT if lane.channel == self.picked else theme.RAISED)
         canvas.frame(box, theme.LINE)
         line_h = (h - 2 * LABEL_EDGE) // 2
-        canvas.text_in(drum.letter, (x + LABEL_PAD, y + LABEL_EDGE, w - 2 * LABEL_PAD, line_h), theme.TEXT)
-        canvas.text_in(drum.inst, (x + LABEL_PAD, y + LABEL_EDGE + line_h, w - 2 * LABEL_PAD, line_h),
-                       theme.INSTRUMENT)
+        left, top, wide = x + LABEL_PAD, y + LABEL_EDGE, w - 2 * LABEL_PAD
+        canvas.text_in(lane.letter, (left, top, wide, line_h), theme.TEXT)
+        if self._several:
+            taken = Font.width(lane.letter) + LABEL_PAD
+            canvas.text_in(lane.channel, (left + taken, top, max(0, wide - taken), line_h), theme.DIM, "right")
+        canvas.text_in(lane.inst, (left, top + line_h, wide, line_h), theme.INSTRUMENT)
