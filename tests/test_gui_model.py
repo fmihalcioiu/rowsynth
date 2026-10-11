@@ -97,10 +97,32 @@ TRIO = {"row_ticks": 3,
 LISTEN = {"instruments": PROJECT["instruments"], "sounds": {"ping": PROJECT["sounds"]["ping"]},
           "songs": {"trio": TRIO, "tune": song("l4 c e g > c")}}
 
+# A song of one bar with five channels that all play, each at a pan and a level of its own: enough of them for
+# one or two to be the few that are not heard.
+FIVE = {"row_ticks": 3,
+        "channels": {"lead": {"inst": "beep", "pan": -0.3}, "second": {"inst": "beep", "pan": 0.4, "gain": 0.8},
+                     "bass": {"inst": "hum"}, "high": {"inst": "hum", "pan": -1, "gain": 0.6},
+                     "under": {"inst": "hum", "pan": 1, "gain": 0.7}},
+        "patterns": {"a": {"lead": "l4 c e g > c", "second": "l4 e g > c e", "bass": "o3 c2 g2",
+                           "high": "o5 l8 c e g e c e g e", "under": "o2 c1"}},
+        "order": ["a"]}
+QUINTET = {"instruments": PROJECT["instruments"], "songs": {"five": FIVE}}
+
 
 def stems_of(data: dict, name: str = "trio", rate: int = RATE) -> dict[str, dict]:
     """The stems the engine makes of a song of a project, each under the name of its channel."""
     return {stem["name"]: stem for stem in render_stems(Project.from_dict(data).song(name), rate)["stems"]}
+
+
+def near(stems: dict[str, dict]) -> float:
+    """How far a mix that had stems taken out of the mix of all may be from the same stems added up.
+
+    Every sum on either way is rounded to float32, once for each stem of the song at most, and once more as
+    the stems are taken out. So it is a step of float32 at the loudest the stems can add up to, for each stem
+    and one more.
+    """
+    loudest = sum(float(np.abs(stem["samples"]).max()) for stem in stems.values())
+    return (len(stems) + 1) * float(np.spacing(np.float32(loudest)))
 
 
 def found_in(data: dict) -> list[checks.Finding]:
@@ -142,13 +164,16 @@ class ModelCase(unittest.TestCase):
         self.write(data)
         return Model(self.path, RATE)
 
-    def assert_render(self, made: dict, sides: list[np.ndarray], loop: bool) -> None:
-        """Holds a render to its sides, sample for sample, and to what goes with them."""
+    def assert_render(self, made: dict, sides: list[np.ndarray], loop: bool, within: float = 0.0) -> None:
+        """Holds a render to its sides, sample for sample or no further off than `within`, and to what goes with it."""
         self.assertEqual([made["rate"], made["loop"], made["seconds"]], [RATE, loop, len(sides[0]) / RATE])
         self.assertEqual([side.dtype for side in made["sides"]], [np.float32] * len(sides))
         self.assertEqual(len(made["sides"]), len(sides))
         for side, wanted in zip(made["sides"], sides):
-            np.testing.assert_array_equal(side, wanted)
+            if within:
+                np.testing.assert_allclose(side, wanted, rtol=0, atol=within)
+            else:
+                np.testing.assert_array_equal(side, wanted)
 
     def assert_loop(self, made: dict, data: dict, name: str) -> None:
         """Holds a render to the loop the engine makes of a song of `data`."""
@@ -156,9 +181,12 @@ class ModelCase(unittest.TestCase):
         self.assertEqual(made["seconds"], loop["seconds"])
         self.assert_render(made, [loop["left"], loop["right"]], True)
 
-    def assert_mix(self, made: dict, stems: list[dict]) -> None:
-        """Holds a render of a song to the mix of some stems alone, sample for sample."""
-        self.assert_render(made, list(mix_stems(stems, len(stems[0]["samples"]))), True)
+    def assert_mix(self, made: dict, stems: list[dict], within: float = 0.0) -> None:
+        """Holds a render of a song to the mix of some stems alone, sample for sample or no further off than `within`.
+
+        A mix that had stems taken out of the mix of all is held to `near` of the song's stems.
+        """
+        self.assert_render(made, list(mix_stems(stems, len(stems[0]["samples"]))), True, within)
 
 
 class OpeningTest(ModelCase):
@@ -315,12 +343,13 @@ class HearTest(ModelCase):
         self.assertEqual(model.heard, {"mid"})
         self.assert_mix(model.render(), [stems["mid"]])
         # Two are their sum in the order the song has them, worked out in doubles and rounded to float32 after each.
+        # They are two of three stems, so it is the third that was taken out, and the sum is met within rounding.
         model.hear(["star", "port"])
         wanted = [np.zeros(6400, dtype=np.float32), np.zeros(6400, dtype=np.float32)]
         for name in ("port", "star"):
             for side, gain in enumerate(pan_gains(stems[name]["pan"])):
                 wanted[side] = (wanted[side] + stems[name]["samples"].astype(np.float64) * gain).astype(np.float32)
-        self.assert_render(model.render(), wanted, True)
+        self.assert_render(model.render(), wanted, True, near(stems))
         # Every channel by its name is the whole song sample for sample, and all of them is the render it was.
         model.hear(TRIO["channels"])
         self.assert_render(model.render(), whole["sides"], True)
@@ -428,7 +457,7 @@ class HearTest(ModelCase):
         self.assertEqual(model.poll(), {("song", "trio")})
         self.assertEqual([model.heard, model.render_ready()], [{"mid", "port"}, False])
         stems = stems_of(after)
-        self.assert_mix(model.render(), [stems["mid"], stems["port"]])
+        self.assert_mix(model.render(), [stems["mid"], stems["port"]], near(stems))
         del after["songs"]["trio"]["channels"]["spare"]
         self.write(after)
         model.poll()
@@ -453,6 +482,64 @@ class HearTest(ModelCase):
         self.assertEqual(engine.call_count, 1)
         self.assertTrue(model.render_ready())
         self.assertEqual(model.levels(0.0), {})
+
+    def test_with_most_channels_heard_the_few_others_are_taken_out_of_the_mix_of_all_to_within_rounding(self):
+        model = self.opened(QUINTET)
+        whole, stems = model.render(), stems_of(QUINTET, "five")
+        own = [side.copy() for side in whole["sides"]]
+        # How far apart the two ways may be: for this song, well under a millionth of full scale.
+        bound = near(stems)
+        self.assertLess(bound, 1e-6)
+        with mock.patch.object(gui_model, "mix_stems", wraps=mix_stems) as mixer:
+            # One muted, two muted, and all but one: each time the mixer goes through the fewer stems.
+            for gone, through in ((["bass"], ["bass"]), (["lead", "under"], ["lead", "under"]),
+                                  (["lead", "second", "bass", "under"], ["high"])):
+                with self.subTest(gone=gone):
+                    heard = [name for name in stems if name not in gone]
+                    model.hear(heard)
+                    made = model.render()
+                    self.assertEqual([stem["name"] for stem in mixer.call_args[0][0]], through)
+                    # Stems that were added up are met sample for sample, and stems taken out within the bound.
+                    self.assert_mix(made, [stems[name] for name in heard], bound if through == gone else 0.0)
+            self.assertEqual(mixer.call_count, 3)
+        # Nothing was taken out of the song's own sides where they are kept.
+        self.assert_render(whole, own, True)
+
+    def test_with_every_channel_heard_again_the_render_is_the_kept_one_of_the_whole_song(self):
+        model = self.opened(QUINTET)
+        whole = model.render()
+        model.hear([name for name in FIVE["channels"] if name != "bass"])
+        self.assertIsNot(model.render(), whole)
+        model.hear(None)
+        self.assertTrue(model.render_ready())
+        self.assertIs(model.render(), whole)
+        self.assert_loop(whole, QUINTET, "five")
+        # Every channel by its name leaves nothing to take out: the sides are the kept ones themselves.
+        model.hear(FIVE["channels"])
+        for side, kept in zip(model.render()["sides"], whole["sides"], strict=True):
+            self.assertIs(side, kept)
+
+    def test_the_numbers_are_ready_while_a_mix_is_on_its_way_and_the_render_is_not(self):
+        model = self.opened(LISTEN)
+        self.assertFalse(model.numbers_ready())
+        numbers = model.numbers()
+        go = threading.Event()
+        # A test that fails before it lets the mix go leaves no thread waiting.
+        self.addCleanup(go.set)
+
+        def held(*args: object) -> tuple:
+            go.wait(60)
+            return mix_stems(*args)
+
+        with mock.patch.object(gui_model, "mix_stems", side_effect=held):
+            model.hear({"mid"})
+            model.start_render()
+            (mixing,) = model._mixed._workers.values()
+            self.assertEqual([model.render_ready(), model.numbers_ready()], [False, True])
+            self.assertIs(model.numbers(), numbers)
+            go.set()
+            mixing.join()
+        self.assertEqual([model.render_ready(), model.numbers_ready()], [True, True])
 
 
 class LevelsTest(ModelCase):
@@ -1012,7 +1099,7 @@ class WorkerTest(ModelCase):
             self.assertFalse(model.render_ready())
             model.start_render()
             self.assertEqual(model._rendered._workers, {})
-            self.assert_mix(model.render(), [stems["port"], stems["star"]])
+            self.assert_mix(model.render(), [stems["port"], stems["star"]], near(stems))
         self.assertEqual([threads, self.engine.call_count], [["rowsynth-mix"], 1])
 
     def test_a_hear_made_while_a_mix_is_on_its_way_is_not_given_that_mix_and_renders_nothing_again(self):

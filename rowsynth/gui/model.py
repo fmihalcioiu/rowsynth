@@ -141,18 +141,6 @@ def _number(value: object) -> bool:
     return isinstance(value, Real) and not isinstance(value, bool) and math.isfinite(value)
 
 
-def render_loop(song: dict, rate: int) -> dict:
-    """A song as its loop, with the stems the loop is the mix of: what `song.render_loop` gives, and "stems".
-
-    The song is played once, into its stems, and the two sides are all of those mixed. So the sides are sample
-    for sample those of `song.render_loop`, and any of the stems mixed again are the song with only those
-    channels in it.
-    """
-    played = render_stems(song, rate)
-    left, right = mix_stems(played["stems"], played["loop_samples"])
-    return {**played, "left": left, "right": right}
-
-
 def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
     """One thing of a project as sound, and the numbers of that sound: {"render", "numbers", "stems"}.
 
@@ -163,8 +151,12 @@ def _make(project: Project, picked: tuple[str, str] | None, rate: int) -> dict:
     kind, name = picked
     buffers = stems = None
     if kind == "song":
-        played = render_loop(project.song(name), rate)
-        sides, stems = [played["left"], played["right"]], played["stems"]
+        # The song is played once, into its stems, and the two sides are all of those mixed. So the sides are
+        # sample for sample those of `song.render_loop`, and any of the stems mixed again are the song with
+        # only those channels in it.
+        played = render_stems(project.song(name), rate)
+        stems = played["stems"]
+        sides = list(mix_stems(stems, played["loop_samples"]))
     elif kind == "sound":
         buffers = render_entry(project.sound(name), rate)
         sides = buffers[:1]
@@ -292,14 +284,30 @@ def _mix(rendered: _Kept, key: tuple, parts: tuple, heard: frozenset[str]) -> di
     """The render of a song with only the channels in `heard` to be heard: its sides are their stems mixed.
 
     The song's own render is that of `key` in `rendered`, made from `parts`. It is waited for where it is on
-    its way, and where it is kept nothing of it is made again: the stems are mixed as they are, in their
-    order, each at the level and the pan it has in the song. Everything of the render but its sides stays that
-    of the whole song. What the song's render went wrong with is what this goes wrong with.
+    its way, and where it is kept nothing of it is made again. Everything of the render but its sides stays
+    that of the whole song. What the song's render went wrong with is what this goes wrong with.
+
+    The sides are made the way that goes through fewer stems. With no more stems heard than not, the heard
+    ones are mixed as they are, in their order, each at the level and the pan it has in the song. With more
+    heard than not, the stems that are not heard are mixed and taken out of the song's own sides, which are
+    left as they are: one channel muted of many costs that one stem, and not all the others. With every
+    stem heard the sides are the song's own, the same arrays.
+
+    Sides that had stems taken out are the heard stems added up to within rounding, as every sum on either
+    way is rounded to float32. The two are no further apart than a step of float32 at the loudest the stems
+    can add up to, for each stem of the song and one more. On the trailer piece with its 17 stems that is
+    4.3e-6 of full scale, and the furthest apart that one muted channel put them there is 1.8e-7.
     """
     whole = rendered.get(key, parts)
     render = whole["render"]
-    left, right = mix_stems([stem for stem in whole["stems"] if stem["name"] in heard], len(render["sides"][0]))
-    return {**render, "sides": [left, right]}
+    sides, size = render["sides"], len(render["sides"][0])
+    kept = [stem for stem in whole["stems"] if stem["name"] in heard]
+    gone = [stem for stem in whole["stems"] if stem["name"] not in heard]
+    if len(gone) >= len(kept):
+        sides = list(mix_stems(kept, size))
+    elif gone:
+        sides = [side - away for side, away in zip(sides, mix_stems(gone, size))]
+    return {**render, "sides": sides}
 
 
 class Model:
@@ -391,7 +399,9 @@ class Model:
         the render are then those channels alone, each as loud and as far to a side as it is in the song.
         Nothing is rendered again for it, and nothing in the file changes: the stems the song was rendered
         into are kept, and those that are heard are mixed, on a thread of its own when `start_render` begins
-        it. With all channels heard the render is the one of the whole song, which is there at once.
+        it. With most channels heard, the few that are not are taken out of the mix of all instead, which is
+        the same sound to within rounding and far less work. With all channels heard the render is the one of
+        the whole song, which is there at once.
 
         A name that is no channel of the picked song is refused, and so is anything but None when no song is
         picked, and then what is heard stays as it was.
@@ -422,8 +432,8 @@ class Model:
         the one side. For a song and for an instrument it is one row, the mean of the sides.
 
         The sides of a song are its stems mixed, sample for sample what `song.render_loop` gives. While `hear`
-        has only some of its channels heard, they are the mix of the stems of those alone, and everything else
-        of the render stays that of the whole song.
+        has only some of its channels heard, they are the mix of the stems of those alone, to within rounding
+        where most are heard, and everything else of the render stays that of the whole song.
 
         The render is kept for as long as its thing stays picked and the project stays as it is, so asking twice
         costs one render. One that is on its way is waited for. With nothing picked there is nothing to render,
@@ -511,8 +521,15 @@ class Model:
             self._mixed.start()
 
     def render_ready(self) -> bool:
-        """Whether `render` and `numbers` would now answer at once, with the render or with what went wrong."""
+        """Whether `render` would now answer at once, with the render or with what went wrong."""
         return self._rendered.ready() and (self._heard is None or self._mixed.ready())
+
+    def numbers_ready(self) -> bool:
+        """Whether `numbers` would now answer at once, with the numbers or with what went wrong.
+
+        The numbers are of the whole song, so they are there while a mix of some of its channels is still made.
+        """
+        return self._rendered.ready()
 
     def findings(self) -> list[checks.Finding]:
         """What the checks find in the project, rendered at the model's rate, in the order the checks give it.

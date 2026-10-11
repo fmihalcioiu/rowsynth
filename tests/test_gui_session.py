@@ -20,6 +20,7 @@ from rowsynth.gui import model as gui_model
 from rowsynth.gui.model import KINDS, Model
 from rowsynth.gui.session import GLOW_TIME, HOLD, POLL_EVERY, Session, joined, piano
 from rowsynth.project import Project
+from rowsynth.song import mix_stems, render_stems
 
 RATE = 8000
 
@@ -66,6 +67,18 @@ HEARD = {
                        "drums": {"k": {"inst": "beep", "note": "c2"}}}},
 }
 
+# A song of one bar with four channels that all play, to mute and to solo. In MIXED it is the first song of
+# PROJECT, which is the one that is picked as the file is opened.
+BAND = {"row_ticks": 3,
+        "channels": {"lead": {"inst": "beep", "pan": -0.5}, "bass": {"inst": "beep", "pan": 0.5},
+                     "pad": {"inst": "beep"}, "top": {"inst": "beep", "gain": 0.5}},
+        "patterns": {"a": {"lead": "l4 c e g > c", "bass": "o3 c2 g2", "pad": "o4 e1",
+                           "top": "o5 l8 c e g e c e g e"}},
+        "order": ["a"]}
+MIXED = {**PROJECT, "songs": {"band": BAND, **PROJECT["songs"]}}
+# The samples its loop has at RATE.
+BAND_SAMPLES = 6400
+
 # The place of the text the song "tune" plays, and what a change to it is called.
 TUNE = "songs.tune.patterns.a.tune"
 TUNE_LABEL = "tune of pattern a"
@@ -88,6 +101,12 @@ def settle() -> None:
     for thread in threading.enumerate():
         if thread.name.startswith("rowsynth-"):
             thread.join()
+
+
+def band_mix(data: dict, *names: str) -> tuple[np.ndarray, np.ndarray]:
+    """The two sides the engine mixes of the stems of the band in `data`, those of the channels named alone."""
+    stems = render_stems(Project.from_dict(data).song("band"), RATE)["stems"]
+    return mix_stems([stem for stem in stems if stem["name"] in names], BAND_SAMPLES)
 
 
 class Clock:
@@ -190,7 +209,7 @@ class SessionCase(unittest.TestCase):
                 return real(*args)
             return wait
 
-        for owner, name in ((gui_model, "render_loop"), (gui_model, "render_entry"), (checks, "run")):
+        for owner, name in ((gui_model, "render_stems"), (gui_model, "render_entry"), (checks, "run")):
             patch = mock.patch.object(owner, name, side_effect=waiting(getattr(owner, name)))
             patch.start()
             self.addCleanup(patch.stop)
@@ -580,7 +599,7 @@ class OutsideTest(SessionCase):
 
     def test_a_file_written_again_with_nothing_in_it_changed_starts_no_render_and_no_checks(self):
         session = self.opened()
-        with mock.patch.object(gui_model, "render_loop", wraps=gui_model.render_loop) as engine, \
+        with mock.patch.object(gui_model, "render_stems", wraps=gui_model.render_stems) as engine, \
                 mock.patch.object(checks, "run", wraps=checks.run) as run:
             session.tick()
             made = session.model.render()
@@ -632,7 +651,7 @@ class OutsideTest(SessionCase):
         session = self.opened()
         tune = session.model.render()
         session.play()
-        with mock.patch.object(gui_model, "render_loop", wraps=gui_model.render_loop) as engine:
+        with mock.patch.object(gui_model, "render_stems", wraps=gui_model.render_stems) as engine:
             self.write(changed(songs={"tune": STILL}))
             self.looked(session)
             # The song is refused by the engine, and the project with it by the checks.
@@ -660,7 +679,7 @@ class OutsideTest(SessionCase):
 
     def test_a_render_that_breaks_is_tried_once_said_with_the_name_of_its_error_and_tried_again_after_a_change(self):
         session = self.opened()
-        with mock.patch.object(gui_model, "render_loop", side_effect=ZeroDivisionError("broken")) as engine, \
+        with mock.patch.object(gui_model, "render_stems", side_effect=ZeroDivisionError("broken")) as engine, \
                 mock.patch.object(threading, "excepthook") as told:
             session.tick()
             settle()
@@ -857,6 +876,206 @@ class ChangeTest(SessionCase):
         self.assertTrue(session.undo())
         self.assertTrue(session.redo())
         self.assertEqual(self.data()["instruments"]["beep"]["vol"], [15, 10, 5])
+
+
+class MuteTest(SessionCase):
+    def playing(self) -> tuple[Session, dict]:
+        """A session on MIXED whose band plays as a loop, and the render of the whole band."""
+        session = self.opened(MIXED)
+        whole = session.model.render()
+        session.play()
+        return session, whole
+
+    def mixed(self, session: Session) -> dict:
+        """The render the model has once a mix that is on its way is through, taken up by a tick."""
+        settle()
+        session.tick()
+        return session.model.render()
+
+    def assert_listening(self, session: Session, muted: set[str], soloed: set[str], heard: set[str] | None) -> None:
+        """Holds a session to what is muted and what is soloed, and its model to the channels that are heard."""
+        self.assertEqual([session.muted, session.soloed, session.model.heard], [muted, soloed, heard])
+
+    def test_a_mute_has_all_the_other_channels_heard_and_a_loop_that_plays_goes_on_with_the_mix(self):
+        session, whole = self.playing()
+        self.assert_listening(session, set(), set(), None)
+        self.assertTrue(session.mute("bass"))
+        self.assert_listening(session, {"bass"}, set(), {"lead", "pad", "top"})
+        mix = self.mixed(session)
+        session.tick()
+        # The loop was given the mix to go on with, the once: it was not stopped, and not played from its start.
+        self.assert_swapped(mix)
+        self.assert_played((whole, True))
+        self.assertEqual([self.speaker.did("stop"), session.playing, session.message], [[], True, ""])
+        # The mix is the band without its bass, to within rounding, and the rest of the render is the band's.
+        for side, wanted in zip(mix["sides"], band_mix(MIXED, "lead", "pad", "top"), strict=True):
+            np.testing.assert_allclose(side, wanted, rtol=0, atol=1e-6)
+        self.assertGreater(float(np.abs(mix["sides"][1] - whole["sides"][1]).max()), 0.01)
+        self.assertEqual(session.seconds, whole["seconds"])
+
+    def test_a_second_press_unmutes_and_the_loop_goes_on_with_the_whole_render_at_once(self):
+        session, whole = self.playing()
+        session.mute("bass")
+        mix = self.mixed(session)
+        self.assertTrue(session.mute("bass"))
+        self.assert_listening(session, set(), set(), None)
+        # The render of the whole song is kept, so it is there with no tick and nothing mixed.
+        self.assert_swapped(mix, whole)
+        self.assertIs(session.model.render(), whole)
+        self.assert_played((whole, True))
+
+    def test_a_solo_wins_over_the_mutes_and_a_mute_pressed_under_it_gives_the_loop_nothing_new(self):
+        session, _ = self.playing()
+        session.mute("bass")
+        session.mute("pad")
+        self.assertTrue(session.solo("bass"))
+        self.assert_listening(session, {"bass", "pad"}, {"bass"}, {"bass"})
+        mix = self.mixed(session)
+        swaps = self.speaker.did("swap")
+        self.assertIs(swaps[-1][0], mix["sides"])
+        self.assertTrue(session.mute("top"))
+        self.assert_listening(session, {"bass", "pad", "top"}, {"bass"}, {"bass"})
+        self.assertIs(self.mixed(session), mix)
+        self.assertEqual(len(self.speaker.did("swap")), len(swaps))
+
+    def test_two_solos_are_both_heard_and_no_other_channel(self):
+        session = self.opened(MIXED)
+        session.solo("lead")
+        session.solo("top")
+        self.assert_listening(session, set(), {"lead", "top"}, {"lead", "top"})
+        for side, wanted in zip(session.model.render()["sides"], band_mix(MIXED, "lead", "top"), strict=True):
+            np.testing.assert_array_equal(side, wanted)
+
+    def test_a_solo_taken_off_gives_the_mutes_back(self):
+        session = self.opened(MIXED)
+        session.mute("pad")
+        session.solo("lead")
+        self.assert_listening(session, {"pad"}, {"lead"}, {"lead"})
+        self.assertTrue(session.solo("lead"))
+        self.assert_listening(session, {"pad"}, set(), {"lead", "bass", "top"})
+
+    def test_hear_all_takes_every_mute_and_every_solo_off(self):
+        session, whole = self.playing()
+        session.mute("pad")
+        session.solo("lead")
+        self.mixed(session)
+        session.hear_all()
+        self.assert_listening(session, set(), set(), None)
+        swaps = self.speaker.did("swap")
+        self.assertIs(swaps[-1][0], whole["sides"])
+        # With nothing muted and nothing soloed there is nothing to take off, and the loop is given nothing.
+        session.hear_all()
+        self.assertEqual(len(self.speaker.did("swap")), len(swaps))
+
+    def test_a_channel_that_is_gone_from_the_file_is_muted_and_soloed_no_longer(self):
+        session, whole = self.playing()
+        session.tick()
+        session.mute("bass")
+        session.mute("pad")
+        session.solo("top")
+        self.assert_listening(session, {"bass", "pad"}, {"top"}, {"top"})
+        after = copy.deepcopy(MIXED)
+        for name in ("pad", "top"):
+            del after["songs"]["band"]["channels"][name], after["songs"]["band"]["patterns"]["a"][name]
+        self.write(after)
+        self.looked(session)
+        # The mute that is left counts, now that nothing is soloed.
+        self.assert_listening(session, {"bass"}, set(), {"lead"})
+        mix = self.mixed(session)
+        self.assertIs(self.speaker.did("swap")[-1][0], mix["sides"])
+        for side, wanted in zip(mix["sides"], band_mix(after, "lead"), strict=True):
+            np.testing.assert_array_equal(side, wanted)
+        self.assert_played((whole, True))
+
+    def test_another_thing_picked_has_nothing_muted_or_soloed_and_the_same_thing_picked_again_keeps_them(self):
+        session = self.opened(MIXED)
+        session.mute("bass")
+        session.solo("lead")
+        session.pick("song", "band")
+        self.assert_listening(session, {"bass"}, {"lead"}, {"lead"})
+        session.pick("song", "tune")
+        self.assert_listening(session, set(), set(), None)
+        # The song that takes the place of one removed outside has a channel of the name that was muted.
+        self.assertTrue(session.mute("tune"))
+        self.write(changed(songs={"band": BAND, "tune": None}))
+        self.looked(session)
+        self.assertEqual(session.model.picked, ("song", "air"))
+        self.assert_listening(session, set(), set(), None)
+
+    def test_a_press_while_nothing_plays_is_what_the_next_play_sounds_like(self):
+        session = self.opened(MIXED)
+        self.assertTrue(session.solo("bass"))
+        settle()
+        self.assertEqual(self.speaker.asked, [])
+        session.play()
+        mix = session.model.render()
+        self.assert_played((mix, True))
+        for side, wanted in zip(mix["sides"], band_mix(MIXED, "bass"), strict=True):
+            np.testing.assert_array_equal(side, wanted)
+
+    def test_what_is_no_channel_of_the_picked_song_is_refused_in_the_message_and_changes_nothing(self):
+        session, _ = self.playing()
+        session.mute("bass")
+        mix = self.mixed(session)
+        for said, (press, channel) in enumerate(((session.mute, "drums"), (session.solo, "tune"),
+                                                 (session.solo, ["bass"])), 1):
+            self.assertFalse(press(channel))
+            self.assertEqual([session.message, session.messages],
+                             [f"the song 'band' has no channel named {channel!r}", said])
+        self.assert_listening(session, {"bass"}, set(), {"lead", "pad", "top"})
+        self.assertIs(self.mixed(session), mix)
+        self.assert_swapped(mix)
+        # What is no song has no channels at all.
+        session.pick("sound", "zap")
+        self.assertFalse(session.mute("bass"))
+        self.assertEqual(session.message, "no song is picked, so there are no channels to mute or solo")
+        self.assert_listening(session, set(), set(), None)
+
+    def test_the_levels_are_read_at_the_place_the_song_plays_at_and_a_muted_channel_reads_0_at_once(self):
+        session = self.opened(MIXED)
+        session.model.render()
+        self.assertEqual(session.levels(), {})
+        session.play()
+        early = session.levels()
+        self.assertEqual(early, session.model.levels(0.125))
+        self.assertEqual(list(early), list(BAND["channels"]))
+        self.assertGreater(min(early.values()), 0.01)
+        self.speaker.at = 0.5
+        late = session.levels()
+        self.assertEqual(late, session.model.levels(0.5))
+        self.assertNotEqual(late, early)
+        # A channel reads 0 from the press that mutes it, before any mix is taken up, and the others as they did.
+        session.mute("bass")
+        self.assertEqual(session.levels(), {**late, "bass": 0.0})
+        session.stop()
+        self.assertEqual(session.levels(), {})
+
+    def test_the_numbers_stay_those_of_the_whole_song_while_a_mix_is_made_and_after(self):
+        session, _ = self.playing()
+        session.tick()
+        numbers = session.numbers()
+        self.assertEqual(numbers, session.model.numbers())
+        go = threading.Event()
+        # A test that fails before it lets the mix go leaves no thread waiting.
+        self.addCleanup(go.set)
+
+        def held(*args: object) -> tuple:
+            go.wait(60)
+            return mix_stems(*args)
+
+        with mock.patch.object(gui_model, "mix_stems", side_effect=held):
+            self.assertTrue(session.solo("bass"))
+            session.tick()
+            self.assertFalse(session.model.render_ready())
+            self.assertIs(session.numbers(), numbers)
+            # The loop goes on as it was until the mix is there.
+            self.assert_swapped()
+            self.assertTrue(session.playing)
+            go.set()
+            settle()
+        session.tick()
+        self.assert_swapped(session.model.render())
+        self.assertIs(session.numbers(), numbers)
 
 
 class StateTest(SessionCase):

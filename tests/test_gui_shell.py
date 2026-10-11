@@ -580,7 +580,7 @@ class InTheApp(unittest.TestCase):
             go.wait(60)
             raise RowSynthError("not made in this test")
 
-        for owner, name in ((gui_model, "render_loop"), (gui_model, "render_entry"), (checks, "run")):
+        for owner, name in ((gui_model, "render_stems"), (gui_model, "render_entry"), (checks, "run")):
             patch = mock.patch.object(owner, name, side_effect=refused)
             patch.start()
             self.addCleanup(patch.stop)

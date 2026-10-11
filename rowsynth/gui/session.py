@@ -96,6 +96,9 @@ class Session:
     The project is changed one thing at a time, with `change` and `remove`, and each change is in the file as
     soon as it is made. Every change is a step that `undo` takes back and `redo` makes again, and so is what
     another program changed in the file.
+
+    The channels of the picked song can be muted and soloed, with `mute` and `solo`. That is a way of listening
+    and no change: nothing of it is in the file, it is no step, and another thing picked has none of it.
     """
 
     def __init__(self, model: Model, player: Player | None = None,
@@ -130,6 +133,9 @@ class Session:
         # What `release` lets a held sound go by while `hold` has it sounding: the seconds into what plays at
         # which it is let go by itself, the seconds its loop takes to die away, and its end as the sides of a sound.
         self._let: tuple[float, float, Sequence[np.ndarray]] | None = None
+        # The channels of the picked song that are muted, and those that are soloed, by their names.
+        self._muted: frozenset[str] = frozenset()
+        self._soloed: frozenset[str] = frozenset()
         # The steps made to the project, here and outside.
         self._history = History()
 
@@ -141,8 +147,8 @@ class Session:
         there is no sound output, said at the first tick and each time something is to play; the things that
         changed outside; what went wrong with the render of the picked thing; what went wrong with the checks;
         why a change, or a step taken back or made again, was refused; that a change made here took the place
-        of one made outside at the same moment; why a single note did not sound; what `say` was given. A pick
-        clears it, and so does a change or a step that is made.
+        of one made outside at the same moment; why a single note did not sound; why a mute or a solo was
+        refused; what `say` was given. A pick clears it, and so does a change or a step that is made.
         """
         return self.model.problem or self._said
 
@@ -203,6 +209,16 @@ class Session:
         return 0.0 if self._render is None else self._render["seconds"]
 
     @property
+    def muted(self) -> frozenset[str]:
+        """The channels of the picked song that are muted, by their names."""
+        return self._muted
+
+    @property
+    def soloed(self) -> frozenset[str]:
+        """The channels of the picked song that are soloed, by their names."""
+        return self._soloed
+
+    @property
     def findings_refused(self) -> bool:
         """Whether the checks are through with no findings to give: they refused the project, or broke on it."""
         return self.model.findings_ready() and self.model.count() is None
@@ -226,9 +242,13 @@ class Session:
         """Picks a song, a sound or an instrument and starts its render. What was playing stops.
 
         A sound or an instrument is played once as soon as its render is ready, unless `audition` is off. What
-        the project does not have is refused, and then nothing changes.
+        the project does not have is refused, and then nothing changes. Another thing than the one that was
+        picked has nothing muted and nothing soloed.
         """
+        before = self.model.picked
         self.model.pick(kind, name)
+        if self.model.picked != before:
+            self._muted = self._soloed = frozenset()
         self._drop()
         self.say("")
         self._waiting = self.audition and kind != "song" and self.player is not None
@@ -356,6 +376,42 @@ class Session:
         else:
             self.sound(hit["inst"], hit["note"], song)
 
+    def mute(self, channel: str) -> bool:
+        """Mutes a channel of the picked song, or has a muted one heard again: a way of listening.
+
+        What is heard is as on a mixer. With any channel soloed it is the soloed ones and no others, and with
+        none soloed it is all but the muted ones. Nothing in the file changes and nothing is rendered again:
+        the model mixes what is heard from the stems it keeps, on a thread of its own. A loop that plays
+        takes the mix up as soon as it is there, and goes on from the place it is at. With nothing playing, it
+        is what the next play sounds like. A song that plays once is left to end as it was.
+
+        What is no channel of the picked song is refused, and so is any channel while no song is picked: the
+        answer is false, the message says why, and what is muted and what is heard stay as they were.
+        """
+        return self._press(channel, False)
+
+    def solo(self, channel: str) -> bool:
+        """Solos a channel of the picked song, or takes its solo off. It is heard and refused as a mute is.
+
+        While any channel is soloed the mutes are kept and count for nothing: a channel that is both is
+        heard. They count again when the last solo is taken off.
+        """
+        return self._press(channel, True)
+
+    def hear_all(self) -> None:
+        """Takes every mute and every solo off, so that all channels of the picked song are heard."""
+        self._muted = self._soloed = frozenset()
+        self._listen()
+
+    def levels(self) -> dict[str, float]:
+        """How loud each channel of the picked song is at the place it plays at, 0 to 1 by name: for the meters.
+
+        The levels are read as `Model.levels` reads them: a channel that is not heard reads 0, from the moment
+        it is muted. There are none, an empty answer, while the song does not sound, and for anything that is
+        no song.
+        """
+        return self.model.levels(self.player.position()) if self._sounding() else {}
+
     def stop(self) -> None:
         """Stops what plays, and gives up a play that waited for its render. What `sound` began rings out."""
         self._waiting, self._which, self._holding, self._let = False, None, False, None
@@ -390,9 +446,10 @@ class Session:
     def numbers(self) -> dict | None:
         """The numbers of the picked thing as the model gives them, or None while its render is not ready.
 
-        None as well for a render that went wrong, refused or broken.
+        Those of a song are of the whole song, whatever is muted, and they stay while a mix of what is heard
+        is made. None as well for a render that went wrong, refused or broken.
         """
-        if not self.model.render_ready():
+        if not self.model.numbers_ready():
             return None
         try:
             return self.model.numbers()
@@ -424,6 +481,56 @@ class Session:
         self._render = None
         self._taken = False
         self._turn = 0
+
+    def _channels(self) -> frozenset[str]:
+        """The names of the channels of the picked song. None of them where what is picked is no song."""
+        kind, name = self.model.picked or (None, None)
+        return frozenset(self.model.project.songs[name]["channels"]) if kind == "song" else frozenset()
+
+    def _press(self, channel: str, solo: bool) -> bool:
+        """Flips whether a channel of the picked song is soloed, or else muted, and has that heard.
+
+        False for what is refused, which the message then says: what is no channel of the picked song.
+        """
+        kind, name = self.model.picked or (None, None)
+        if kind != "song":
+            self.say("no song is picked, so there are no channels to mute or solo")
+            return False
+        if not isinstance(channel, str) or channel not in self._channels():
+            self.say(f"the song {name!r} has no channel named {channel!r}")
+            return False
+        if solo:
+            self._soloed ^= {channel}
+        else:
+            self._muted ^= {channel}
+        self._listen()
+        return True
+
+    def _hear(self) -> bool:
+        """Has the model hear the picked song by its mutes and solos. True when that is not what it heard before.
+
+        A channel the picked song does not have is muted and soloed no longer: one that is gone from the file.
+        """
+        channels = self._channels()
+        self._muted &= channels
+        self._soloed &= channels
+        only = self._soloed or (channels - self._muted if self._muted else None)
+        if only == self.model.heard:
+            return False
+        self.model.hear(only)
+        return True
+
+    def _listen(self) -> None:
+        """Has the mutes and solos heard: by the model now, and by what plays as soon as the mix is there.
+
+        The mix is taken up here where the model has it at once, and else by a later `tick`. Where what is
+        heard stays as it was, as with a channel muted while another is soloed, nothing is taken up again.
+        """
+        if self._hear():
+            self._taken = False
+            self.model.start_render()
+            if self.model.render_ready():
+                self._take()
 
     def _begin(self, which: int | None, holding: bool) -> None:
         """Has the picked thing play as soon as its render is there, in the way `play` or `hold` asked for."""
@@ -479,18 +586,23 @@ class Session:
         """Starts the render of the picked thing and the checks, at the first look and after a change to the project.
 
         `before` is what was picked before the change. The model keeps a render and the findings for as long as
-        nothing in the project differs, so with nothing let go of nothing is made again.
+        nothing in the project differs, so with nothing let go of nothing is made again. The picked song is
+        heard by its mutes and solos as before, less those of channels it no longer has.
         """
         # What the model has let go of, with the project as it was, is to be taken up when it is there again.
         self._taken = self._taken and self.model.render_ready()
         self._checked = self._checked and self.model.findings_ready()
         if before is not None and self.model.picked is None:
-            # The picked thing was removed: the first thing of the listing takes its place.
+            # The picked thing was removed: the first thing of the listing takes its place, with nothing muted.
             self._drop()
+            self._muted = self._soloed = frozenset()
             for section, things in self.model.listing():
                 if things:
                     self.model.pick(KINDS[section], things[0][0])
                     break
+        # A song whose channels are not the ones it had is heard whole by the model, until it is told again.
+        if self._hear():
+            self._taken = False
         if self.model.picked is not None:
             self.model.start_render()
         self.model.start_findings()
