@@ -86,6 +86,24 @@ class Rules(unittest.TestCase):
         self.assertNotIn("keys", self.layers(layeredit.key_removed(TUNE, 2)))
         self.assertEqual(self.layers(layeredit.key_added(layeredit.key_removed(TUNE, 2), 5))["keys"], [0, 5])
 
+    def test_a_version_is_mixed_ahead_in_a_key_and_no_longer_and_the_last_one_out_leaves_no_list_of_them(
+            self) -> None:
+        full, thin = {"version": "full", "key": 2}, {"version": "thin", "key": 0}
+        one = layeredit.premixed(TUNE, "full", 2)
+        two = layeredit.premixed(one, "thin", 0, True)
+        # They stand in the order they were put in, after the keys, and the project's check passes them.
+        self.assertEqual((self.layers(one)["premix"], self.layers(two)["premix"], list(two["layers"])[-1]),
+                         ([full], [full, thin], "premix"))
+        # With no word on which, the one that is in goes out. One that is as asked already changes nothing.
+        self.assertEqual((layeredit.premixed(two, "full", 2)["layers"]["premix"],
+                          layeredit.premixed(two, "thin", 0, True), layeredit.premixed(two, "thin", 2, False)),
+                         ([thin], two, two))
+        self.assertEqual((layeredit.premixed(one, "full", 2), layeredit.premixed(one, "full", 2, False),
+                          layeredit.premixed(TUNE, "thin", 0, False)), (TUNE, TUNE, TUNE))
+        # A song that names no keys is heard in the one it is written in, and is mixed ahead in that one.
+        plain = layeredit.key_removed(TUNE, 2)
+        self.assertEqual(self.layers(layeredit.premixed(plain, "beat", 0))["premix"], [{"version": "beat", "key": 0}])
+
     def test_an_intro_is_switched_on_with_the_engine_s_lengths_each_of_its_settings_is_set_and_it_is_switched_off(
             self) -> None:
         made = layeredit.intro_on(TUNE)
@@ -123,6 +141,9 @@ class Rules(unittest.TestCase):
                                                     "octaves 0 to 9, and the text can write no other"),
             (lambda: layeredit.key_removed(alone, 0),
              "key 0 is the only one, and a song is heard in one key at the least"),
+            (lambda: layeredit.premixed(TUNE, "calm", 0), "the layers have no version called 'calm'"),
+            (lambda: layeredit.premixed(TUNE, "full", 5), "the song is not heard in key 5"),
+            (lambda: layeredit.premixed(TUNE, "full", True), "the song is not heard in key True"),
             (lambda: layeredit.intro_on(made), "the song has an intro already"),
             (lambda: layeredit.intro_off(TUNE), "the song has no intro"),
             (lambda: layeredit.intro_order(made, ["a", "c"]), "the song has no pattern called 'c'"),

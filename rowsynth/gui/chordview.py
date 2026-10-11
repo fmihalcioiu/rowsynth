@@ -110,7 +110,8 @@ def read(table: dict, song: dict, pattern: str, rows: float) -> Chords:
     `table` is the project's chords. A bar is four beats of the song, and the pattern has as many bars as its
     rows begin. Each whole row of a bar is asked of the check's own `under`, so a bar that several chords share
     is shared as the check shares it. A bar after the last string has no chord, and neither has one whose
-    string the check refuses: one that names no chord, or a chord the table does not have.
+    string names none. A bar whose string the check refuses, since it names a chord the table does not have,
+    is shown with none as well.
     """
     written = tuple(song.get("chords", {}).get(pattern, ()))
     per_bar = bar_rows(song)
@@ -160,8 +161,9 @@ def with_chord(table: dict, written: Sequence[str], bars: int, bar: int, name: s
     `written` is the strings there are, `bars` how many bars the pattern has, and `bar` the one that is
     changed, counted from 0. `name` is one of the chords of `table`, the project's, or None for no chord. A
     bar before it that has no string yet gets an empty one, as a bar that is cleared does: the project
-    takes it, and the chord check wants a chord there as soon as a note starts a beat in the bar. Strings at
-    the end that name no chord are left out, so a pattern with no chord left has no strings.
+    takes it, and to the chord check a bar whose string names no chord is a bar with none, whose notes it
+    passes over. Strings at the end that name no chord are left out, so a pattern with no chord left has no
+    strings.
 
     Refused are a bar the pattern does not have, and a chord the table does not have.
     """

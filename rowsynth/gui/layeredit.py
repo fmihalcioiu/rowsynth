@@ -294,6 +294,32 @@ def key_removed(song: dict, key: int) -> dict:
     return made
 
 
+def premixed(song: dict, version: str, key: int, on: bool | None = None) -> dict:
+    """A song with a version mixed ahead in a key, or no longer: `on` says which, and None is for the other than now.
+
+    What is mixed ahead is one more file at the build, that version in that key. One that is put in is the
+    last of them, and one that is as `on` says already leaves the song as it is. Where the last of them is
+    taken out, the layers say nothing of mixing ahead. Refused are a version the layers do not have, and a
+    key that is none of those `keys` gives for the song.
+    """
+    _known(song, "version", version)
+    if isinstance(key, bool) or not isinstance(key, int) or key not in keys(song):
+        raise RowSynthError(f"the song is not heard in key {key!r}")
+    made = copy.deepcopy(song)
+    layers = made["layers"]
+    pair = {"version": version, "key": key}
+    held = layers.get("premix", [])
+    if on is None:
+        on = pair not in held
+    if on and pair not in held:
+        layers["premix"] = [*held, pair]
+    elif not on and pair in held:
+        layers["premix"] = [mix for mix in held if mix != pair]
+        if not layers["premix"]:
+            del layers["premix"]
+    return made
+
+
 def intro_on(song: dict) -> dict:
     """A song with an intro: the first pattern of its order, played once before the song goes round.
 

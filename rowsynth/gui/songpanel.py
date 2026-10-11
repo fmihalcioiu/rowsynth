@@ -307,7 +307,7 @@ class SongPanel(Panel):
     the chord of the bar, and `none` leaves the bar with no chord: either is the song's chords for the pattern
     saved, one change to the file and one step that can be taken back. `New chord...` opens the box of
     `chordview.ChordBox`, where a chord is made of a root and a kind and named. It is added to the chords of the
-    project and then set on the bar: two changes to the file, and two steps.
+    project and set on the bar as one: one write to the file, and one step that can be taken back.
 
     `tempo` and the two buttons `lower` and `higher` are the song's own settings. They stand under the choice,
     and beside it while the mixer is shown. The tempo is one of those `tempo_steps` gives, shown in beats a
@@ -703,23 +703,29 @@ class SongPanel(Panel):
         self._popup = self.ui.open(ChordBox(pos, lambda name, made: self._add_chord(pattern, bars, bar, name, made)))
 
     def _add_chord(self, pattern: str, bars: int, bar: int, name: str, made: dict) -> bool:
-        """Add a chord to the chords of the project under a name, and set it on a bar of a pattern.
+        """Add a chord to the chords of the project under a name, and set it on a bar of a pattern, the two as one.
 
-        The two are two changes to the file, made one after the other, and each is a step that can be taken
-        back. The answer is whether the chord was added: a name `chordview.named` refuses, or a chord the
-        project refuses, is not, and the session says why.
+        The chord goes into the table, and the song's chords for the pattern are saved as `chordview.with_chord`
+        leaves them with the table as it then is: one write to the file, and one step that can be taken back.
+        The answer is whether that was done. A name `chordview.named` refuses, a bar the pattern does not
+        have, and what the project refuses change nothing, and the session says why. The song is read again
+        once the two are saved.
         """
-        # Only a table the file has can be given one more chord: a file with no chords gets the table whole.
-        table = self.session.model.project.to_dict().get("chords")
+        song_name = self._picked[1]
+        project = self.session.model.project
+        song = project.songs.get(song_name, {})
+        written = song.get("chords", {}).get(pattern, [])
         try:
-            where, value = chordview.adding(table, name, made)
+            # Only a table the file has can be given one more chord: a file with no chords gets the table whole.
+            added = chordview.adding(project.to_dict().get("chords"), name, made)
+            strings = chordview.with_chord({**project.chords, name: made}, written, bars, bar, name)
         except RowSynthError as error:
             self.session.say(str(error))
             return False
-        if not self.session.change(where, value, f"new chord {name}"):
-            return False
-        self._chord(pattern, bars, bar, name)
-        return True
+        saved = self.session.change_many([added, chordview.saving(song_name, song, pattern, strings)],
+                                         f"new chord {name} on bar {bar + 1} of pattern {pattern}")
+        self._look()
+        return saved
 
     def _menu(self, items: Sequence[Item | None], at: Pos) -> None:
         """Open a menu at a place, over everything else. Each item stands for what is done when it is chosen."""

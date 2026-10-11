@@ -13,7 +13,7 @@ from rowsynth.gui import dials, layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.layerview import (ABOUT, Group, Laid, Layers, Version, arrange, cell, head_parts, hit, intro_parts,
-                                    lay, picture)
+                                    kept, lay, more, picture)
 from rowsynth.gui.model import Model
 from rowsynth.gui.panels import Panel
 from rowsynth.gui.popups import Menu, TextBox
@@ -117,6 +117,36 @@ class Sums(unittest.TestCase):
                                        lay((0, 0, 648, 44), 4, 4, 79))],
                          [(379, 64, 4, 4), (96, 30, 3, 4), (96, 64, 4, 1)])
         self.assertEqual(lay((5, 7, 100, 84), 4, 4), Laid(0, 0, (), (), (5, 7, 0, 0), (5, 7, 0, 0)))
+
+    def test_a_table_with_no_room_for_all_of_it_shows_it_from_a_first_group_and_a_first_version_kept_in_range(
+            self) -> None:
+        # There is room for two groups of the five, and for three versions of the six.
+        rect = (0, 0, 200, 56)
+        first, laid = lay(rect, 5, 6, 79), lay(rect, 5, 6, 79, 2, 1)
+        self.assertEqual((first.heads, first.rows, first.add_version, first.add_group),
+                         (((96, 0, 30, 14), (126, 0, 30, 14), (156, 0, 30, 14)), ((0, 14, 96, 14), (0, 28, 96, 14)),
+                          (186, 0, 13, 13), (0, 42, 13, 13)))
+        # What is in view stands where the first ones stood, and is known by its place among all there are.
+        self.assertEqual(laid, first._replace(first_group=2, first_version=1))
+        self.assertEqual((cell(laid, 3, 2), cell(first, 1, 1)), ((127, 28, 28, 13), (127, 28, 28, 13)))
+        found = [hit(laid, pos) for pos in ((130, 30), (99, 2), (170, 2), (5, 16), (188, 2), (2, 44))]
+        self.assertEqual(found, [("cell", 3, 2), ("play", 1), ("version", 3), ("group", 2), ("add", "version"),
+                                 ("add", "group")])
+        # A first one is never before the first there is, nor further than has the last one in view.
+        self.assertEqual([(held.first_group, held.first_version) for held in (
+            lay(rect, 5, 6, 79, 9, 9), lay(rect, 5, 6, 79, -1, -4), lay(rect, 2, 3, 79, 1, 1))],
+            [(3, 3), (0, 0), (0, 0)])
+        self.assertEqual([kept(*asked) for asked in ((4, 10, 3), (9, 10, 3), (-2, 10, 3), (2, 3, 5), (2, 3, 0))],
+                         [4, 7, 0, 0, 0])
+
+    def test_a_mark_stands_at_each_edge_of_the_table_past_which_there_are_more(self) -> None:
+        rect = (0, 0, 200, 56)
+        self.assertEqual(more(lay(rect, 5, 6, 79, 2, 1), 5, 6),
+                         {"left": (89, 6), "right": (192, 20), "up": (6, 5), "down": (19, 49)})
+        self.assertEqual((more(lay(rect, 5, 6, 79), 5, 6), more(lay(rect, 5, 6, 79, 3, 3), 5, 6)),
+                         ({"right": (192, 20), "down": (19, 49)}, {"left": (89, 6), "up": (6, 5)}))
+        # A table that shows all of it has no mark, and neither has a rectangle with no table in it.
+        self.assertEqual((more(lay(rect, 2, 3, 79), 2, 3), more(lay((5, 7, 100, 84), 4, 4), 4, 4)), ({}, {}))
 
     def test_the_intro_is_laid_under_the_table_and_its_picture_has_the_tail_begin_where_the_loop_does(self) -> None:
         parts = arrange(DESK, 4)
@@ -263,7 +293,8 @@ class Shown(Opened):
         self.assertEqual((list(layers["versions"].items())[-1], list(layers["groups"].items())[-1],
                           self.session.undo_label), (("version", []), ("group", []), "tune: new group group"))
         self.click(middle(self.table.name_rect("version", "version")), button=3)
-        self.assertEqual([item and item.text for item in self.ui.modal.items], ["Rename...", None, "Remove"])
+        self.assertEqual([item and item.text for item in self.ui.modal.items],
+                         ["Rename...", None, "Remove", None, "premix in 0", "premix in +2"])
         self.choose("Rename...")
         self.assertIsInstance(self.ui.modal, TextBox)
         self.type("calm")
@@ -279,6 +310,61 @@ class Shown(Opened):
         self.choose("Remove")
         self.assertEqual((list(self.song()["layers"]["versions"]), [version.name for version in self.table.versions]),
                          (list(LAYERS["versions"]), list(LAYERS["versions"])))
+
+    def test_a_version_is_premixed_in_a_key_by_its_menu_and_the_help_of_its_heading_says_in_which(self) -> None:
+        table = self.table
+        heading = middle(table.name_rect("version", "thin"))
+        self.click(heading, button=3)
+        self.assertEqual([item and (item.text, item.icon) for item in self.ui.modal.items],
+                         [("Rename...", ""), None, ("Remove", ""), None, ("premix in 0", ""), ("premix in +2", "")])
+        self.choose("premix in +2")
+        self.assertEqual((self.song()["layers"]["premix"], self.session.undo_label, table.versions[1].premix),
+                         ([{"version": "thin", "key": 2}], "tune: premix of thin in +2 on", (2,)))
+        self.ui.handle(Event("move", heading))
+        self.assertEqual(self.ui.help, "version thin, premixed in +2: the right button renames or removes it, or "
+                                       "premixes it in a key")
+        # The key it is premixed in has a tick. Chosen again it is taken out, and the last one out leaves no list.
+        self.click(heading, button=3)
+        self.assertEqual([item.icon for item in self.ui.modal.items[-2:]], ["", "tick"])
+        self.choose("premix in +2")
+        self.assertEqual((self.song(), self.session.undo_label, table.versions[1].premix),
+                         (TUNE, "tune: premix of thin in +2 off", ()))
+
+    def test_a_table_with_no_room_for_all_of_it_is_moved_by_the_wheel_and_what_is_out_of_view_has_no_rectangle(
+            self) -> None:
+        layers, table = self.layers, self.table
+        layers.place((131, 122, 200, 110))
+        rows, heads = table.laid.rows, table.laid.heads
+        nothing = (131, 141, 0, 0)
+        # One group of the four is in view, and three versions.
+        self.assertEqual((len(rows), len(heads), table.cell("low", "beat"), table.play("full"),
+                          table.name_rect("group", "low"), table.name_rect("version", "full")),
+                         (1, 3, nothing, nothing, table.rect, table.rect))
+        # The wheel moves the groups by a row a step, and over the headings the versions by a column.
+        self.assertTrue(self.ui.handle(Event("wheel", middle(rows[0]), wheel=-1)))
+        self.assertTrue(self.ui.handle(Event("wheel", middle(heads[2]), wheel=-1)))
+        self.assertEqual((table.first_group, table.first_version, table.laid.rows, table.laid.heads, self.ui.help),
+                         (1, 1, rows, heads, "version full: the right button renames or removes it, or premixes it in "
+                                             "a key"))
+        # In view now are the group low and the versions from thin on, each where the first ones stood.
+        self.assertEqual((table.cell("low", "thin"), table.play("full"), table.name_rect("group", "low")[:2],
+                          table.cell("rhythm", "thin"), table.play("beat"), table.name_rect("version", "beat")),
+                         ((heads[0][0] + 1, rows[0][1], 28, 13), head_parts(heads[2])[0],
+                          (rows[0][0] + theme.PAD, rows[0][1]), nothing, nothing, table.rect))
+        # A press on a switch is a press on the group and the version that are under it.
+        self.click(middle(table.cell("low", "full")))
+        self.assertEqual((self.song()["layers"]["versions"]["full"], table.first_group, table.first_version),
+                         (["rhythm", "middle", "top"], 1, 1))
+        # The view stops at the last, and with fewer to show it goes back as far as it takes to be in range.
+        self.ui.handle(Event("wheel", middle(heads[0]), wheel=-5))
+        self.ui.handle(Event("wheel", middle(rows[0]), wheel=-9))
+        self.assertEqual((table.first_group, table.first_version), (3, 1))
+        table.show(table.groups[:2], table.versions[:3])
+        self.assertEqual((table.first_group, table.first_version), (1, 0))
+        # Where all of them are in view the wheel is left to what lies under the table.
+        self.assertFalse(self.ui.handle(Event("wheel", middle(heads[0]), wheel=-1)))
+        self.assertTrue(self.ui.handle(Event("wheel", middle(rows[0]), wheel=2)))
+        self.assertEqual(table.first_group, 0)
 
     def test_a_key_that_is_typed_is_added_and_shown_and_the_one_that_is_shown_is_removed(self) -> None:
         layers = self.layers
@@ -373,6 +459,31 @@ class Drawn(Opened):
         self.assertEqual((loop[0], blocks[0][0] + blocks[0][2], w), (x, x, 113))
         self.assertGreater(ink((x + 1, y, 1, h), slope), ink((x + w // 2, y, 1, h), slope))
         self.assertEqual((ink((x + w // 2, y, 1, h), slope), ink((x + w + 1, y, 1, h), slope)), (14, 0))
+
+    def test_a_small_arrow_is_drawn_at_each_edge_past_which_the_table_has_more_and_none_where_all_is_in_view(
+            self) -> None:
+        surface = pygame.Surface((960, 540))
+        canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
+        table = self.table
+
+        def arrows() -> tuple[int, ...]:
+            """The pixels in the colour of an arrow in the corner, after the first row, and beside the lower button."""
+            surface.fill(theme.PANEL)
+            self.ui.draw(canvas)
+            laid = table.laid
+            (right, top), (left, foot) = laid.add_version[:2], laid.add_group[:2]
+            return tuple(sum(surface.get_at((x + column, y + row))[:3] == theme.DIM
+                             for column in range(w) for row in range(h))
+                         for x, y, w, h in ((left, top, laid.left, 14), (right, top + 14, 13, 13),
+                                            (left + 13, foot, 13, 13)))
+
+        self.assertEqual(arrows(), (0, 0, 0))
+        # An arrow of three columns has nine pixels. Of four groups one is in view, and of four versions three.
+        self.layers.place((131, 122, 200, 110))
+        self.assertEqual(arrows(), (0, 9, 9))
+        self.ui.handle(Event("wheel", middle(table.laid.rows[0]), wheel=-1))
+        self.ui.handle(Event("wheel", middle(table.laid.heads[0]), wheel=-1))
+        self.assertEqual(arrows(), (18, 0, 9))
 
 
 if __name__ == "__main__":

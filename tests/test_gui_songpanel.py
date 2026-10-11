@@ -1241,13 +1241,28 @@ class Chorded(Opened):
         self.key("return")
         self.assertEqual((self.ui.modal, self.data()["chords"]["Dm"], self.chords(), self.shown(), self.wrong()),
                          (None, {"root": 2, "tones": [2, 5, 9]}, {"a": ["C", "Dm"]}, ["C", "Dm"], [20.0, 24.0, 28.0]))
-        # They are two changes and two steps: the chord of the bar is taken back first, and then the new chord.
-        self.assertEqual(self.session.undo_label, "bar 2 of pattern a: chord Dm")
+        # The chord and the bar are one step: taken back, the bar has its chord again and the table no new one.
+        self.assertEqual(self.session.undo_label, "new chord Dm on bar 2 of pattern a")
         self.assertTrue(self.session.undo())
-        self.assertEqual((self.chords(), "Dm" in self.data()["chords"], self.session.undo_label),
-                         ({"a": ["C", "G"]}, True, "new chord Dm"))
-        self.assertTrue(self.session.undo())
-        self.assertEqual(self.data(), CHORDED)
+        self.assertEqual((self.data(), self.session.can_undo), (CHORDED, False))
+
+    def test_a_new_chord_and_its_bar_taken_back_in_one_leave_the_file_as_it_was_to_the_byte(self) -> None:
+        # The file is laid out as a save lays it out, so that a save alone changes none of its bytes.
+        for held in (CHORDED, UNCHORDED):
+            self.opened(lambda path, held=held: Project.from_dict(held).save(path))
+            before = self.path.read_bytes()
+            self.choose(1, "New chord...")
+            self.ui.modal.name.text = "low"
+            self.key("return")
+            self.assertEqual((self.ui.modal, self.shown()[1], self.session.undo_label, self.session.message),
+                             (None, "low", "new chord low on bar 2 of pattern a", ""))
+            self.assertNotEqual(self.path.read_bytes(), before)
+            self.assertTrue(self.session.undo())
+            self.assertEqual((self.path.read_bytes(), self.session.can_undo), (before, False))
+        # A bar the pattern does not have is refused with nothing saved, and the chord is not added alone.
+        self.assertFalse(self.panel._add_chord("a", 2, 2, "low", {"root": 0, "tones": [0, 4, 7]}))
+        self.assertEqual((self.path.read_bytes(), self.session.can_undo, self.session.message),
+                         (before, False, "2 is no bar of the pattern, which has 2, counted from 0"))
 
     def test_a_song_with_no_chords_has_an_empty_strip_and_nothing_red_and_its_first_chord_is_made_in_the_box(
             self) -> None:

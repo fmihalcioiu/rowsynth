@@ -88,7 +88,7 @@ class Read(unittest.TestCase):
             self.assertEqual([bar.text for bar in bars], names)
             self.assertEqual([[(span.rows, set(span.tones)) for span in bar.spans] for bar in bars],
                              [[(16.0, set(arcade.chords[name]["tones"]))] for name in names])
-        # A song with no chords has its bars all the same, each with none. A string the check refuses is none too.
+        # A song with no chords has its bars all the same, each with none. A string that names none is none too.
         bare = {key: value for key, value in tune.items() if key != "chords"}
         self.assertEqual(chordview.read(arcade.chords, bare, "a", 64.0).bars, (Bar("", ()),) * 4)
         cleared = chordview.read(arcade.chords, {"chords": {"a": ["", " G  C "]}}, "a", 32.0)
@@ -140,6 +140,16 @@ class Changed(unittest.TestCase):
             with self.assertRaises(RowSynthError) as refused:
                 chordview.with_chord(table, written, 3, bar, name)
             self.assertEqual(str(refused.exception), said)
+
+    def test_a_bar_cleared_before_one_that_has_a_chord_is_a_bar_with_none_to_the_check_which_still_runs(self) -> None:
+        written = chordview.with_chord(PROJECT["chords"], SONG["chords"]["a"], 3, 0, None)
+        project = put(PROJECT, *chordview.saving("tune", SONG, "a", written))
+        # The b and the d of the first bar were off Am. With the bar cleared, only the second bar has findings.
+        found = here(project, "tune")
+        self.assertEqual((written, found), (["", "F C"], [
+            f"channel 'top' starts a beat of bar 2 on {tone}, which is not in the chord {chord}"
+            for tone, chord in (("a", "C"), ("g", "F"))]))
+        self.assertEqual(found, there(rule.check(project, 44100)))
 
     def test_a_chord_of_a_root_and_a_kind_is_one_the_project_takes_under_a_name_that_can_be_given(self) -> None:
         self.assertEqual([chordview.chord(root, kind) for root, kind in ((9, "minor"), (5, "major"), (11, "7"))],

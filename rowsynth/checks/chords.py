@@ -40,19 +40,18 @@ def looked_at(drums: bool, rows: float, longest: float) -> bool:
 
 
 def under(chords: dict, written: Sequence[str], row: float, per_bar: float, where: str) -> tuple[int, str] | None:
-    """The bar a row is in, counted from 0, and the name of the chord under the row. None in a bar with no string.
+    """The bar a row is in, counted from 0, and the name of the chord under the row. None in a bar with no chord.
 
     `chords` is the project's table of them, and `written` the strings a song has for the bars of a pattern,
-    of `per_bar` rows each. Chords written for one bar have an even share of it each, in the order they are
-    written in. `where` is the place of the strings: a string that names no chord, or one the table does not
-    have, is refused with the place of the string in front.
+    of `per_bar` rows each. A bar has no chord where it lies after the last string, and where its string names
+    none: an empty one, or one of spaces only. Chords written for one bar have an even share of it each, in
+    the order they are written in. `where` is the place of the strings: a string that names a chord the table
+    does not have is refused with the place of the string in front.
     """
     bar = math.floor(row / per_bar)
-    if bar >= len(written):
-        return None
-    names = written[bar].split()
+    names = written[bar].split() if bar < len(written) else []
     if not names:
-        raise RowSynthError(f"{where}[{bar}]: names no chord")
+        return None
     chord = names[min(len(names) - 1, math.floor((row % per_bar) * len(names) / per_bar))]
     if chord not in chords:
         raise RowSynthError(f"{where}[{bar}]: no chord named {chord!r}")
@@ -117,12 +116,13 @@ def check(project: Project, rate: int) -> list[Finding]:
     A song's "chords" has one string for each bar of a pattern, a bar being four beats. A string names one chord
     or several with spaces between them. A pattern with more or fewer strings than bars gives one finding. So
     does every note that starts on a beat and is none of the tones of the chord under it, on each channel that
-    is as long as its pattern and plays no drums. Notes in bars after the last string are passed over.
+    is as long as its pattern and plays no drums. Notes in a bar with no chord are passed over: a bar after the
+    last string, and one whose string names none, which is empty or has spaces only.
 
     The findings come in the order of the songs in the project, then of the patterns in "chords", then of the
     channels in the pattern, then of the notes in time. Text that cannot be read is refused with its song,
-    pattern and channel in front. A string that names no chord, or one the project does not have, is refused
-    with its place in "chords" in front, once a note is held to it.
+    pattern and channel in front. A string that names a chord the project does not have is refused with its
+    place in "chords" in front, once a note is held to it.
     """
     found = []
     for name, song in project.songs.items():

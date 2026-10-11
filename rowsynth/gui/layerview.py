@@ -41,7 +41,8 @@ ROW_H = BUTTON_H + 1
 #: The least width of the room the groups are named in. It is as wide as the longest of them needs.
 LEFT_LEAST = 96
 #: How wide the column of a version is: as wide as fits, from the most down to the least. Columns that do not
-#: fit at the least width are not in view, and neither are groups for which the table is not high enough.
+#: fit at the least width are not all in view, and neither are groups for which the table is not high enough:
+#: the table then shows them from a first one on, and a small arrow marks each way in which there are more.
 COL_MOST = 64
 COL_LEAST = 30
 #: How wide the field of the keys is, that of the patterns an intro plays, and a knob of the intro with its two
@@ -82,10 +83,11 @@ class Group(NamedTuple):
 
 
 class Version(NamedTuple):
-    """One version as the table shows it: its name, and the names of the groups that are in it."""
+    """One version as the table shows it: its name, the names of the groups in it, and the keys it is premixed in."""
 
     name: str
     groups: frozenset[str]
+    premix: tuple[int, ...] = ()
 
 
 class Laid(NamedTuple):
@@ -93,7 +95,8 @@ class Laid(NamedTuple):
 
     `left` is how wide the room is the groups are named in, and `wide` the column of a version. `heads` has the
     heading of each version in view and `rows` the room each group in view is named in. `add_version` is the
-    button after the last heading, and `add_group` the one under the last group.
+    button after the last heading, and `add_group` the one under the last group. `first_group` and
+    `first_version` are the places of the first group and of the first version in view, among all there are.
     """
 
     left: int
@@ -102,9 +105,20 @@ class Laid(NamedTuple):
     rows: tuple[Rect, ...]
     add_version: Rect
     add_group: Rect
+    first_group: int = 0
+    first_version: int = 0
 
 
-def lay(rect: Rect, groups: int, versions: int, label: int = 0) -> Laid:
+def kept(first: int, count: int, fit: int) -> int:
+    """The first of `count` things in a view that `fit` of them fit in, kept in range.
+
+    It is no less than 0, and no more than the first at which the last of them is in view. Where they all fit,
+    and where none does, it is 0.
+    """
+    return max(0, min(first, count - fit)) if fit > 0 else 0
+
+
+def lay(rect: Rect, groups: int, versions: int, label: int = 0, first_group: int = 0, first_version: int = 0) -> Laid:
     """Where a table of so many groups against so many versions stands in its rectangle.
 
     The headings of the versions run along the top, and under them is a row for each group. A row begins with
@@ -112,6 +126,10 @@ def lay(rect: Rect, groups: int, versions: int, label: int = 0) -> Laid:
     After it the versions have a column each, as wide as fits from `COL_MOST` down to `COL_LEAST`. A small
     button stands after the last heading and another under the last row. A rectangle too small for a heading
     with one column and a row under it has no table in it.
+
+    Where not every group or not every version fits, those in view are the ones from `first_group` and from
+    `first_version` on, each kept in range as `kept` keeps it. The rows and the headings stand where they
+    stand for a table that shows its first ones.
     """
     x, y, w, h = rect
     room = w - LEFT_LEAST - BUTTON_H
@@ -125,7 +143,8 @@ def lay(rect: Rect, groups: int, versions: int, label: int = 0) -> Laid:
                 tuple((x + left + at * wide, y, wide, ROW_H) for at in range(seen)),
                 tuple((x, y + (at + 1) * ROW_H, left, ROW_H) for at in range(shown)),
                 (x + left + seen * wide, y, BUTTON_H, BUTTON_H),
-                (x, y + (shown + 1) * ROW_H, BUTTON_H, BUTTON_H))
+                (x, y + (shown + 1) * ROW_H, BUTTON_H, BUTTON_H),
+                kept(first_group, groups, shown), kept(first_version, versions, seen))
 
 
 def head_parts(head: Rect) -> tuple[Rect, Rect]:
@@ -135,8 +154,9 @@ def head_parts(head: Rect) -> tuple[Rect, Rect]:
 
 
 def cell(laid: Laid, group: int, version: int) -> Rect:
-    """The switch that says whether a group is in a version, both by their place in the table as it is laid."""
-    return laid.heads[version][0] + 1, laid.rows[group][1], laid.wide - 2, ROW_H - 1
+    """The switch that says whether a group is in a version, both in view, by their places among all there are."""
+    return (laid.heads[version - laid.first_version][0] + 1, laid.rows[group - laid.first_group][1], laid.wide - 2,
+            ROW_H - 1)
 
 
 def hit(laid: Laid, pos: Pos) -> tuple | None:
@@ -144,21 +164,47 @@ def hit(laid: Laid, pos: Pos) -> tuple | None:
 
     ("play", version) is the button that plays a version and ("version", version) the rest of its heading,
     ("group", group) the room a group is named in and ("cell", group, version) the switch of the two, each by
-    its place in the table. ("add", "version") and ("add", "group") are the two buttons that add one.
+    its place among all the groups or the versions there are, in view or not. ("add", "version") and
+    ("add", "group") are the two buttons that add one.
     """
-    for at, head in enumerate(laid.heads):
+    for at, head in enumerate(laid.heads, laid.first_version):
         if inside(head, pos):
             return ("play" if inside(head_parts(head)[0], pos) else "version", at)
-    for at, row in enumerate(laid.rows):
+    for at, row in enumerate(laid.rows, laid.first_group):
         if inside(row, pos):
             return "group", at
-        for to, head in enumerate(laid.heads):
+        for to, head in enumerate(laid.heads, laid.first_version):
             if inside((head[0], row[1], head[2], row[3]), pos):
                 return "cell", at, to
     for kind in ("version", "group"):
         if inside(laid.add_version if kind == "version" else laid.add_group, pos):
             return "add", kind
     return None
+
+
+def more(laid: Laid, groups: int, versions: int) -> dict[str, Pos]:
+    """Where the marks go that say a table of so many groups and versions has some out of view, each by its way.
+
+    A mark is a small arrow that points the way there are more, and what is given for it is its tip. "left" is
+    for versions before the first in view: it stands before the first heading, in the corner over the groups.
+    "right" is for versions after the last in view, and stands after the last switch of the first row. "up" is
+    for groups above the first in view, in that corner as well, and "down" for groups under the last, beside
+    the button that adds one. A way in which nothing is out of view has no mark, and neither has a rectangle
+    with no table in it.
+    """
+    if not laid.wide:
+        return {}
+    (right, top), (x, foot) = laid.add_version[:2], laid.add_group[:2]
+    middle, air = BUTTON_H // 2, (BUTTON_H - theme.ARROW) // 2
+    tips = {
+        "left": (laid.first_version > 0, (x + laid.left - theme.PAD - theme.ARROW, top + middle)),
+        "right": (laid.first_version + len(laid.heads) < versions,
+                  (right + theme.PAD + theme.ARROW - 1, top + ROW_H + middle)),
+        "up": (laid.first_group > 0, (x + theme.PAD + theme.ARROW - 1, top + air)),
+        "down": (laid.first_group + len(laid.rows) < groups,
+                 (x + BUTTON_H + theme.PAD + theme.ARROW - 1, foot + air + theme.ARROW - 1)),
+    }
+    return {way: tip for way, (out, tip) in tips.items() if out}
 
 
 def picture(rect: Rect, intro: Sequence[float], first: float, tail: float) -> tuple[list[Rect], Rect, Rect]:
@@ -194,6 +240,11 @@ class Table(Widget):
     switch calls `flipped(group, version)`, one on the button of a heading `played(version)`, and one on a
     button that adds `added(kind)`, the kind "group" or "version". The right button on a group or on a heading
     calls `asked(kind, name, pos)`. The help line says what is under the mouse.
+
+    A table too small for all its groups or all its versions shows them from `first_group` and from
+    `first_version` on, which are places among all there are. The wheel over the headings moves the versions
+    by a column a step, and anywhere else on the table the groups by a row. A small arrow marks each way in
+    which there are more, as `more` has them. What is not in view cannot be pressed.
     """
 
     def __init__(self, rect: Rect, flipped: Callable[[str, str], object] | None = None,
@@ -204,6 +255,7 @@ class Table(Widget):
         self.groups: tuple[Group, ...] = ()
         self.versions: tuple[Version, ...] = ()
         self.heard: frozenset[str] = frozenset()
+        self.first_group = self.first_version = 0
         # How wide the widest name of a group is, and the widest group with its channels after it.
         self._name_w = self._label = 0
         # What the mouse is on, and what the left button went down on.
@@ -213,20 +265,31 @@ class Table(Widget):
     @property
     def laid(self) -> Laid:
         """Where the parts of the table stand now, as `lay` has them."""
-        return lay(self.rect, len(self.groups), len(self.versions), self._label)
+        return lay(self.rect, len(self.groups), len(self.versions), self._label, self.first_group, self.first_version)
 
     def show(self, groups: Sequence[Group], versions: Sequence[Version]) -> None:
-        """Take the groups and the versions to show, in the order the song has them."""
+        """Take the groups and the versions to show, in the order the song has them.
+
+        The first group and the first version in view stay, or go back as far as it takes to be in range.
+        """
         self.groups, self.versions = tuple(groups), tuple(versions)
         self._name_w = max((Font.width(group.name) for group in self.groups), default=0)
         after = max((sum(theme.LIST_SPACE + theme.LIST_SQUARE + theme.GAP + Font.width(name)
                          for name, _ in group.channels) for group in self.groups), default=0)
         self._label = 2 * theme.PAD + self._name_w + after
+        self._settle()
+
+    def _settle(self) -> None:
+        """Keep the first group and the first version in view to what the table has room for, as `lay` keeps them."""
+        laid = self.laid
+        self.first_group, self.first_version = laid.first_group, laid.first_version
 
     def _place(self, kind: str, name: str) -> int | None:
-        """The place a group or a version has among those in view, by its name. None for one that is not in view."""
-        held, seen = (self.groups, self.laid.rows) if kind == "group" else (self.versions, self.laid.heads)
-        return next((at for at, found in enumerate(held[:len(seen)]) if found.name == name), None)
+        """The place a group or a version in view has among all there are, by its name. None for one not in view."""
+        laid = self.laid
+        held, first, seen = ((self.groups, laid.first_group, len(laid.rows)) if kind == "group"
+                             else (self.versions, laid.first_version, len(laid.heads)))
+        return next((at for at, found in enumerate(held[first:first + seen], first) if found.name == name), None)
 
     def cell(self, group: str, version: str) -> Rect:
         """The switch of a group and a version, by their names. One that is not in view has no width."""
@@ -235,17 +298,17 @@ class Table(Widget):
 
     def play(self, version: str) -> Rect:
         """The button that plays a version, by its name. One that is not in view has no width."""
-        at = self._place("version", version)
-        return (self.rect[0], self.rect[1], 0, 0) if at is None else head_parts(self.laid.heads[at])[0]
+        at, laid = self._place("version", version), self.laid
+        return (self.rect[0], self.rect[1], 0, 0) if at is None else head_parts(laid.heads[at - laid.first_version])[0]
 
     def name_rect(self, kind: str, name: str) -> Rect:
         """Where the name of a group or of a version is drawn, for a box to go over. The table for one not in view."""
-        at = self._place(kind, name)
+        at, laid = self._place(kind, name), self.laid
         if at is None:
             return self.rect
         if kind == "version":
-            return head_parts(self.laid.heads[at])[1]
-        x, y, _, _ = self.laid.rows[at]
+            return head_parts(laid.heads[at - laid.first_version])[1]
+        x, y, _, _ = laid.rows[at - laid.first_group]
         return x + theme.PAD, y, self._name_w, ROW_H - 1
 
     def _words(self, found: tuple | None) -> str:
@@ -256,19 +319,45 @@ class Table(Widget):
             return f"a new {found[1]}"
         if found[0] == "group":
             return f"group {self.groups[found[1]].name}: the right button renames it, removes it or picks its channels"
-        version = self.versions[found[-1]].name
+        version, _, ahead = self.versions[found[-1]]
         if found[0] == "play":
             return f"hear version {version} alone: the channels of its groups and no others"
         if found[0] == "version":
-            return f"version {version}: the right button renames or removes it"
+            mixed = f", premixed in {', '.join(map(key_text, ahead))}" if ahead else ""
+            return f"version {version}{mixed}: the right button renames or removes it, or premixes it in a key"
         return f"group {self.groups[found[1]].name} in version {version}: a click puts it in or takes it out"
 
-    def on(self, event: Event, ui: Ui) -> bool:
-        """Use a press of the left button on a switch or a button, and of the right one on a group or a heading."""
-        if event.kind in ("key", "text", "wheel"):
+    def _wheel(self, event: Event) -> bool:
+        """Move what is in view by the steps of the wheel, up being towards the first. Whether there was a use for it.
+
+        Over the headings it is the versions that move, by a column a step, and anywhere else the groups, by a
+        row. Where all of them are in view the wheel is not used, and is left to what lies under the table.
+        """
+        laid = self.laid
+        x, y, w, _ = self.rect
+        across = inside((x, y, w, ROW_H), event.pos)
+        count, seen = (len(self.versions), len(laid.heads)) if across else (len(self.groups), len(laid.rows))
+        if seen >= count:
             return False
+        if across:
+            self.first_version = laid.first_version - event.wheel
+        else:
+            self.first_group = laid.first_group - event.wheel
+        self._settle()
+        return True
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Use the wheel, a press of the left button on a switch or a button, and of the right one on a name.
+
+        The name is that of a group, or the heading of a version.
+        """
+        if event.kind in ("key", "text"):
+            return False
+        moved = event.kind == "wheel" and self._wheel(event)
         found = self._over = hit(self.laid, event.pos)
         self.help = self._words(found)
+        if event.kind == "wheel":
+            return moved
         if event.kind == "down" and event.button == 3:
             named = found is not None and found[0] in ("group", "version", "play")
             if named and self.asked is not None:
@@ -295,19 +384,24 @@ class Table(Widget):
             told(found[1] if found[0] == "add" else self.versions[found[1]].name)
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the headings with their buttons, the groups with their channels, the switches and the two buttons."""
+        """Draw the headings with their buttons, the groups with their channels, the switches and the two buttons.
+
+        They are those in view. Each way in which there are more has its small arrow.
+        """
         laid = self.laid
         over = self._over if self.hot else None
         down = over if self.held and over == self._pressed else None
+        groups = self.groups[laid.first_group:laid.first_group + len(laid.rows)]
+        versions = self.versions[laid.first_version:laid.first_version + len(laid.heads)]
         with canvas.clip(self.rect):
-            for at, (head, version) in enumerate(zip(laid.heads, self.versions)):
+            for at, (head, version) in enumerate(zip(laid.heads, versions), laid.first_version):
                 button, name = head_parts(head)
                 lit = version.name in self.heard
                 draw_button(canvas, button, icon="play", ink=theme.ACTIVE if lit else theme.TEXT,
                             hot=over == ("play", at), pressed=down == ("play", at),
                             strip=theme.ACTIVE if lit else None)
                 canvas.text_in(version.name, name, theme.TEXT)
-            for at, (row, group) in enumerate(zip(laid.rows, self.groups)):
+            for at, (row, group) in enumerate(zip(laid.rows, groups), laid.first_group):
                 x, y, w, h = row
                 canvas.box((x, y, w - 1, h - 1), theme.LIT if over == ("group", at) else theme.RAISED)
                 canvas.text_in(group.name, (x + theme.PAD, y, self._name_w, h - 1), theme.TEXT)
@@ -320,13 +414,21 @@ class Table(Widget):
                         left += theme.LIST_SQUARE + theme.GAP
                         canvas.text_in(name, (left, y, Font.width(name), h - 1), theme.DIM)
                         left += Font.width(name)
-                for to, version in enumerate(self.versions[:len(laid.heads)]):
+                for to, version in enumerate(versions, laid.first_version):
                     box = cell(laid, at, to)
                     canvas.box(box, theme.ACTIVE if group.name in version.groups else theme.BACKGROUND)
                     canvas.frame(box, theme.TEXT if over == ("cell", at, to) else theme.LINE)
             for kind, button in (("version", laid.add_version), ("group", laid.add_group)):
                 if button[2] > 0:
                     draw_button(canvas, button, icon="plus", hot=over == ("add", kind), pressed=down == ("add", kind))
+            for way, (x, y) in more(laid, len(self.groups), len(self.versions)).items():
+                # The arrow widens from its tip, against the way it points.
+                back = -1 if way in ("right", "down") else 1
+                for step in range(theme.ARROW):
+                    if way in ("left", "right"):
+                        canvas.vline(x + back * step, y - step, 2 * step + 1, theme.DIM)
+                    else:
+                        canvas.hline(x - step, y + back * step, 2 * step + 1, theme.DIM)
 
 
 class Picture(Widget):
@@ -431,7 +533,9 @@ class Layers:
     A song with layers has `table`: its groups against its versions, with a switch for each pair. The buttons
     after the last heading and under the last group add a version and a group. The right button on either
     opens a menu to name it anew or remove it, and for a group to pick its channels from those of the song: a
-    channel is in one group, so one that is picked leaves the group it was in.
+    channel is in one group, so one that is picked leaves the group it was in. The menu of a version has each
+    key of the song as well, to have the version premixed in it: one more file at the build. Groups and
+    versions the table has no room for are brought into view by the wheel.
 
     The button in the heading of a version has that version heard alone: the channels of its groups are the
     soloed channels of the session, so it is the sound the solos of the mixer give, with nothing rendered
@@ -556,7 +660,9 @@ class Layers:
             colours = {name: theme.CHANNELS[place % len(theme.CHANNELS)] for place, name in enumerate(song["channels"])}
             groups = [Group(name, tuple((channel, colours[channel]) for channel in members))
                       for name, members in layers["groups"].items()]
-            versions = [Version(name, frozenset(named)) for name, named in layers["versions"].items()]
+            ahead = layers.get("premix", [])
+            versions = [Version(name, frozenset(named), tuple(mix["key"] for mix in ahead if mix["version"] == name))
+                        for name, named in layers["versions"].items()]
             self._channels = {name: frozenset(channel for group in named for channel in layers["groups"][group])
                               for name, named in layers["versions"].items()}
             self._keys = layeredit.keys(song)
@@ -683,14 +789,31 @@ class Layers:
         self._ui.open(Menu(items, at, chosen=lambda act: act()))
 
     def _ask(self, kind: str, name: str, at: Pos) -> None:
-        """Open the menu of a group or of a version, at the mouse. The only one of its kind cannot be removed."""
+        """Open the menu of a group or of a version, at the mouse. The only one of its kind cannot be removed.
+
+        The menu of a version has an item for each key of the song after that, with a tick before it where
+        the version is premixed in that key: the build then writes one more file, that version in that key
+        already mixed. One that is chosen is put in where it was out, and taken out where it was in.
+        """
         several = len(self.table.groups if kind == "group" else self.table.versions) > 1
         items: list[Item | None] = [Item("Rename...", lambda: self._rename(kind, name))]
         if kind == "group":
             items.append(Item("Channels...", lambda: self._pick(name, at)))
         items += [None, Item("Remove", lambda: self._change(lambda song: _REMOVED[kind](song, name),
                                                             f"{kind} {name} removed"), enabled=several)]
+        if kind == "version":
+            ahead = next((version.premix for version in self.table.versions if version.name == name), ())
+            items += [None, *(Item(f"premix in {key_text(key)}", lambda key=key: self._premix(name, key),
+                                   "tick" if key in ahead else "") for key in self._keys)]
         self._menu(items, at)
+
+    def _premix(self, version: str, key: int) -> None:
+        """Save the song with a version premixed in a key where the file has it not, and not where it has it."""
+        def words(made: dict) -> str:
+            on = {"version": version, "key": key} in made["layers"].get("premix", [])
+            return f"premix of {version} in {key_text(key)} {'on' if on else 'off'}"
+
+        self._change(lambda song: layeredit.premixed(song, version, key), words)
 
     def _rename(self, kind: str, old: str) -> None:
         """Open a box over the name of a group or of a version: enter gives it that name everywhere."""

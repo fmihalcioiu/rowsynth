@@ -182,9 +182,19 @@ class ChordsTest(unittest.TestCase):
         self.assertEqual(self.refusal_of(tune_of({"lead": "o4 l4 c e g c", "bass": "o2 l2 c z"}, ["C"])),
                          'songs.tune.patterns.a.bass: cannot read "z" in a channel')
 
-    def test_a_bar_that_names_no_chord_is_refused_with_its_place_in_chords(self):
-        self.assertEqual(self.refusal_of(tune_of({"lead": "o4 l1 c c"}, ["C", " "])),
-                         "songs.tune.chords.a[1]: names no chord")
+    def test_a_bar_whose_string_names_no_chord_has_none_and_its_notes_are_passed_over(self):
+        # Every note of the second bar would be off the chord before it and the one after it.
+        lead = "o4 l4 a > c e c | < c+ d+ f+ g+ | c e g c"
+        for empty in ("", "  "):
+            self.assertEqual(found_in({"lead": lead}, ["Am", empty, "C"]), [])
+        # The string still counts as that of a bar, and a wrong note in the bar after it is found in that bar.
+        self.assertEqual(found_in({"lead": "o4 l1 a d d"}, ["Am", "", "C"]), [off("d", 3, "C")])
+
+    def test_the_rows_of_a_bar_whose_string_names_no_chord_are_under_none(self):
+        written = ["Am", " ", "C"]
+        self.assertEqual([chords.under(CHORDS, written, row, 16, "here") for row in (15.0, 16.0, 31.0, 32.0, 48.0)],
+                         [(0, "Am"), None, None, (2, "C"), None])
+        self.assertIsNone(chords.breach(CHORDS, written, 16.0, 61, 4, 16, "here"))
 
     def test_a_chord_the_project_does_not_have_is_refused_by_name(self):
         # Loading lets no such chord through, so this one is taken away by hand.
