@@ -236,6 +236,34 @@ class ChangeFile(unittest.TestCase):
                 self.assertEqual(str(refused.exception), message)
                 self.assertEqual(self.path.read_bytes(), written)
 
+    def test_a_channel_text_that_cannot_be_read_is_refused_and_the_bytes_of_the_file_are_as_they_were(self) -> None:
+        written = self.path.read_bytes()
+        for value, message in (
+            ("o5 zz", "songs.tune: pattern 'a', channel 'lead': cannot read \"zz\" in a channel"),
+            ("o9 >>>>> c", "songs.tune: pattern 'a', channel 'lead': the note at row 0 is 180, and a note is "
+                           "from -97 to 136"),
+        ):
+            with self.subTest(value=value):
+                with self.assertRaises(RowSynthError) as refused:
+                    change_file(self.path, "songs.tune.patterns.a.lead", value)
+                self.assertEqual(str(refused.exception), message)
+                self.assertEqual(self.path.read_bytes(), written)
+
+    def test_a_song_that_could_not_be_read_before_a_change_can_still_be_changed(self) -> None:
+        # Two faults written by hand: the file loads, and neither channel can be read.
+        data = self.held()
+        data["songs"]["tune"]["patterns"]["a"].update(lead="o5 zz", bass="o2 yy")
+        self.path.write_text(json.dumps(data), encoding="utf-8")
+        change_file(self.path, "songs.tune.patterns.a.lead", "o5 c1")
+        self.assertEqual(self.held()["songs"]["tune"]["patterns"]["a"]["lead"], "o5 c1")
+        # A pattern the order leaves out is read as well.
+        change_file(self.path, "songs.tune.patterns.a.bass", "o2 c1")
+        change_file(self.path, "songs.tune.patterns.spare", {"lead": "o5 c1"})
+        with self.assertRaises(RowSynthError) as refused:
+            change_file(self.path, "songs.tune.patterns.spare.lead", "o5 zz")
+        self.assertEqual(str(refused.exception),
+                         "songs.tune: pattern 'spare', channel 'lead': cannot read \"zz\" in a channel")
+
     def test_a_value_that_is_what_the_file_holds_is_not_written_and_the_answer_says_so(self) -> None:
         # The file is given a time long past, so that any writing of it would show.
         os.utime(self.path, ns=(10 ** 18, 10 ** 18))

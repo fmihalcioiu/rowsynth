@@ -855,6 +855,10 @@ class Render(CommandLineCase):
         self.assertEqual(self.refusal("tap", "--stems"), "error: --stems is for a song, and 'tap' is a sound\n")
 
 
+# A place in the file `Set.noted` saves that takes any text.
+NOTE = "sounds.tap.meta.note"
+
+
 class Set(CommandLineCase):
     def set(self, *typed: str) -> int:
         """What main returns for a set on a project file holding PROJECT. `typed` goes straight after the file."""
@@ -872,6 +876,15 @@ class Set(CommandLineCase):
         self.assertEqual(self.out.getvalue(), "")
         self.assertEqual(path.read_bytes(), written)
         return self.err.getvalue()
+
+    def noted(self) -> Path:
+        """A project file holding PROJECT with a note among what its first sound says of itself, at `NOTE`.
+
+        A channel's text has to be a line that can be read. The note is a place that takes any text.
+        """
+        data = json.loads(json.dumps(PROJECT))
+        data["sounds"]["tap"]["meta"] = {"note": "a tap"}
+        return self.saved(data)
 
     def test_a_value_that_is_json_is_set_as_what_it_reads_as_and_the_change_is_printed(self) -> None:
         self.assertEqual(self.set("instruments.pipe.vol", "[12, 9, 5]"), 0)
@@ -892,16 +905,17 @@ class Set(CommandLineCase):
         expected["songs"]["sting"]["patterns"]["x"]["one"] = text
         self.assertEqual(json.dumps(self.held()), json.dumps(expected))
         # Python alone reads NaN as a number. JSON has no such number, so it is text.
-        self.assertEqual(self.set(where, "NaN"), 0)
-        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["one"], "NaN")
+        self.assertEqual(self.run_main("set", str(self.noted()), NOTE, "NaN"), 0)
+        self.assertEqual(self.held()["sounds"]["tap"]["meta"]["note"], "NaN")
 
     def test_text_takes_a_value_as_text_whatever_it_looks_like(self) -> None:
         where = "songs.sting.patterns.x.one"
         # Read as JSON, 16 is a number, which the text of a channel cannot be.
         self.assertEqual(self.refusal(where, "16"), f"error: {where}: must be a string\n")
-        self.assertEqual(self.set(where, "16", "--text"), 0)
+        # In a place that takes any text, 16 is a number without --text and the text 16 with it.
+        self.assertEqual(self.run_main("set", str(self.noted()), NOTE, "16", "--text"), 0)
         self.assertEqual(json.loads(self.out.getvalue())["now"], "16")
-        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["one"], "16")
+        self.assertEqual(self.held()["sounds"]["tap"]["meta"]["note"], "16")
 
     def test_from_reads_the_value_from_a_file_as_json_or_as_text_without_the_line_ends_it_closes_with(self) -> None:
         source = self.folder / "value.txt"
@@ -914,8 +928,8 @@ class Set(CommandLineCase):
         self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["under"], "o2 l2 c > c8 < | &")
         # With --text, what a file holds is text even when it is JSON.
         source.write_text("8\n", encoding="utf-8")
-        self.assertEqual(self.set("songs.sting.patterns.x.under", "--from", str(source), "--text"), 0)
-        self.assertEqual(self.held()["songs"]["sting"]["patterns"]["x"]["under"], "8")
+        self.assertEqual(self.run_main("set", str(self.noted()), NOTE, "--from", str(source), "--text"), 0)
+        self.assertEqual(self.held()["sounds"]["tap"]["meta"]["note"], "8")
 
     def test_from_a_dash_reads_the_value_from_standard_input_as_utf_8_whatever_the_stream_is_set_to(self) -> None:
         with mock.patch("sys.stdin", io.StringIO('["turn", "verse"]\n')):

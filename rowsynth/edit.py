@@ -10,6 +10,7 @@ from typing import NoReturn
 
 from .errors import RowSynthError
 from .project import Project
+from .song import lay
 
 _NAME = re.compile(r"[^.\[\]]+")
 _NUMBER = re.compile(r"[0-9]+")
@@ -140,6 +141,35 @@ def _same(one: object, other: object) -> bool:
     return json.dumps(one) == json.dumps(other)
 
 
+def _unread(project: Project, name: str) -> str | None:
+    """Why the text of a song of a project cannot be read, in the words of the reading. None where it can.
+
+    Every pattern the song has is read, those its order leaves out as well.
+    """
+    song = project.song(name)
+    try:
+        lay({**song, "order": list(song["patterns"])})
+    except RowSynthError as error:
+        return str(error)
+    return None
+
+
+def _readable(old: Project, new: Project) -> None:
+    """Refuse a change that leaves a song with text that cannot be read, where it could be read before.
+
+    Loading takes the text of a channel as it is, so this is asked of the songs a change touched. A song that
+    could not be read before the change can still be changed, so that a file with several faults in it can
+    be mended one at a time.
+    """
+    for name, song in new.songs.items():
+        was = old.songs.get(name)
+        if song == was:
+            continue
+        why = _unread(new, name)
+        if why is not None and (was is None or _unread(old, name) is None):
+            raise RowSynthError(f"songs.{name}: {why}")
+
+
 def change_file_many(path: str | Path, changes: Iterable[tuple[str, object]]) -> list[dict]:
     """Make several changes to the project file at `path` as one, and save the file when the project then holds.
 
@@ -148,13 +178,15 @@ def change_file_many(path: str | Path, changes: Iterable[tuple[str, object]]) ->
     project is checked once, whole, after the last of them. So things that name one another can be changed
     together, where each change alone would leave the project wrong: an instrument under another name, and the
     song that plays it. The file is saved once. Where a place leads nowhere or the check refuses the project,
-    that is refused in its own words and nothing is written.
+    that is refused in its own words and nothing is written. So is a change that leaves a song with a channel
+    text that cannot be read, or with a note no instrument can play, where the song could be read before.
 
     The answer has for each change what `change_file` tells of one: {"file", "where", "was", "now"}, with "was"
     what was there as that change was made. A value that is what was there already has "same": true, and
     where every change is so, the file is not written.
     """
-    data = Project.load(path).to_dict()
+    held = Project.load(path)
+    data = held.to_dict()
     told = []
     for where, value in changes:
         one = {"file": str(path), "where": where}
@@ -170,7 +202,9 @@ def change_file_many(path: str | Path, changes: Iterable[tuple[str, object]]) ->
                 one["same"] = True
         told.append(one)
     if not all(one.get("same") for one in told):
-        Project.from_dict(data).save(path)
+        made = Project.from_dict(data)
+        _readable(held, made)
+        made.save(path)
     return told
 
 

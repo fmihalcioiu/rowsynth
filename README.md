@@ -779,7 +779,17 @@ python -m rowsynth set tune.json songs.tune.channels.bass.inst organ
 error: songs.tune.channels.bass.inst: no instrument named 'organ'
 ```
 
-Loading does not read the text of a channel, and it runs none of the rules. A line that is misspelt or a bar short is written all the same. `check` then stops on the first with `error:`, and reports the second under `rows`.
+`set` also reads the text of every song it changed, which loading does not. A line that cannot be read is refused in the same way, and so is a note that no instrument can play:
+
+```
+python -m rowsynth set tune.json songs.tune.patterns.a.lead "o5 zz"
+```
+
+```
+error: songs.tune: pattern 'a', channel 'lead': cannot read "zz" in a channel
+```
+
+A song that could not be read before the change can still be changed, so a file with several faults is mended one at a time. `set` runs none of the rules: a line that is a bar short is written, and `check` reports it under `rows`.
 
 `set` writes the file in one layout, the one the window saves in and the examples are kept in. Each entry of the four tables starts a line. A song is opened out, and so are its `instruments`, `drums`, `channels`, `patterns` and `layers`, one entry a line, and each pattern, one channel's text a line. Anything else is on one line when it ends by column 110, and is opened out one key or item a line when it does not. A text is never broken, and keys keep their order. So a change to one channel of one pattern changes one line of the file, and each of the four changes above is one line in a diff. A file that was in another layout is put into this one by the first change. The text goes to a temporary file that takes the place of the old one in one move, so a program that reads the file meanwhile gets the old text or the new, never half of one.
 
@@ -953,7 +963,7 @@ rowsynth.save_wav("out/tune.wav", [tune["left"], tune["right"]])
 
 Samples are float32 NumPy arrays. The renderers work at 44100 samples a second unless they are given a `rate`. `build` and `write_page` do what the `build` and `page` commands do, at 48000 unless they are given another, and they take the format as `fmt`. `load_wav` reads a 16-bit WAV file back, and `save_audio` in `rowsynth.encode` writes samples in any of the formats. Whatever the package refuses, it refuses with a `RowSynthError`.
 
-`change_file` in `rowsynth.edit` is what the `set` command calls, and what the window saves with. It reads the file, puts a value at a place, checks the project as loading does and writes the file, or refuses and writes nothing. Its answer is the dict that `set` prints, and `delete=True` in place of a value takes out what is there. `change_file_many` makes several changes as one, checked once after the last, for things that name one another:
+`change_file` in `rowsynth.edit` is what the `set` command calls, and what the window saves with. It reads the file, puts a value at a place, checks the project as loading does, reads the text of the songs it changed, and writes the file, or refuses and writes nothing. Its answer is the dict that `set` prints, and `delete=True` in place of a value takes out what is there. `change_file_many` makes several changes as one, checked once after the last, for things that name one another:
 
 ```python
 from rowsynth.edit import change_file, change_file_many

@@ -193,7 +193,7 @@ Why `set`, and not the file written again:
 - The file is written whole or not at all. The text goes to a temporary file that takes the old one's place in one move, so nothing that reads the file gets half of it.
 - It writes one tidy layout, with each channel of each pattern on a line of its own. One value changed is one line of a diff, which a person can read.
 
-`set` checks what loading checks: the keys, the kinds of the values, and that every name points at something. It does not read song text and it runs none of the rules, so a channel that is a bar short is written without a word. Run `check` after every `set` that touches notes.
+`set` checks what loading checks: the keys, the kinds of the values, and that every name points at something. It also reads the text of every song it changed, so a channel text that cannot be read is refused. It runs none of the rules, so a channel that is a bar short is written without a word. Run `check` after every `set` that touches notes.
 
 Write a whole file when it is new. For anything else, make the changes one `set` at a time.
 
