@@ -1,16 +1,18 @@
-"""Tests for rowsynth.gui.strips: where small notes go, the sums of the song strip, its pick and view, its drawing."""
+"""Tests for rowsynth.gui.strips: small notes, the sums of the song strip, its pick, view and order, its drawing."""
 from __future__ import annotations
 
 import os
 import unittest
+from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, songview, sprites, theme
+from rowsynth.gui import layout, songedit, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.songview import Block, Note
-from rowsynth.gui.strips import BAR_H, NAME_H, ROW_W_MIN, WHEEL_PX, Map, SongStrip, places, small
+from rowsynth.gui.strips import (BAR_H, DOUBLE, EDGE_PX, EDGE_W, NAME_H, ROW_W_MIN, SLACK, WHEEL_PX, Map, SongStrip,
+                                 places, small)
 from rowsynth.gui.ui import Event, Ui, share
 from rowsynth.project import Project
 
@@ -30,11 +32,15 @@ NEEDS = "pygame is not installed"
 SMALL = (10, 20, 64, 9)
 #: A strip whose blocks are 54 high, over the line of the picked one at y 74 and the bar at y 77.
 RECT = (10, 20, 320, 60)
-#: The strip the examples are shown in.
+#: The strip the examples are shown in, and one that the trailer piece does not fit: it is 528 rows long.
 WIDE = (10, 20, 660, 60)
+NARROW = (10, 20, 200, 60)
 #: The surface a strip is drawn on, which is larger than it on every side, and the colour of what is not its.
 SIZE = (340, 100)
 OUTSIDE = theme.GOOD
+#: What the help line says on a block, after the name of its pattern.
+PRESS = "ctrl to copy; right button for more"
+CTRL = frozenset({"ctrl"})
 
 INSTRUMENTS = {"lead": {"vol": 12}, "bass": {"wave": "tri"}, "thud": {"wave": "noise"}}
 DRUMS = {"k": {"inst": "thud", "note": "c2"}, "h": {"inst": "thud", "note": "c6"}}
@@ -54,6 +60,25 @@ def song(*order: str, **patterns: dict) -> dict:
     return {"row_ticks": 6, "instruments": INSTRUMENTS, "drums": DRUMS,
             "channels": {"lead": {"inst": "lead"}, "low": {"inst": "bass"}, "kit": {"inst": "thud", "drums": True}},
             "patterns": {**PATTERNS, **patterns}, "order": list(order)}
+
+
+#: A song of four patterns of unequal length: two bars, one bar, a bar and a half, and half a bar. Its blocks in a
+#: strip 320 wide are 4 pixels to the row, and its gaps are at x 10, 137, 201, 297 and 329.
+FOUR = song("a", "b", "c", "d", d={"lead": "o4 l4 c c"})
+FOUR_BLOCKS = (Block("a", 0.0, 32.0), Block("b", 32.0, 16.0), Block("c", 48.0, 24.0), Block("d", 72.0, 8.0))
+FOUR_GAPS = (10, 137, 201, 297, 329)
+#: The place each block of four is at after a move to each of the five gaps, and None where it stays.
+TO = ((None, None, 1, 2, 3), (0, None, None, 2, 3), (0, 1, None, None, 3), (0, 1, 2, None, None))
+
+
+def put(order: Sequence[str], place: int, gap: int, copy: str = "") -> list[str]:
+    """The order that a line in a gap promises: the block of a place stands in the gap, and the rest as they were.
+
+    With `copy`, the block stays where it is, and a pattern of that name stands in the gap.
+    """
+    rest = [(index, name) for index, name in enumerate(order) if copy or index != place]
+    return ([name for index, name in rest if index < gap] + [copy or order[place]]
+            + [name for index, name in rest if index >= gap])
 
 
 def note(row: float, rows: float, pitch: float) -> Note:
@@ -190,6 +215,47 @@ class Sums(unittest.TestCase):
         self.assertEqual(seen.lanes(0, 0), [])
         self.assertEqual([height for _, _, _, height in Map((10, 20, 320, 12), BLOCKS, 80.0).lanes(0, 3)], [0, 0, 0])
 
+    def test_a_gap_is_at_the_pixel_left_free_before_its_block_and_the_first_at_the_start_of_the_song(self) -> None:
+        seen = Map(RECT, FOUR_BLOCKS, 80.0)
+        # Four blocks have five gaps. The last is at the pixel left free after the last block.
+        self.assertEqual(tuple(seen.gap_x(gap) for gap in range(5)), FOUR_GAPS)
+        self.assertEqual([seen.block(index)[0] for index in range(4)], [10, 138, 202, 298])
+        # They go with the view, also out of it.
+        moved = Map(RECT, LONG, 1280.0).scrolled(100)
+        self.assertEqual([moved.gap_x(gap) for gap in (0, 3, 4, 40)], [-90, 5, 37, 1189])
+        # A strip with no song has the one gap, at its left edge.
+        self.assertEqual(Map(RECT).gap_x(0), 10)
+        # The square of the plus is at the top of the line and in the middle of it, and at an end of the strip
+        # beside it.
+        self.assertEqual([seen.plus(gap) for gap in range(5)],
+                         [(10, 20, 7, 7), (134, 20, 7, 7), (198, 20, 7, 7), (294, 20, 7, 7), (323, 20, 7, 7)])
+        self.assertEqual([moved.plus(gap) for gap in (3, 4)], [(10, 20, 7, 7), (34, 20, 7, 7)])
+
+    def test_the_gap_nearest_a_position_is_found_by_its_x_and_of_two_that_are_as_near_it_is_the_earlier(self) -> None:
+        seen = Map(RECT, FOUR_BLOCKS, 80.0)
+        # The left half of a block is nearest the gap before it, and so is its middle pixel: 73, 169, 249 and 313.
+        self.assertEqual([seen.gap_at((x, 40)) for x in (10, 73, 74, 137, 169, 170, 249, 250, 313, 314, 329)],
+                         [0, 0, 1, 1, 1, 2, 2, 3, 3, 4, 4])
+        # How high the position is makes no difference, and one off the strip to a side is taken for its edge.
+        self.assertEqual([seen.gap_at(pos) for pos in ((170, -500), (170, 900), (-50, 40), (900, 40))], [2, 2, 0, 4])
+        # In a view that has moved, the gaps are at x 5, 37 and so on to 325: none far out of view is found.
+        moved = Map(RECT, LONG, 1280.0).scrolled(100)
+        self.assertEqual([moved.gap_at((x, 40)) for x in (-500, 10, 21, 22, 329, 900)], [3, 3, 3, 4, 13, 13])
+        self.assertEqual(Map(RECT).gap_at((200, 40)), 0)
+
+    def test_to_is_the_place_a_block_is_at_after_it_is_moved_to_a_gap_and_none_where_it_stays(self) -> None:
+        self.assertEqual(tuple(tuple(Map.to(place, gap) for gap in range(5)) for place in range(4)), TO)
+        # It is the same of a map as of the class, whatever the map holds.
+        self.assertEqual((Map(RECT).to(2, 0), Map(RECT, LONG, 1280.0).to(7, 30)), (0, 29))
+
+    def test_the_rectangle_of_a_name_is_the_band_of_its_block_less_what_is_kept_free_at_its_sides(self) -> None:
+        seen = Map(RECT, FOUR_BLOCKS, 80.0)
+        self.assertEqual([seen.name_rect(index) for index in range(4)],
+                         [(14, 20, 119, 11), (142, 20, 55, 11), (206, 20, 87, 11), (302, 20, 23, 11)])
+        self.assertEqual(seen.name_rect(1)[3], NAME_H)
+        # A block too narrow for what is kept free has a rectangle with no width.
+        self.assertEqual(Map(RECT, (Block("a", 0.0, 1.0), Block("b", 1.0, 79.0)), 80.0).name_rect(0), (14, 20, 0, 11))
+
 
 class Strip(unittest.TestCase):
     def setUp(self) -> None:
@@ -219,8 +285,8 @@ class Strip(unittest.TestCase):
         # It tells also when the block was picked already.
         self.press((150, 70))
         self.assertEqual(self.picks, [1, 1])
-        # Between two blocks, under them, and with another button, nothing is picked.
-        self.assertEqual([self.press((137, 40)), self.press((250, 75)), self.press((250, 40), button=3)], [False] * 3)
+        # Between two blocks, under them, and with the middle button, nothing is picked.
+        self.assertEqual([self.press((137, 40)), self.press((250, 75)), self.press((250, 40), button=2)], [False] * 3)
         self.assertEqual((self.strip.picked, self.picks), (1, [1, 1]))
         for key in ("left", "right"):
             self.assertFalse(self.ui.handle(Event("key", key=key)))
@@ -287,18 +353,22 @@ class Strip(unittest.TestCase):
                          [3, 3, None, 4, 13])
         self.assertIsNone(SongStrip(RECT).block_at((50, 40)))
 
-    def test_the_help_line_says_which_block_the_mouse_is_on_its_bars_and_its_place_in_the_order(self) -> None:
+    def test_the_help_line_says_what_a_press_on_the_block_under_the_mouse_would_do(self) -> None:
         self.assertEqual((self.strip.help, self.ui.help), ("the song", ""))
-        for pos, line in (((20, 30), "a, 2 bars, 1 of 3"), ((150, 40), "b, 1 bar, 2 of 3"),
-                          ((300, 73), "a, 2 bars, 3 of 3"), ((137, 40), "the song"), ((150, 75), "the song")):
+        for pos, line in (((20, 30), f"drag to move a, {PRESS}"), ((150, 40), f"drag to move b, {PRESS}"),
+                          ((300, 73), "drag to move a, ctrl to copy; right button for more"),
+                          ((137, 40), "the song"), ((150, 75), "the song")):
             self.ui.handle(Event("move", pos))
             self.assertEqual(self.ui.help, line)
-        # A pattern of a bar and a half, which ends at x 145.
-        self.strip.show(song("c", "a"))
-        self.ui.handle(Event("move", (145, 40)))
-        self.assertEqual(self.ui.help, "c, 1.5 bars, 1 of 2")
+        # While a press on a block is under way the line is that block's, whatever the mouse is on.
+        self.ui.handle(Event("down", (150, 40), button=1))
+        for pos in ((300, 40), (137, 40)):
+            self.ui.handle(Event("move", pos))
+            self.assertEqual(self.ui.help, f"drag to move b, {PRESS}")
+        self.ui.handle(Event("up", (137, 40), button=1))
+        self.assertEqual(self.ui.help, "the song")
         self.strip.help = "another line"
-        self.ui.handle(Event("move", (146, 40)))
+        self.ui.handle(Event("move", (137, 40)))
         self.assertEqual(self.ui.help, "another line")
 
     def test_the_same_song_shown_again_keeps_the_pick_and_the_view_and_another_song_starts_anew(self) -> None:
@@ -326,6 +396,328 @@ class Strip(unittest.TestCase):
         # A song with nothing in its order has no block to pick.
         self.strip.show(song())
         self.assertEqual((self.state(), self.strip.map.blocks), ((None, 0), ()))
+
+
+class Hand(unittest.TestCase):
+    def setUp(self) -> None:
+        self.told: list[tuple] = []
+        self.now = 0.0
+        self.ui = Ui()
+        self.strip = self.ui.add(SongStrip(RECT, self.tell("changed"), "the song", self.tell("moved"),
+                                           self.tell("copied"), self.tell("asked"), self.tell("named"),
+                                           lambda: self.now))
+        self.strip.show(FOUR)
+
+    def tell(self, what: str) -> Callable[..., None]:
+        """A function for the strip to call, which notes that it was called, and what with."""
+        return lambda *more: self.told.append((what, *more))
+
+    def down(self, pos: tuple[int, int], button: int = 1, mods: frozenset[str] = frozenset()) -> bool:
+        """Press a button of the mouse at a position. Whether the press was used."""
+        return self.ui.handle(Event("down", pos, button=button, mods=mods))
+
+    def move(self, pos: tuple[int, int], mods: frozenset[str] = frozenset()) -> None:
+        """Take the mouse to a position."""
+        self.ui.handle(Event("move", pos, mods=mods))
+
+    def up(self, pos: tuple[int, int], button: int = 1, mods: frozenset[str] = frozenset()) -> None:
+        """Let a button of the mouse go at a position."""
+        self.ui.handle(Event("up", pos, button=button, mods=mods))
+
+    def click(self, pos: tuple[int, int], button: int = 1) -> bool:
+        """Press a button of the mouse at a position and let it go. Whether the press was used."""
+        used = self.down(pos, button)
+        self.up(pos, button)
+        return used
+
+    def carry(self, start: tuple[int, int], end: tuple[int, int], mods: frozenset[str] = frozenset()) -> list[tuple]:
+        """Press the left button at a position, take the mouse to another with some keys held, and let go there.
+
+        What the strip told of it, the pick left out.
+        """
+        self.told.clear()
+        self.down(start)
+        self.move(end, mods)
+        self.up(end, mods=mods)
+        return [told for told in self.told if told[0] != "changed"]
+
+    def piece(self, rect: layout.Rect) -> dict:
+        """Show the song of the trailer piece in a strip of a rectangle, and give the song."""
+        made = Project.load(EXAMPLES / "piece.json").song("piece")
+        self.strip.rect = rect
+        self.strip.show(made)
+        return made
+
+    def test_a_block_dragged_to_a_gap_is_told_as_moved_to_the_place_that_songedit_puts_it_at(self) -> None:
+        order, seen = FOUR["order"], self.strip.map
+        for place in range(4):
+            x, _, w, _ = seen.block(place)
+            for gap, to in enumerate(TO[place]):
+                self.told.clear()
+                self.down((x + w // 2, 50))
+                # How far the mouse is under the strip makes no difference.
+                self.move((FOUR_GAPS[gap], 90))
+                # The line is in the gap, and there is none where the block would land at the place it has.
+                self.assertEqual((self.strip.lifted, self.strip.gap), (place, None if to is None else gap))
+                self.up((FOUR_GAPS[gap], 90))
+                self.assertEqual(self.told, [("changed", place)] + ([] if to is None else [("moved", place, to)]))
+                self.assertEqual((self.strip.busy, self.strip.lifted, self.strip.gap), (False, None, None))
+                # What the strip told gives, with `songedit.moved`, the order that the line promised.
+                made = order if to is None else songedit.moved(FOUR, *self.told[-1][1:])["order"]
+                self.assertEqual(made, put(order, place, gap))
+
+    def test_drop_of_the_trailer_piece_is_carried_to_between_hits_and_grow_and_its_first_block_to_its_end(self) -> None:
+        made = self.piece(WIDE)
+        order, seen = made["order"], self.strip.map
+        self.assertEqual((seen.block(5), seen.gap_x(2), seen.gap_x(9)), ((390, 20, 79, 54), 89, 669))
+        self.assertEqual(self.carry((430, 50), (92, 50)), [("moved", 5, 2)])
+        self.assertEqual(songedit.moved(made, 5, 2)["order"],
+                         ["cold", "hits", "drop", "grow", "tune", "rise", "band", "riff", "end"])
+        # The first block to the gap after the last one, and the last block to the gap before the first.
+        self.assertEqual((self.carry((20, 50), (669, 50)), self.carry((660, 50), (10, 50))),
+                         ([("moved", 0, 8)], [("moved", 8, 0)]))
+        for place, to, gap in ((5, 2, 2), (0, 8, 9), (8, 0, 0)):
+            self.assertEqual(songedit.moved(made, place, to)["order"], put(order, place, gap))
+
+    def test_a_block_carried_back_to_its_own_place_is_not_told_of(self) -> None:
+        self.down((250, 50))
+        self.move((40, 50))
+        self.assertEqual((self.strip.lifted, self.strip.gap), (2, 0))
+        # Back where it was pressed it is still picked up, and no line shows.
+        self.move((250, 50))
+        self.assertEqual((self.strip.lifted, self.strip.gap), (2, None))
+        self.up((250, 50))
+        self.assertEqual(self.told, [("changed", 2)])
+        # Its own place reaches over the nearer half of the block on each side of it: from x 170 to 313.
+        self.assertEqual([self.carry((250, 50), (x, 50)) for x in (169, 170, 313, 314)],
+                         [[("moved", 2, 1)], [], [], [("moved", 2, 3)]])
+
+    def test_a_press_that_stays_within_the_slack_is_a_click_and_only_picks(self) -> None:
+        self.assertEqual((self.strip.picked, SLACK), (0, 3))
+        self.down((250, 50))
+        self.move((247, 50))
+        self.assertEqual((self.strip.picked, self.strip.busy, self.strip.lifted), (2, True, None))
+        self.up((247, 50))
+        self.assertEqual(self.told, [("changed", 2)])
+        # With ctrl held a block that is picked up is copied wherever it is let go, and one within the slack is not.
+        self.assertEqual([self.carry((250, 50), (x, 50), CTRL) for x in (253, 254, 247, 246)],
+                         [[], [("copied", 2, 3)], [], [("copied", 2, 2)]])
+        # Up and down is not along the strip: however far, it picks nothing up.
+        self.assertEqual(self.carry((250, 50), (253, 500), CTRL), [])
+
+    def test_with_ctrl_held_at_the_release_the_block_is_told_as_copied_to_the_gap_and_not_as_moved(self) -> None:
+        order = FOUR["order"]
+        for gap, x in enumerate(FOUR_GAPS):
+            # The gap before the block and the one after it take a copy as any other does.
+            self.assertEqual(self.carry((170, 50), (x, 50), CTRL), [("copied", 1, gap)])
+            # `songedit.copied` puts the copy right after the block, at place 2, and `songedit.moved` takes it on.
+            self.assertEqual(songedit.moved(songedit.copied(FOUR, 1), 2, gap)["order"], put(order, 1, gap, "b2"))
+        # Ctrl is asked for at the release. Held on the way and let go, the block is moved.
+        self.told.clear()
+        self.down((170, 50))
+        self.move((297, 50), CTRL)
+        self.assertEqual(self.strip.gap, 3)
+        self.up((297, 50))
+        self.assertEqual(self.told, [("changed", 1), ("moved", 1, 2)])
+        # Held only at the release, it is copied.
+        self.told.clear()
+        self.down((170, 50))
+        self.move((297, 50))
+        self.up((297, 50), mods=CTRL)
+        self.assertEqual(self.told, [("changed", 1), ("copied", 1, 3)])
+
+    def test_escape_drops_the_press_and_its_release_then_tells_nothing(self) -> None:
+        self.down((250, 50))
+        self.move((40, 50))
+        # The strip has the focus from the press, so the Ui hands it the key.
+        self.assertTrue(self.ui.handle(Event("key", key="escape")))
+        self.assertEqual((self.strip.busy, self.strip.lifted, self.strip.gap), (False, None, None))
+        self.move((60, 50))
+        self.up((60, 50))
+        self.assertEqual(self.told, [("changed", 2)])
+        # Handed in by the owner it does the same, also with ctrl held for a copy.
+        self.down((250, 50))
+        self.move((40, 50), CTRL)
+        self.assertTrue(self.strip.key(Event("key", key="escape", mods=CTRL)))
+        self.up((40, 50), mods=CTRL)
+        self.assertEqual(self.told, [("changed", 2), ("changed", 2)])
+        # With no press under way escape is not the strip's, and while a block is carried no other key is.
+        self.assertEqual([self.strip.key(Event("key", key="escape")), self.ui.handle(Event("key", key="escape"))],
+                         [False, False])
+        self.down((250, 50))
+        self.move((40, 50))
+        self.assertEqual((self.strip.key(Event("key", key="delete")), self.strip.lifted), (False, 2))
+
+    def test_the_right_button_on_a_block_and_past_the_last_block_is_told_for_a_menu_and_picks_nothing(self) -> None:
+        self.assertTrue(self.click((250, 50), button=3))
+        self.assertEqual((self.told, self.strip.picked, self.strip.busy), ([("asked", 2, (250, 50))], 0, False))
+        # Past the last block is the pixel left free after it.
+        self.assertTrue(self.click((329, 30), button=3))
+        self.assertEqual(self.told[1:], [("asked", None, (329, 30))])
+        # Between two blocks, and under a block, the button is not the strip's.
+        self.assertEqual([self.click((137, 40), button=3), self.click((250, 75), button=3)], [False, False])
+        # In a song with nothing in its order the whole strip is past the last block.
+        self.strip.show(song())
+        self.assertTrue(self.click((100, 40), button=3))
+        self.assertEqual(self.told[1:], [("asked", None, (329, 30)), ("asked", None, (100, 40))])
+        # A strip that tells nobody uses the press all the same.
+        quiet = SongStrip(RECT)
+        quiet.show(FOUR)
+        self.assertEqual([quiet.on(Event("down", pos, button=3), self.ui) for pos in ((250, 50), (329, 30), (137, 40))],
+                         [True, True, False])
+
+    def test_two_presses_on_the_name_of_a_block_within_the_time_are_a_double_press_and_named_is_told(self) -> None:
+        self.assertEqual((NAME_H, DOUBLE), (11, 0.4))
+        self.click((250, 20))
+        self.now = DOUBLE
+        self.down((252, 30))
+        # The second press tells of no pick, and begins nothing that a drag would carry.
+        self.assertEqual((self.told, self.strip.busy), ([("changed", 2), ("named", 2)], False))
+        self.up((252, 30))
+        # A third press begins anew, and a fourth is a double press again.
+        self.click((250, 25))
+        self.click((250, 25))
+        self.assertEqual(self.told[2:], [("changed", 2), ("named", 2)])
+        # Later than the time, on the names of two blocks, and with either press under the name, it is two presses.
+        for first, second, wait, places_told in (((250, 25), (250, 25), DOUBLE + 0.01, (2, 2)),
+                                                 ((170, 25), (250, 25), 0.0, (1, 2)),
+                                                 ((250, 31), (250, 25), 0.0, (2, 2)),
+                                                 ((250, 25), (250, 31), 0.0, (2, 2))):
+            self.told.clear()
+            self.now += 100
+            self.click(first)
+            self.now += wait
+            self.click(second)
+            self.assertEqual(self.told, [("changed", place) for place in places_told])
+        # A press in the song that was shown before is no first press in another song, which has c there as well.
+        self.told.clear()
+        self.now += 100
+        self.click((250, 25))
+        self.strip.show(song("b", "a", "c", "d", d={"lead": "o4 l4 c c"}))
+        self.click((250, 25))
+        self.assertEqual(self.told, [("changed", 2), ("changed", 2)])
+        # A strip that tells nobody takes the second press for its own all the same, and picks nothing with it.
+        quiet = SongStrip(RECT, clock=lambda: self.now)
+        quiet.show(FOUR)
+        used = [quiet.on(Event("down", pos, button=1), self.ui) for pos in ((250, 25), (250, 25))]
+        self.assertEqual((used, quiet.picked, quiet.busy), ([True, True], 2, False))
+
+    def test_name_rect_is_where_the_name_of_a_block_is_drawn_in_the_view_and_no_place_is_refused(self) -> None:
+        self.assertEqual([self.strip.name_rect(place) for place in range(4)],
+                         [(14, 20, 119, 11), (142, 20, 55, 11), (206, 20, 87, 11), (302, 20, 23, 11)])
+        # It goes with the view.
+        self.strip.show(song(*["a"] * 40))
+        self.strip.offset = 100
+        self.assertEqual((self.strip.map.block(3), self.strip.name_rect(3)), ((6, 20, 31, 54), (10, 20, 23, 11)))
+        for place in (40, -1, True, 3.0, None):
+            with self.assertRaises(RowSynthError) as refused:
+                self.strip.name_rect(place)
+            self.assertEqual(str(refused.exception),
+                             f"{place!r} is no place in the order, which has 40, counted from 0")
+
+    def test_busy_is_from_a_press_of_the_left_button_on_a_block_to_its_release(self) -> None:
+        self.assertFalse(self.strip.busy)
+        self.down((250, 50))
+        self.assertEqual((self.strip.busy, self.strip.lifted), (True, None))
+        self.move((40, 50))
+        self.assertEqual((self.strip.busy, self.strip.lifted), (True, 2))
+        self.up((40, 50))
+        self.assertFalse(self.strip.busy)
+        # A press between two blocks is none on a block, and the other buttons begin nothing to carry.
+        for pos, button in (((137, 40), 1), ((250, 50), 3), ((250, 50), 2)):
+            self.down(pos, button)
+            self.assertFalse(self.strip.busy)
+            self.up(pos, button)
+
+    def test_a_press_of_another_button_while_a_block_is_carried_begins_nothing_and_it_is_carried_on(self) -> None:
+        self.down((250, 50))
+        self.move((40, 50))
+        self.down((40, 50), button=3)
+        self.up((40, 50), button=3)
+        self.assertEqual((self.told, self.strip.lifted, self.strip.gap), ([("changed", 2)], 2, 0))
+        self.up((40, 50))
+        self.assertEqual(self.told, [("changed", 2), ("moved", 2, 0)])
+
+    def test_showing_a_song_while_a_block_is_carried_drops_it_and_its_release_tells_nothing(self) -> None:
+        self.down((250, 50))
+        self.move((40, 50))
+        # A song that is refused is not shown, and the block is carried on.
+        with self.assertRaises(RowSynthError):
+            self.strip.show(song("a", "x"))
+        self.assertEqual((self.strip.lifted, self.strip.gap), (2, 0))
+        # The same song come back is shown: the pick stays, and the block is carried no more.
+        self.strip.show(FOUR)
+        self.assertEqual((self.strip.busy, self.strip.lifted, self.strip.gap, self.strip.picked),
+                         (False, None, None, 2))
+        self.up((40, 50))
+        self.assertEqual(self.told, [("changed", 2)])
+
+    def test_a_block_carried_near_an_end_of_a_strip_that_scrolls_moves_the_view_that_way_frame_by_frame(self) -> None:
+        made = self.piece(NARROW)
+        self.assertEqual((self.strip.map.most, EDGE_W, EDGE_PX), (328, 12, 4))
+        # A press near the right end, on tune, carries nothing yet: the view stays.
+        self.down((200, 50))
+        self.strip.update()
+        self.assertEqual(self.strip.offset, 0)
+        # Picked up there, it moves the view on by 4 pixels a frame.
+        self.move((204, 50))
+        self.strip.update()
+        self.strip.update()
+        self.assertEqual(self.strip.offset, 8)
+        # Twelve pixels from the end is near it, and thirteen is not.
+        self.move((197, 50))
+        self.strip.update()
+        self.assertEqual(self.strip.offset, 8)
+        self.move((198, 50))
+        self.strip.update()
+        self.assertEqual(self.strip.offset, 12)
+        # Past the end of the strip is near it too. The view stops at the end of the song, and the gap that is
+        # nearest the mouse there is the last one, which was out of view.
+        self.move((400, 90))
+        for _ in range(100):
+            self.strip.update()
+        self.assertEqual((self.strip.offset, self.strip.gap), (328, 9))
+        self.up((400, 90))
+        self.assertEqual(self.told, [("changed", 3), ("moved", 3, 8)])
+        self.assertEqual(songedit.moved(made, 3, 8)["order"], put(made["order"], 3, 9))
+        # Back towards the start, with riff. The gap under the mouse is found in the view as it is in each frame.
+        self.told.clear()
+        self.down((100, 50))
+        self.move((22, 50))
+        self.strip.update()
+        self.assertEqual((self.strip.offset, self.strip.gap), (328, 6))
+        self.move((21, 50))
+        self.assertEqual((self.strip.offset, self.strip.gap), (328, 6))
+        self.strip.update()
+        self.assertEqual((self.strip.offset, self.strip.gap), (324, 5))
+        for _ in range(100):
+            self.strip.update()
+        self.assertEqual((self.strip.offset, self.strip.gap), (0, 0))
+        self.up((21, 50))
+        self.assertEqual(self.told, [("changed", 7), ("moved", 7, 0)])
+        # With no block carried a frame moves nothing, and a song that fits has nowhere to move to.
+        self.strip.offset = 100
+        self.move((21, 50))
+        self.strip.update()
+        self.assertEqual(self.strip.offset, 100)
+        self.strip.rect = RECT
+        self.strip.show(FOUR)
+        self.down((250, 50))
+        self.move((329, 50))
+        self.strip.update()
+        self.assertEqual((self.strip.offset, self.strip.gap), (0, 4))
+
+    def test_the_view_does_not_go_after_the_playhead_while_a_press_on_a_block_is_under_way(self) -> None:
+        self.piece(NARROW)
+        self.strip.playhead = 100.0
+        self.down((80, 50))
+        self.strip.playhead = 300.0
+        self.assertEqual(self.strip.offset, 0)
+        self.up((80, 50))
+        # After the release it goes after it again, once the playhead has been in view.
+        self.strip.playhead = 100.0
+        self.strip.playhead = 300.0
+        self.assertEqual(self.strip.offset, 300)
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -524,12 +916,121 @@ class Drawn(unittest.TestCase):
         self.assertEqual((seen.lanes(0, 18)[0], self.where(theme.SONG, (10, 32, 5, 2))),
                          ((12, 32, 35, 2), {(12, 33), (13, 33)}))
         self.assertEqual(self.where(theme.ACTIVE), {(x, y) for x in range(50, 89) for y in (74, 75)})
-        # Its third block is four bars of sixteen rows.
-        self.ui.handle(Event("move", (100, 40)))
-        self.assertEqual((self.strip.block_at((100, 40)), self.ui.help), (2, "grow, 4 bars, 3 of 9"))
+        # Its fourth block is tune.
+        self.ui.handle(Event("move", (200, 40)))
+        self.assertEqual((self.strip.block_at((200, 40)), self.ui.help),
+                         (3, "drag to move tune, ctrl to copy; right button for more"))
         self.strip.playhead = 20.5
         self.draw()
         self.assertEqual(self.where(theme.ACTIVE, (0, 0, 680, 74)), {(36, y) for y in range(20, 74)})
+        self.hold_inside()
+
+    def test_a_block_that_is_picked_up_has_a_bright_outline_and_its_foot_a_pixel_over_its_shadow(self) -> None:
+        self.strip.show(FOUR)
+        name = self.written("b", (142, 20, 55, 11))
+        self.ui.handle(Event("down", (170, 50), button=1))
+        seen = self.draw()
+        # A press alone picks nothing up: the block has the outline that every block has.
+        self.assertEqual((self.where(theme.TEXT, seen.block(1)), self.at(138, 40), self.at(170, 73)),
+                         (name, theme.LINE, theme.LINE))
+        self.ui.handle(Event("move", (174, 50)))
+        self.draw()
+        outline = ({(x, y) for x in range(138, 201) for y in (20, 72)}
+                   | {(x, y) for x in (138, 200) for y in range(20, 73)})
+        self.assertEqual(self.where(theme.TEXT, seen.block(1)), outline | name)
+        # Its shadow lies where its foot stood, over the line of the picked block.
+        self.assertEqual((self.colours((138, 73, 63, 1)), self.where(theme.ACTIVE)),
+                         ({theme.BACKGROUND}, {(x, y) for x in range(138, 201) for y in (74, 75)}))
+        # Its face, its band and its notes are as they were, and the other blocks have not changed.
+        self.assertEqual([self.at(139, 33), self.at(139, 21), self.at(10, 40), self.at(202, 40), self.at(250, 73)],
+                         [theme.LIT, theme.LINE, theme.LINE, theme.LINE, theme.LINE])
+        for colour in theme.CHANNELS:
+            self.assertEqual(self.where(colour, RECT), painted(FOUR, seen, colour))
+        # No line stands beside it while it would land at the place it has.
+        self.assertEqual(self.colours((137, 20, 1, 54)) | self.colours((201, 20, 1, 54)), {theme.PANEL})
+        self.hold_inside()
+        # It is the block that was pressed, also when the owner has picked another meanwhile.
+        self.strip.picked = 0
+        self.draw()
+        self.assertEqual([self.at(10, 40), self.at(138, 40), self.at(170, 73), self.at(170, 74), self.at(70, 74)],
+                         [theme.LINE, theme.TEXT, theme.BACKGROUND, theme.PANEL, theme.ACTIVE])
+        self.ui.handle(Event("up", (174, 50), button=1))
+        self.draw()
+        self.assertEqual((self.where(theme.TEXT, seen.block(1)), self.at(138, 40), self.at(170, 73)),
+                         (name, theme.LINE, theme.LINE))
+
+    def test_a_bright_line_stands_in_the_gap_that_the_block_would_be_put_in(self) -> None:
+        self.strip.show(FOUR)
+        self.ui.handle(Event("down", (170, 50), button=1))
+        for gap, x in enumerate(FOUR_GAPS):
+            self.ui.handle(Event("move", (x, 50)))
+            self.draw()
+            # The gap before the block and the one after it have no line.
+            line = set() if gap in (1, 2) else {(x, y) for y in range(20, 74)}
+            self.assertEqual(self.where(theme.TEXT, (x, 20, 1, 60)), line)
+            # At the foot of the blocks nothing else is in its colour, so there is no other line.
+            self.assertEqual(self.where(theme.TEXT, (10, 73, 320, 1)), line & {(x, 73)})
+            self.hold_inside()
+        self.ui.handle(Event("up", (329, 50), button=1))
+        self.draw()
+        self.assertEqual(self.where(theme.TEXT, (10, 73, 320, 1)), set())
+        # In a view that has moved the gaps are at x 5, 37 and so on: the one nearest x 150 is at 165.
+        self.strip.show(song(*["a"] * 40))
+        self.strip.offset = 100
+        self.ui.handle(Event("down", (80, 50), button=1))
+        self.ui.handle(Event("move", (150, 50)))
+        seen = self.draw()
+        self.assertEqual((self.strip.lifted, self.strip.gap, seen.gap_x(8)), (5, 8, 165))
+        self.assertEqual(self.where(theme.TEXT, (10, 73, 320, 1)), {(165, 73)})
+        self.assertEqual(self.where(theme.TEXT, (165, 20, 1, 60)), {(165, y) for y in range(20, 74)})
+
+    def test_the_line_of_a_gap_has_a_plus_at_its_top_while_ctrl_is_held(self) -> None:
+        self.strip.show(FOUR)
+        self.ui.handle(Event("down", (170, 50), button=1))
+        self.ui.handle(Event("move", (297, 50), mods=CTRL))
+        self.draw()
+        # A bright square of 7 pixels on the line, and in it a dark plus with arms of 2 pixels.
+        square = {(x, y) for x in range(294, 301) for y in range(20, 27)}
+        plus = {(x, 23) for x in range(295, 300)} | {(297, y) for y in range(21, 26)}
+        self.assertEqual((self.where(theme.BACKGROUND, (294, 20, 7, 7)), self.where(theme.TEXT, (294, 20, 7, 7))),
+                         (plus, square - plus))
+        # The line goes on under it.
+        self.assertEqual(self.where(theme.TEXT, (297, 27, 1, 53)), {(297, y) for y in range(27, 74)})
+        # With ctrl let go the line has none.
+        self.ui.handle(Event("move", (297, 50)))
+        self.draw()
+        self.assertEqual((self.where(theme.BACKGROUND, (294, 20, 7, 7)), self.where(theme.TEXT, (294, 20, 7, 7))),
+                         (set(), {(297, y) for y in range(20, 27)}))
+        # With ctrl the gap after the block has a line as well, for its copy.
+        self.ui.handle(Event("move", (201, 50), mods=CTRL))
+        self.draw()
+        self.assertEqual(self.where(theme.BACKGROUND, (198, 20, 7, 7)),
+                         {(x, 23) for x in range(199, 204)} | {(201, y) for y in range(21, 26)})
+        self.assertEqual(self.where(theme.TEXT, (201, 27, 1, 53)), {(201, y) for y in range(27, 74)})
+        # At an end of the strip the square is beside the line, and nothing is drawn outside the strip.
+        for x, left in ((10, 10), (329, 323)):
+            self.ui.handle(Event("move", (x, 50), mods=CTRL))
+            self.draw()
+            self.assertEqual(self.where(theme.BACKGROUND, (left, 20, 7, 7)),
+                             {(at, 23) for at in range(left + 1, left + 6)} | {(left + 3, y) for y in range(21, 26)})
+            self.assertEqual(self.where(theme.TEXT, (x, 27, 1, 53)), {(x, y) for y in range(27, 74)})
+            self.hold_inside()
+
+    def test_drop_of_the_trailer_piece_carried_to_between_hits_and_grow_is_lit_and_the_line_is_there(self) -> None:
+        made, seen = self.example("piece.json", "piece")
+        self.ui.handle(Event("down", (430, 50), button=1))
+        self.ui.handle(Event("move", (92, 50)))
+        self.draw()
+        self.assertEqual((self.strip.lifted, self.strip.gap, seen.gap_x(2)), (5, 2, 89))
+        # The line is in the pixel left free between hits and grow, and no other is drawn.
+        self.assertEqual(self.where(theme.TEXT, (89, 20, 1, 60)), {(89, y) for y in range(20, 74)})
+        self.assertEqual(self.where(theme.TEXT, (10, 73, 660, 1)), {(89, 73)})
+        # The outline of drop is bright, and every note of the song is where it was.
+        outline = ({(x, y) for x in range(390, 469) for y in (20, 72)}
+                   | {(x, y) for x in (390, 468) for y in range(20, 73)})
+        self.assertEqual(self.where(theme.TEXT, seen.block(5)), outline | self.written("drop", (394, 20, 71, 11)))
+        for colour in theme.CHANNELS:
+            self.assertEqual(self.where(colour, WIDE), painted(made, seen, colour))
         self.hold_inside()
 
 
