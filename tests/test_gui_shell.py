@@ -1,6 +1,7 @@
 """Tests for the shell of the GUI: the top bar, the left panel, and the app that joins the panels to a session."""
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import threading
@@ -25,6 +26,7 @@ from rowsynth.gui.dials import bars
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.panels import within
+from rowsynth.gui.session import Session
 from rowsynth.gui.topbar import REFUSED, TopBar, arrange, moment, timing
 from rowsynth.gui.ui import Event, Ui
 
@@ -43,6 +45,14 @@ BAR, SIDE = (0, 0, 960, 22), (0, 22, 124, 504)
 SMALL_BAR, SMALL_SIDE = (40, 10, 200, 22), (40, 32, 60, 30)
 #: The level, from 0 to 1, that is 24 decibels under the top: half the way along a meter.
 HALF = 10 ** (-24 / 20)
+#: What stands in the bar from its left end, up to the last of its buttons.
+ROW = ("name", "undo", "redo", "play", "stop", "loop")
+#: A small project: one instrument, and one song of one bar on one channel.
+SMALL = {
+    "instruments": {"beep": {"vol": [15, 12, 9, 6]}},
+    "songs": {"tune": {"row_ticks": 3, "channels": {"tune": {"inst": "beep"}},
+                       "patterns": {"a": {"tune": "l4 c e g > c"}}, "order": ["a"]}},
+}
 
 
 class Held:
@@ -73,6 +83,18 @@ class Stand:
         self.count: int | None = None
         self.findings_refused = False
         self.lit: dict[tuple[str, str], float] = {}
+        self.can_undo = False
+        self.can_redo = False
+        self.undo_label = ""
+        self.redo_label = ""
+
+    def undo(self) -> bool:
+        self.asked.append(("undo",))
+        return True
+
+    def redo(self) -> bool:
+        self.asked.append(("redo",))
+        return True
 
     def play(self) -> None:
         self.asked.append(("play",))
@@ -136,6 +158,12 @@ def lies_in(rect: layout.Rect, bounds: layout.Rect) -> bool:
     x, y, w, h = rect
     return (w >= 0 and h >= 0 and bounds[0] <= x and x + w <= bounds[0] + bounds[2]
             and bounds[1] <= y and y + h <= bounds[1] + bounds[3])
+
+
+def gaps(places: dict[str, layout.Rect]) -> list[int]:
+    """The air between each thing of the bar's row and the one after it, from the left."""
+    row = [places[thing] for thing in ROW]
+    return [after[0] - before[0] - before[2] for before, after in zip(row, row[1:])]
 
 
 def ink(surface: pygame.Surface, rect: layout.Rect, colour: theme.Colour) -> int:
@@ -209,6 +237,107 @@ class Top(unittest.TestCase):
         lines = {bar.play.help, bar.stop.help, bar.loop.help}
         self.assertEqual((len(lines), "" in lines), (3, False))
 
+    def test_undo_and_redo_are_enabled_only_while_the_session_has_a_step_for_them(self) -> None:
+        stand, _, bar = bar_on()
+        self.assertEqual((bar.undo.icon, bar.redo.icon), ("undo", "redo"))
+        steps = [(False, False), (True, False), (False, True), (True, True)]
+        shown = []
+        for can in steps:
+            stand.can_undo, stand.can_redo = can
+            bar.update()
+            shown.append((bar.undo.enabled, bar.redo.enabled))
+        self.assertEqual(shown, steps)
+
+    def test_a_click_on_undo_or_on_redo_calls_the_session(self) -> None:
+        stand, ui, bar = bar_on()
+        stand.can_undo = stand.can_redo = True
+        bar.update()
+        click(ui, middle(bar.undo.rect))
+        click(ui, middle(bar.redo.rect))
+        click(ui, middle(bar.redo.rect))
+        self.assertEqual(stand.asked, [("undo",), ("redo",), ("redo",)])
+
+    def test_a_click_on_undo_or_on_redo_while_it_is_not_enabled_calls_nothing(self) -> None:
+        stand, ui, bar = bar_on()
+        bar.update()
+        click(ui, middle(bar.undo.rect))
+        click(ui, middle(bar.redo.rect))
+        self.assertEqual(stand.asked, [])
+        # Each goes by its own step: with one to take back and none to make again, only undo takes a click.
+        stand.can_undo = True
+        bar.update()
+        click(ui, middle(bar.redo.rect))
+        click(ui, middle(bar.undo.rect))
+        self.assertEqual(stand.asked, [("undo",)])
+
+    def test_the_help_of_undo_and_of_redo_names_the_step_and_says_so_when_there_is_none(self) -> None:
+        stand, ui, bar = bar_on()
+        bar.update()
+        self.assertEqual((bar.undo.help, bar.redo.help), ("nothing to undo", "nothing to redo"))
+        stand.can_undo, stand.undo_label = True, "lead of pattern a: note placed"
+        stand.can_redo, stand.redo_label = True, "changed outside: zap"
+        bar.update()
+        self.assertEqual((bar.undo.help, bar.redo.help),
+                         ("undo: lead of pattern a: note placed", "redo: changed outside: zap"))
+        # With the mouse on the button, that is the line there is to show.
+        ui.handle(Event("move", middle(bar.redo.rect)))
+        self.assertEqual(ui.help, "redo: changed outside: zap")
+
+    def test_in_a_wide_bar_undo_and_redo_stand_after_the_name_with_a_gap_before_play(self) -> None:
+        places = arrange(BAR, "arcade.json")
+        self.assertEqual([places[thing] for thing in ROW],
+                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (131, 3, 17, 16), (150, 3, 17, 16),
+                          (169, 3, 17, 16)])
+        self.assertTrue(all(lies_in(places[thing], BAR) for thing in ROW))
+        # Undo and redo are a group as play, stop and loop are: a gap before it, and less between its buttons.
+        self.assertEqual(gaps(places), [theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP,
+                                        theme.BUTTON_GAP])
+
+    def test_in_a_narrow_bar_undo_and_redo_stay_as_the_buttons_of_play_do_and_in_their_order(self) -> None:
+        # A bar with no meter, one with no time either, and one in which the name has given way as well.
+        for rect, gone in (((0, 0, 427, 22), ["meter"]), ((0, 0, 353, 22), ["time", "meter"]),
+                           (SMALL_BAR, ["time", "meter"])):
+            places = arrange(rect, "arcade.json")
+            self.assertEqual([thing for thing in ("time", "meter") if not places[thing][2]], gone, rect)
+            self.assertEqual([places[thing][2:] for thing in ROW[1:]], [theme.ICON_BUTTON] * 5, rect)
+            self.assertTrue(all(lies_in(places[thing], rect) for thing in ROW), rect)
+            self.assertEqual(gaps(places), [theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP,
+                                            theme.BUTTON_GAP], rect)
+            # The last of the buttons ends a gap before the findings, or sooner.
+            self.assertLessEqual(places["loop"][0] + places["loop"][2] + theme.GROUP_GAP, places["found"][0], rect)
+
+    def test_with_a_real_session_the_undo_button_and_then_the_redo_button_leave_the_file_as_it_should_be(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        # No thread of the model's is left to run into the next test.
+        self.addCleanup(settle)
+        path = Path(folder.name) / "small.json"
+        path.write_text(json.dumps(SMALL), encoding="utf-8", newline="\n")
+        session, ui = Session(gui_model.Model(path, 8000)), Ui()
+        bar = TopBar(session, ui)
+        bar.place(BAR)
+
+        def held() -> dict:
+            """What the file holds now."""
+            return json.loads(path.read_text(encoding="utf-8"))
+
+        def buttons() -> tuple[bool, bool]:
+            """Of the bar brought up to date: whether undo is enabled, and whether redo is."""
+            bar.update()
+            return bar.undo.enabled, bar.redo.enabled
+
+        self.assertEqual(buttons(), (False, False))
+        self.assertTrue(session.change("songs.tune.patterns.a.tune", "l2 c e", "tune of pattern a: note removed"))
+        after = json.loads(json.dumps(SMALL))
+        after["songs"]["tune"]["patterns"]["a"]["tune"] = "l2 c e"
+        self.assertEqual((held(), buttons(), bar.undo.help),
+                         (after, (True, False), "undo: tune of pattern a: note removed"))
+        click(ui, middle(bar.undo.rect))
+        self.assertEqual((held(), buttons(), bar.redo.help),
+                         (SMALL, (False, True), "redo: tune of pattern a: note removed"))
+        click(ui, middle(bar.redo.rect))
+        self.assertEqual((held(), buttons()), (after, (True, False)))
+
     def test_play_is_lit_while_something_plays_and_the_time_is_told_as_the_session_has_it(self) -> None:
         stand, ui, bar = bar_on()
         bar.update()
@@ -270,45 +399,45 @@ class Top(unittest.TestCase):
     def test_a_bar_wide_enough_has_the_meter_after_the_time_as_high_as_the_buttons(self) -> None:
         places = arrange(BAR, "arcade.json")
         self.assertEqual((places["time"], places["meter"], places["found"]),
-                         ((150, 3, 109, 16), (271, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
-        # At 380 pixels everything just fits: the meter ends a gap before the findings.
-        places = arrange((0, 0, 380, 22), "arcade.json")
-        self.assertEqual((places["meter"], places["found"]), ((271, 3, 62, 16), (345, 0, 29, 22)))
+                         ((198, 3, 109, 16), (319, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
+        # At 428 pixels everything just fits: the meter ends a gap before the findings.
+        places = arrange((0, 0, 428, 22), "arcade.json")
+        self.assertEqual((places["meter"], places["found"]), ((319, 3, 62, 16), (393, 0, 29, 22)))
 
     def test_a_bar_too_narrow_for_everything_has_no_meter_and_keeps_the_rest(self) -> None:
-        places = arrange((0, 0, 379, 22), "arcade.json")
+        places = arrange((0, 0, 427, 22), "arcade.json")
         self.assertEqual(places["meter"][2], 0)
         self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "time", "found")],
-                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (121, 3, 17, 16), (150, 3, 109, 16),
-                          (344, 0, 29, 22)])
+                         [(6, 0, 65, 22), (131, 3, 17, 16), (150, 3, 17, 16), (169, 3, 17, 16), (198, 3, 109, 16),
+                          (392, 0, 29, 22)])
         # The time stays down to the width at which it ends a gap before the findings.
-        self.assertEqual(arrange((0, 0, 306, 22), "arcade.json")["time"], (150, 3, 109, 16))
+        self.assertEqual(arrange((0, 0, 354, 22), "arcade.json")["time"], (198, 3, 109, 16))
 
     def test_a_bar_too_narrow_for_the_time_as_well_has_neither_and_keeps_the_buttons_and_the_findings(self) -> None:
-        places = arrange((0, 0, 305, 22), "arcade.json")
+        places = arrange((0, 0, 353, 22), "arcade.json")
         self.assertEqual((places["time"][2], places["meter"][2]), (0, 0))
         self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "found")],
-                         [(6, 0, 65, 22), (83, 3, 17, 16), (102, 3, 17, 16), (121, 3, 17, 16), (270, 0, 29, 22)])
+                         [(6, 0, 65, 22), (131, 3, 17, 16), (150, 3, 17, 16), (169, 3, 17, 16), (318, 0, 29, 22)])
         # Only after the two have gone does the name give way, and the buttons keep their size.
+        self.assertEqual([arrange((40, 10, 233, 22), "arcade.json")[thing] for thing in ("name", "play")],
+                         [(46, 10, 65, 22), (171, 13, 17, 16)])
         self.assertEqual([arrange(SMALL_BAR, "arcade.json")[thing] for thing in ("name", "play")],
-                         [(46, 10, 65, 22), (123, 13, 17, 16)])
-        self.assertEqual([arrange((40, 10, 150, 22), "arcade.json")[thing] for thing in ("name", "play")],
-                         [(46, 10, 30, 22), (88, 13, 17, 16)])
+                         [(46, 10, 32, 22), (138, 13, 17, 16)])
 
     def test_placed_at_two_sizes_every_widget_is_inside_the_bar(self) -> None:
         _, ui, bar = bar_on()
         places = arrange(BAR, "arcade.json")
-        self.assertEqual(places, {"name": (6, 0, 65, 22), "play": (83, 3, 17, 16), "stop": (102, 3, 17, 16),
-                                  "loop": (121, 3, 17, 16), "time": (150, 3, 109, 16), "meter": (271, 3, 62, 16),
-                                  "found": (925, 0, 29, 22)})
-        things = ("name", "play", "stop", "loop", "time", "meter")
+        self.assertEqual(places, {"name": (6, 0, 65, 22), "undo": (83, 3, 17, 16), "redo": (102, 3, 17, 16),
+                                  "play": (131, 3, 17, 16), "stop": (150, 3, 17, 16), "loop": (169, 3, 17, 16),
+                                  "time": (198, 3, 109, 16), "meter": (319, 3, 62, 16), "found": (925, 0, 29, 22)})
+        things = (*ROW, "time", "meter")
         self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
         self.assertEqual(bar.sign.rect, places["found"])
         # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
-        for rect in (BAR, (0, 0, 379, 22), SMALL_BAR, (0, 0, 30, 5)):
+        for rect in (BAR, (0, 0, 427, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
             # A meter that has gone is not drawn at all.
-            self.assertEqual((len(ui.widgets), bar.meter.visible), (7, rect == BAR))
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (9, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect, "arcade.json").values()), rect)
 
@@ -400,7 +529,7 @@ class Drawn(unittest.TestCase):
                          (w - 2) * (h - 2) - ink(surface, places["time"], theme.TEXT))
 
     def test_the_bar_draws_the_left_side_in_the_upper_bar_of_the_meter_and_no_meter_that_has_gone(self) -> None:
-        rect = (0, 0, 400, theme.TOP_H)
+        rect = (0, 0, 428, theme.TOP_H)
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
@@ -408,7 +537,7 @@ class Drawn(unittest.TestCase):
         meter = arrange(rect, "arcade.json")["meter"]
         upper, lower = bars(meter, 2, lying=True)
         shown = []
-        for wide in (400, 379):
+        for wide in (428, 427):
             bar.place((0, 0, wide, theme.TOP_H))
             surface.fill(theme.PANEL)
             bar.update()
@@ -542,6 +671,25 @@ class InTheApp(unittest.TestCase):
         self.assertTrue(app.session.playing)
         self.space(app)
         self.assertFalse(app.session.playing)
+
+    def test_ctrl_and_z_is_undo_and_ctrl_and_y_or_ctrl_and_shift_and_z_is_redo_whatever_has_the_focus(self) -> None:
+        self.held()
+        asked = mock.Mock()
+        # The app takes the two from the session as it is made.
+        with mock.patch.object(Session, "undo", asked.undo), mock.patch.object(Session, "redo", asked.redo):
+            app = self.silent()
+        app.update()
+        rows = app.panels["left"].list
+        at = tuple(part * app.screen.scale for part in spot(rows, ("sound", "powerup")))
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=at, button=1))
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=at, button=1))
+        self.assertIs(app.ui.focus, rows)
+        ctrl, shift, alt = pygame.KMOD_LCTRL, pygame.KMOD_RSHIFT, pygame.KMOD_LALT
+        # The first two and the last are no step: the key alone, and the key with one thing too many held.
+        for key, mod in ((pygame.K_z, 0), (pygame.K_y, shift), (pygame.K_z, ctrl), (pygame.K_y, ctrl),
+                         (pygame.K_z, ctrl | shift), (pygame.K_z, ctrl | alt)):
+            app.handle(pygame.event.Event(pygame.KEYDOWN, key=key, mod=mod))
+        self.assertEqual(asked.mock_calls, [mock.call.undo(), mock.call.redo(), mock.call.redo()])
 
     def test_closing_the_window_while_a_render_runs_returns_and_waits_for_no_worker(self) -> None:
         self.held()

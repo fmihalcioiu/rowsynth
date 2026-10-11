@@ -29,6 +29,9 @@ _LINES = {"top": "bottom", "left": "right", "right": "left", "status": "top"}
 
 # The key that plays what is picked, and stops it.
 _PLAY = ("space", frozenset())
+# The key that takes the last step back, and the two that make it again.
+_UNDO = ("z", frozenset({"ctrl"}))
+_REDO = (("y", frozenset({"ctrl"})), ("z", frozenset({"ctrl", "shift"})))
 
 
 def picked_words(picked: tuple[str, str] | None) -> str:
@@ -68,6 +71,9 @@ class App:
         self.session = Session(self.model, player)
         self.ui = Ui()
         self.ui.keys[_PLAY] = self.session.toggle
+        self.ui.keys[_UNDO] = self.session.undo
+        for keys in _REDO:
+            self.ui.keys[keys] = self.session.redo
         self.panels: dict[str, Panel] = {"top": TopBar(self.session, self.ui),
                                          "left": Browser(self.session, self.ui),
                                          "middle": Middle(self.session, self.ui),
