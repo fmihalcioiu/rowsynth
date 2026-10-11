@@ -7,7 +7,7 @@ from itertools import combinations
 
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import sprites
-from rowsynth.gui.font import ADVANCE, BOX, Font, sprite_name
+from rowsynth.gui.font import ADVANCE, BOX, Font, sprite_name, wrap
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -77,6 +77,28 @@ class Measuring(unittest.TestCase):
         with self.assertRaises(RowSynthError) as caught:
             Font(sprites.SpriteSet({}, {"mark": mark, "u0041": mark}))
         self.assertIn("glyph 'u0041' is 2 by 1", str(caught.exception))
+
+
+class Wrapping(unittest.TestCase):
+    def test_a_long_text_is_broken_at_its_spaces_into_lines_that_fit_the_width(self) -> None:
+        text = "starts with a jump of 0.412 out of silence, and 0.01 or more clicks"
+        lines = wrap(text, 162)
+        self.assertEqual(lines, ["starts with a jump of 0.412", "out of silence, and 0.01 or", "more clicks"])
+        self.assertTrue(all(Font.width(line) <= 162 for line in lines))
+        # Six glyphs are 35 pixels wide: a pixel less, and the second word goes to a line of its own.
+        self.assertEqual([wrap("abc de", 35), wrap("abc de", 34)], [["abc de"], ["abc", "de"]])
+        # Whatever stands between two words counts as one space.
+        self.assertEqual(wrap("it  fits\nwhole", 1000), ["it fits whole"])
+
+    def test_a_word_longer_than_the_width_is_broken_where_the_line_ends(self) -> None:
+        self.assertEqual(wrap("in songs.tune.patterns.a now", 47), ["in", "songs.tu", "ne.patte", "rns.a", "now"])
+        # What is left of the word begins a line that takes the words after it.
+        self.assertEqual(wrap("abcdefghij k", 47), ["abcdefgh", "ij k"])
+        # A width with no room for a glyph still takes one a line, and comes to an end.
+        self.assertEqual([wrap("ab c", width) for width in (4, 0, -9)], [["a", "b", "c"]] * 3)
+
+    def test_a_text_with_no_word_in_it_is_no_lines(self) -> None:
+        self.assertEqual([wrap("", 100), wrap("   ", 100), wrap("", 0)], [[], [], []])
 
 
 @unittest.skipUnless(pygame, "pygame is not installed")

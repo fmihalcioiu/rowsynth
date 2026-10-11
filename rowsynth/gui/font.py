@@ -44,6 +44,29 @@ def fit(text: str, width: int) -> str:
     return (text[:max(0, room - len(CUT))] + CUT)[:room]
 
 
+def wrap(text: str, width: int) -> list[str]:
+    """`text` as the lines it is shown in at `width` pixels, broken at its spaces.
+
+    A line holds as many words as fit, with one space between two of them. A word too long for a line is broken
+    where the line ends, into as many lines as it takes. A text with no word in it is no lines. However narrow
+    the width, a line holds one glyph at the least.
+    """
+    room = max(1, (width + 1) // ADVANCE)
+    lines: list[str] = []
+    line = ""
+    for word in text.split():
+        if line and len(line) + 1 + len(word) <= room:
+            line += " " + word
+            continue
+        if line:
+            lines.append(line)
+        while len(word) > room:
+            lines.append(word[:room])
+            word = word[room:]
+        line = word
+    return lines + [line] if line else lines
+
+
 class Stamps:
     """
     Pictures of one ink by name, each a tuple of rows. A glyph is one, and so is an icon.
