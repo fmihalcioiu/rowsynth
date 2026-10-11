@@ -23,8 +23,8 @@ from rowsynth.gui.mixer import Strip
 from rowsynth.gui.model import Model
 from rowsynth.gui.popups import Menu
 from rowsynth.gui.session import POLL_EVERY, Session
-from rowsynth.gui.songpanel import (MIXER, NOTES, SongPanel, arrange, channel_rows, colour_of, first_channel,
-                                    lowest_c, place_at, song_parts)
+from rowsynth.gui.songpanel import (LAYERS, MIXER, NOTES, SongPanel, arrange, channel_rows, colour_of,
+                                    first_channel, lowest_c, place_at, song_parts)
 from rowsynth.gui.songview import Block, Channel, Note
 from rowsynth.gui.steps import WHEEL_WAIT
 from rowsynth.gui.strips import SongStrip
@@ -186,7 +186,7 @@ def middle(rect: layout.Rect) -> tuple[int, int]:
 
 
 def choose(ui: Ui, panel: SongPanel, option: str) -> None:
-    """Click NOTES or MIXER in the choice of a panel."""
+    """Click NOTES, MIXER or LAYERS in the choice of a panel."""
     click(ui, middle(panel.choice.cells()[panel.choice.options.index(option)]))
 
 
@@ -572,12 +572,13 @@ class Shown(unittest.TestCase):
             "view": (260, 104, 522, 418), "bar": (263, 107, 516, 37),
             "body": (263, 146, 516, 373), "mixer": (128, 104, 654, 418), "desk": (131, 122, 648, 397)})
         # The strip, the choice, the list, the eleven widgets of the bar, the roll, the steps and the line of a
-        # fault, the six of the song's own settings, and then those of the mixer: its desk, five of the song's
-        # strip, and six for each of four channels.
-        self.assertEqual((len(panel.widgets), len(panel.mixer.widgets)), (23 + 30, 30))
-        self.assertEqual((self.ui.widgets, panel.widgets[23:]), (panel.widgets, panel.mixer.widgets))
-        self.assertEqual((panel.choice.rect, panel.choice.options, panel.mixing), ((131, 107, 122, 13), (NOTES, MIXER),
-                                                                                    False))
+        # fault, the six of the song's own settings, the fourteen of the layers, and then those of the mixer: its
+        # desk, five of the song's strip, and six for each of four channels.
+        self.assertEqual((len(panel.widgets), len(panel.mixer.widgets)), (23 + 14 + 30, 30))
+        self.assertEqual((self.ui.widgets, panel.widgets[23:37], panel.widgets[37:]),
+                         (panel.widgets, panel.layers.widgets, panel.mixer.widgets))
+        self.assertEqual((panel.choice.rect, panel.choice.options, panel.mixing, panel.layering),
+                         ((131, 107, 122, 13), (NOTES, MIXER, LAYERS), False, False))
         # The song's own settings are two lines under the choice: a word and then what is set, the tempo over
         # the key. With the mixer they are on the line of the choice, beside it, the tempo first.
         self.assertEqual(song_parts(arrange(RECT)["song"]), {
@@ -1052,6 +1053,31 @@ class Mixed(Opened):
         click(self.ui, fader)
         click(self.ui, mute)
         self.assertEqual((self.data(), self.session.muted), (before, frozenset()))
+
+    def test_layers_in_the_choice_puts_the_layers_and_the_intro_in_place_of_the_notes_and_of_the_mixer(self) -> None:
+        panel, layers, before = self.panel, self.panel.layers, self.data()
+        notes = [widget for widget in panel.widgets if widget.visible]
+        grid = self.at(4, 70)
+        choose(self.ui, panel, LAYERS)
+        # The song has no layers: the part shows its switch, the line that says what layers are for, and the
+        # switch of the intro. The song's own settings are beside the choice, as with the mixer.
+        self.assertEqual((panel.layering, panel.mixing, [widget for widget in panel.widgets if widget.visible]),
+                         (True, False, [panel.strip, panel.choice, *panel.widgets[17:23], layers.use, layers.about,
+                                        layers.intro]))
+        self.assertEqual((layers.use.rect, panel.tempo.rect), ((131, 122, 67, 13), (291, 107, 90, 13)))
+        # Where the roll was a press places no note.
+        self.drag(grid)
+        self.assertEqual((self.data(), self.session.can_undo), (before, False))
+        # Switched on there, the layers are in the file, and the part shows them when the song is read again.
+        click(self.ui, middle(layers.use.rect))
+        panel.update()
+        self.assertEqual((self.data()["songs"]["walk"]["layers"]["versions"], panel.layering, layers.table.visible),
+                         ({"full": ["all"]}, True, True))
+        choose(self.ui, panel, MIXER)
+        self.assertEqual(([widget for widget in layers.widgets if widget.visible], self.mixer.desk.visible),
+                         ([], True))
+        choose(self.ui, panel, NOTES)
+        self.assertEqual([widget for widget in panel.widgets if widget.visible], notes)
 
     def test_the_choice_stays_while_the_song_is_picked_and_another_song_starts_with_its_notes(self) -> None:
         panel = self.panel

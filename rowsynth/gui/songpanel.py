@@ -14,6 +14,7 @@ from .channelbar import ChannelBar
 from .chordview import ChordBox
 from .dials import Stepper, plain
 from .font import Font
+from .layerview import Layers
 from .layout import Rect
 from .lists import List, Row
 from .mixer import Mixer
@@ -47,10 +48,11 @@ HEAD_H = INSET + channelbar.HEIGHT + 2
 #: the choice of what is shown stands in.
 PICK_H = INSET + channelbar.BUTTON_H + 2
 
-#: What the two things are called that the panel shows under the strip, one at a time: a pattern as the notes of
-#: a channel, and the mixer of all the channels.
+#: What the three things are called that the panel shows under the strip, one at a time: a pattern as the notes
+#: of a channel, the mixer of all the channels, and the layers of the song with its intro.
 NOTES = "NOTES"
 MIXER = "MIXER"
+LAYERS = "LAYERS"
 #: What the two headings of the list of channels read.
 TUNED = "TUNED"
 DRUMS = "DRUMS"
@@ -274,6 +276,7 @@ class SongPanel(Panel):
     chosen for as long as the song stays picked, and another song starts with its notes. A press on the name
     of a channel in the mixer picks that channel and shows its notes. In the list a channel that is not heard
     just now, muted or silenced by the solo of another, is dim, as one the pattern has no text for is.
+    LAYERS is `layers`, in the room the mixer has: the groups and the versions of the song, and its intro.
 
     What the mouse and the keys make of the notes in the roll or the steps is saved at once: the channel's notes
     are written as its text for the pattern, and that is one change to the file, and one step that can be taken
@@ -323,8 +326,8 @@ class SongPanel(Panel):
                                         help="the patterns in the order they play: a click shows one",
                                         moved=self._moved, copied=self._copied, asked=self._ask_block,
                                         named=self._rename))
-        self.choice = self.add(Choice(nowhere, (NOTES, MIXER), changed=lambda index: self._seen(),
-                                      help="the notes of one channel, or the levels of them all side by side"))
+        self.choice = self.add(Choice(nowhere, (NOTES, MIXER, LAYERS), changed=lambda index: self._seen(),
+                                      help="the notes of one channel, the levels of them all, or the layers and intro"))
         self.list = self.add(List(nowhere, changed=self._pick, asked=self._ask_channel))
         self.bar = ChannelBar(self)
         self.roll = self.add(Roll(nowhere, edited=lambda notes, label: self._save(self.roll.channel, notes, label),
@@ -343,6 +346,7 @@ class SongPanel(Panel):
             "tempo_word": self.add(Label(nowhere, TEMPO)), "tempo": self.tempo,
             "key_word": self.add(Label(nowhere, KEY)), "lower": self.lower, "shifted": self.shifted,
             "higher": self.higher}
+        self.layers = Layers(self)
         self.mixer = Mixer(self, picked=self._choose)
         self.channel: str | None = None
         # The ticks a row lasts at each of the tempos the stepper has.
@@ -386,12 +390,18 @@ class SongPanel(Panel):
         self.roll.rect = self.steps.rect = parts["body"]
         self.fault.rect = rect
         self.mixer.place(parts["desk"])
+        self.layers.place(parts["desk"])
         self._seen()
 
     @property
     def mixing(self) -> bool:
         """Whether MIXER is chosen: the mixer stands under the strip, and not the notes."""
         return self.choice.options[self.choice.picked] == MIXER
+
+    @property
+    def layering(self) -> bool:
+        """Whether LAYERS is chosen: the layers and the intro stand under the strip, and not the notes."""
+        return self.choice.options[self.choice.picked] == LAYERS
 
     def update(self, passed: float = 0.0) -> None:
         """Read the picked thing if it or the project is another than before, and show where the playing is.
@@ -412,11 +422,12 @@ class SongPanel(Panel):
         self.roll.ghosts = self.bar.ghosts.is_on
         self._play()
         self.mixer.update(passed)
+        self.layers.update()
 
     def draw(self, canvas: Canvas) -> None:
         """Draw the framed parts: those the list and the view stand in, or the one of the mixer. None with no song."""
         if self._song is not None:
-            for part in ("mixer",) if self.mixing else ("channels", "view"):
+            for part in ("mixer",) if self.mixing or self.layering else ("channels", "view"):
                 canvas.box(self._parts[part], theme.PANEL)
                 canvas.frame(self._parts[part], theme.LINE)
 
@@ -809,6 +820,7 @@ class SongPanel(Panel):
         self._drums = None if place is None else channels[place].drums
         self.bar.show(self._picked[1], None if place is None else self.channel, colour_of(place or 0))
         self.mixer.show(self._picked[1], self.channel)
+        self.layers.show(self._picked[1])
         if place is not None:
             pattern = self._patterns[self._blocks[self.strip.picked].name]
             if self._drums:
@@ -843,19 +855,20 @@ class SongPanel(Panel):
     def _seen(self) -> None:
         """Have each widget seen or not: by whether the panel is on the window, and by what there is to show.
 
-        The strip and the choice are seen with any song. Under them it is the notes or the mixer that is seen,
-        as is chosen: the widgets of the other are off the window, and take nothing from the mouse. The song's
-        own settings are seen with either, as far as there is room: under the choice with the notes, and
-        beside it with the mixer.
+        The strip and the choice are seen with any song. Under them it is the notes, the mixer or the layers
+        that are seen, as is chosen: the widgets of the others are off the window, and take nothing from the
+        mouse. The song's own settings are seen with each, as far as there is room: under the choice with the
+        notes, and beside it with the mixer and with the layers.
         """
         song = self.shown and self._song is not None
-        notes = song and not self.mixing
+        notes = song and not self.mixing and not self.layering
         self.strip.visible = self.choice.visible = song
-        for part, rect in song_parts(self._parts["beside" if self.mixing else "song"]).items():
+        for part, rect in song_parts(self._parts["beside" if self.mixing or self.layering else "song"]).items():
             self._settings[part].rect, self._settings[part].visible = rect, song and rect[2] > 0
         self.list.visible = notes
         self.bar.seen(notes)
         self.roll.visible = notes and self._drums is False
         self.steps.visible = notes and self._drums is True
         self.mixer.seen(song and self.mixing)
+        self.layers.seen(song and self.layering)
         self.fault.visible = self.shown and bool(self.fault.text)
