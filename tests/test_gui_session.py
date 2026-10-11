@@ -25,9 +25,9 @@ START = 100.0
 STAMP = 1_700_000_000 * 10**9
 
 
-def sound(note: str) -> dict:
+def sound(note: str, inst: str = "beep") -> dict:
     """A def of one voice playing one note from the start."""
-    return {"voices": [{"inst": "beep", "notes": [[0, note, 4]]}]}
+    return {"voices": [{"inst": inst, "notes": [[0, note, 4]]}]}
 
 
 def song(text: str) -> dict:
@@ -45,6 +45,10 @@ PROJECT = {
 # A song the engine refuses to loop.
 STILL = {"row_ticks": 3, "channels": {}, "patterns": {}, "order": []}
 STILL_SAID = "the song has no rows, so there is nothing to loop"
+
+# The place of the text the song "tune" plays, and what a change to it is called.
+TUNE = "songs.tune.patterns.a.tune"
+TUNE_LABEL = "tune of pattern a"
 
 
 def changed(**tables: dict) -> dict:
@@ -137,6 +141,10 @@ class SessionCase(unittest.TestCase):
         """A session on the file, holding `data`, with the stand-in player or with none."""
         self.write(data)
         return Session(Model(self.path, RATE), self.speaker if player else None, self.clock)
+
+    def data(self) -> dict:
+        """What the file holds now."""
+        return json.loads(self.path.read_text(encoding="utf-8"))
 
     def later(self, seconds: float) -> None:
         """Moves the clock on."""
@@ -528,6 +536,169 @@ class OutsideTest(SessionCase):
         self.write(whole, later=False)
         self.looked(session)
         self.assertEqual(session.message, "")
+
+
+class ChangeTest(SessionCase):
+    def test_a_change_is_in_the_file_at_once_and_can_be_taken_back_and_made_again(self):
+        session = self.opened()
+        session.tick()
+        self.assertEqual([session.can_undo, session.can_redo, session.undo_label, session.redo_label],
+                         [False, False, "", ""])
+        self.assertEqual([session.undo(), session.redo()], [False, False])
+        after = changed(songs={"tune": song("l2 c e")})
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertEqual(self.data(), after)
+        self.assertEqual(session.model.project, Project.from_dict(after))
+        self.assertEqual([session.can_undo, session.can_redo, session.undo_label, session.message],
+                         [True, False, TUNE_LABEL, ""])
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data(), PROJECT)
+        self.assertEqual([session.can_undo, session.can_redo, session.redo_label], [False, True, TUNE_LABEL])
+        self.assertTrue(session.redo())
+        self.assertEqual(self.data(), after)
+        self.assertEqual([session.can_undo, session.can_redo, session.message], [True, False, ""])
+        # A value that is there already is no step.
+        self.assertTrue(session.change("songs.air.row_ticks", 3, "tempo of air"))
+        self.assertEqual(session.undo_label, TUNE_LABEL)
+
+    def test_what_is_removed_is_put_back_by_undo_and_an_item_of_a_list_is_put_back_where_it_was(self):
+        session = self.opened()
+        session.audition = False
+        session.pick("sound", "pop")
+        self.assertTrue(session.remove("sounds.pop", "pop"))
+        self.assertEqual(self.data(), changed(sounds={"pop": None}))
+        # The picked thing is gone, as when it is removed outside.
+        self.assertEqual(session.model.picked, ("song", "tune"))
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data(), PROJECT)
+        vol = "instruments.beep.vol"
+        self.assertTrue(session.remove(f"{vol}[1]", "volume of beep"))
+        self.assertEqual(self.data()["instruments"]["beep"]["vol"], [15, 9, 6])
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data(), PROJECT)
+        self.assertFalse(session.remove(f"{vol}[4]", "volume of beep"))
+        self.assertEqual(session.message, "instruments.beep.vol has no item [4]: it holds 4, counted from 0")
+
+    def test_a_change_that_is_refused_is_not_made_adds_no_step_and_is_the_message(self):
+        session = self.opened()
+        session.tick()
+        written = self.path.read_bytes()
+        self.assertFalse(session.change("songs.tune.channels.tune.inst", "bell", "instrument of tune"))
+        self.assertEqual(session.message, "songs.tune.channels.tune.inst: no instrument named 'bell'")
+        self.assertEqual([session.can_undo, self.path.read_bytes()], [False, written])
+        # A change that is made has nothing to say.
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertEqual(session.message, "")
+
+    def test_a_change_from_outside_is_a_step_and_taking_it_back_puts_the_old_things_back_in_the_file(self):
+        before = changed(instruments={"hum": {"wave": "tri"}}, sounds={"pop": {"def": sound("c5", "hum")}})
+        session = self.opened(before)
+        session.tick()
+        # Outside, pop goes over to a new instrument and the one it had is removed, and more beside.
+        after = changed(instruments={"bell": {"wave": "saw"}}, songs={"tune": song("l2 c e")},
+                        sounds={"pop": {"def": sound("c5", "bell")}, "zap": None})
+        self.write(after)
+        self.looked(session)
+        label = "changed outside: bell, hum, pop and 2 more"
+        self.assertEqual([session.message, session.undo_label, session.can_redo], [label, label, False])
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data(), before)
+        self.assertEqual([session.can_undo, session.redo_label, session.message], [False, label, ""])
+        self.assertTrue(session.redo())
+        self.assertEqual(self.data(), after)
+        # Both were made here, so a look at the file finds nothing in them.
+        self.looked(session)
+        self.assertEqual([session.undo_label, session.can_redo, session.message], [label, False, ""])
+
+    def test_a_change_made_just_after_one_from_outside_to_the_same_place_stands_and_undo_brings_the_other_back(self):
+        session = self.opened()
+        session.tick()
+        outside = changed(songs={"tune": song("l8 c d e f")})
+        self.write(outside)
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertEqual(self.data(), changed(songs={"tune": song("l2 c e")}))
+        self.assertEqual(session.message, "tune of pattern a was changed outside at the same moment: this change "
+                                          "stands, and undo brings the other back")
+        self.looked(session)
+        self.assertEqual(session.glows(), {})
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data(), outside)
+        self.assertEqual([session.message, session.can_undo], ["", False])
+
+    def test_an_undo_that_is_refused_part_way_puts_back_what_it_had_done_and_keeps_its_step(self):
+        hum = {"hum": {"wave": "tri"}}
+        session = self.opened(changed(instruments=hum, sounds={"zap": {"def": sound("a4", "hum")}}))
+        session.tick()
+        # Outside, zap goes over to the other instrument and pop gets another note: one step of two changes.
+        after = changed(instruments=hum, sounds={"zap": {"def": sound("b4")}, "pop": {"def": sound("d5")}})
+        self.write(after)
+        self.looked(session)
+        # Then the instrument zap had is removed outside, which no look has found as the step is taken back.
+        del after["instruments"]["hum"]
+        self.write(after)
+        with mock.patch.object(session.model, "change", wraps=session.model.change) as change:
+            self.assertFalse(session.undo())
+        self.assertEqual([call.args[0] for call in change.call_args_list], ["sounds.pop", "sounds.zap", "sounds.pop"])
+        self.assertEqual(self.data(), after)
+        self.assertEqual(session.message, "sounds.zap.def.voices[0].inst: no instrument named 'hum'")
+        self.assertEqual([session.undo_label, session.can_redo], ["changed outside: pop, zap", False])
+
+    def test_a_change_made_here_does_not_glow_and_has_the_render_and_the_checks_made_again(self):
+        session = self.opened()
+        made = session.model.render()
+        session.play()
+        session.tick()
+        settle()
+        session.tick()
+        self.assertEqual(session.finding_count(), 1)
+        go = self.held()
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        session.tick()
+        self.assertEqual([session.glows(), session.numbers(), session.finding_count()], [{}, None, None])
+        self.assertTrue(session.playing)
+        self.assert_swapped()
+        go.set()
+        again = session.model.render()
+        session.model.findings()
+        session.tick()
+        self.assertIsNot(again, made)
+        # The checks were run on the project as it is now, in which they find one thing more.
+        self.assertEqual([session.numbers(), session.finding_count()], [session.model.numbers(), 2])
+        self.assert_swapped(again)
+        # A step taken back is a change made here as well.
+        self.assertTrue(session.undo())
+        back = session.model.render()
+        session.tick()
+        self.assert_swapped(again, back)
+        self.assertEqual(session.glows(), {})
+        self.assert_played((made, True))
+        self.assertEqual(self.speaker.did("stop"), [])
+
+    def test_changes_with_the_same_key_are_taken_back_in_one_and_changes_with_none_one_by_one(self):
+        session = self.opened()
+        level = "songs.tune.channels.tune.gain"
+        for value in (0.9, 0.8, 0.7):
+            self.assertTrue(session.change(level, value, "level of tune", key="level"))
+        self.assertTrue(session.change(TUNE, "l2 c e", TUNE_LABEL))
+        self.assertTrue(session.undo())
+        self.assertEqual(session.undo_label, "level of tune")
+        self.assertTrue(session.undo())
+        self.assertEqual([self.data(), session.can_undo], [PROJECT, False])
+        self.assertTrue(session.redo())
+        self.assertEqual(self.data()["songs"]["tune"]["channels"]["tune"], {"inst": "beep", "gain": 0.7})
+        for value in (0.6, 0.5):
+            self.assertTrue(session.change(level, value, "level of tune"))
+        self.assertTrue(session.undo())
+        self.assertEqual(self.data()["songs"]["tune"]["channels"]["tune"]["gain"], 0.6)
+
+    def test_a_step_keeps_the_value_it_was_made_with_whatever_becomes_of_the_one_handed_in(self):
+        session = self.opened()
+        vol = [15, 10, 5]
+        self.assertTrue(session.change("instruments.beep.vol", vol, "volume of beep"))
+        vol.append(0)
+        self.assertTrue(session.undo())
+        self.assertTrue(session.redo())
+        self.assertEqual(self.data()["instruments"]["beep"]["vol"], [15, 10, 5])
 
 
 class StateTest(SessionCase):

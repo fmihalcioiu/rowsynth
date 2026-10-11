@@ -1,11 +1,15 @@
 """What happens in the window, with no window in it: the model and the player made to work together."""
 from __future__ import annotations
 
+import copy
+import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import TYPE_CHECKING
 
+from ..edit import NOTHING, get_in
 from ..errors import RowSynthError
+from .history import Change, History, same
 from .model import KINDS, Model
 
 if TYPE_CHECKING:
@@ -19,6 +23,11 @@ GLOW_TIME = 1.5
 NAMED = 3
 # What is said where there is no player: at the first tick, and each time something is to play.
 NO_SOUND = "no sound output"
+# What is said, after what it is called, of a thing another program changed in the moment it was changed here.
+BOTH = "was changed outside at the same moment: this change stands, and undo brings the other back"
+
+# A place that is an item of a list: the place of the list, and the number of the item.
+_ITEM = re.compile(r"(.+)\[([0-9]+)\]")
 
 
 def _told(changed: set[tuple[str, str]]) -> str:
@@ -38,6 +47,10 @@ class Session:
 
     One thread owns a session and calls it, `tick` once a frame. Nothing here waits for a render or for the
     checks: what is not ready is taken up by a later `tick`. What plays is always the picked thing.
+
+    The project is changed one thing at a time, with `change` and `remove`, and each change is in the file as
+    soon as it is made. Every change is a step that `undo` takes back and `redo` makes again, and so is what
+    another program changed in the file.
     """
 
     def __init__(self, model: Model, player: Player | None = None,
@@ -62,6 +75,8 @@ class Session:
         self._checked = False
         # Whether the picked thing is to play as soon as its render is ready.
         self._waiting = False
+        # The steps made to the project, here and outside.
+        self._history = History()
 
     @property
     def message(self) -> str:
@@ -69,10 +84,31 @@ class Session:
 
         It is what keeps the file from being read, for as long as that lasts. Else it is the last of these: that
         there is no sound output, said at the first tick and each time something is to play; the things that
-        changed outside; what went wrong with the render of the picked thing; what went wrong with the checks.
-        A pick clears it.
+        changed outside; what went wrong with the render of the picked thing; what went wrong with the checks;
+        why a change, or a step taken back or made again, was refused; that a change made here took the place
+        of one made outside at the same moment. A pick clears it, and so does a change or a step that is made.
         """
         return self.model.problem or self._said
+
+    @property
+    def can_undo(self) -> bool:
+        """Whether there is a step to take back: a change made here, or one that came from outside."""
+        return self._history.can_undo
+
+    @property
+    def can_redo(self) -> bool:
+        """Whether there is a step that was taken back, to make again."""
+        return self._history.can_redo
+
+    @property
+    def undo_label(self) -> str:
+        """What the step `undo` would take back is called, "" when there is none."""
+        return self._history.undo_label
+
+    @property
+    def redo_label(self) -> str:
+        """What the step `redo` would make again is called, "" when there is none."""
+        return self._history.redo_label
 
     @property
     def loop(self) -> bool:
@@ -132,6 +168,62 @@ class Session:
         self._said = ""
         self._waiting = self.audition and kind != "song" and self.player is not None
         self.model.start_render()
+
+    def change(self, where: str, value: object, label: str, key: object = None) -> bool:
+        """Puts a value at a place in the project and in its file, as a step that can be taken back.
+
+        `where` is a place as `change_file` reads it, and `label` says in a few plain words what is changed
+        there. Changes that follow one another with the same `key`, unless it is None, are one step: a knob that
+        is dragged is taken back in one. A change the project's check refuses is not made: the answer is false,
+        the message is the refusal, and no step is kept.
+
+        The picked thing is rendered again and the checks are run again, as after a change from outside, and
+        nothing glows. Where another program changed the same place a moment before, so that the file did not
+        hold what the project here did, the change is made all the same and the message says so: taking the step
+        back brings back what the other program wrote.
+        """
+        before = self.model.picked
+        held = self._held(where)
+        try:
+            told = self.model.change(where, value, delete=value is NOTHING)
+        except RowSynthError as error:
+            self._said = str(error)
+            return False
+        self._said = ""
+        if not told.get("same"):
+            was = told.get("was", NOTHING)
+            # The step has a value of its own, whatever becomes of the one that was handed in.
+            now = copy.deepcopy(told["now"]) if "now" in told else NOTHING
+            self._history.add([(where, was, now)], label, key)
+            if not same(held, was):
+                self._said = f"{label} {BOTH}"
+            self._renew(before)
+        return True
+
+    def remove(self, where: str, label: str) -> bool:
+        """Takes what is at a place out of the project and its file, as `change` puts a value there.
+
+        An item of a list is taken out by putting the list there without it. Put back alone, the item would
+        take the place of the one after it, so it is the whole list that the step puts back.
+        """
+        item = _ITEM.fullmatch(where)
+        if item:
+            holder, at = self._held(item[1]), int(item[2])
+            if isinstance(holder, list) and at < len(holder):
+                return self.change(item[1], holder[:at] + holder[at + 1:], label)
+        return self.change(where, NOTHING, label)
+
+    def undo(self) -> bool:
+        """Takes the last step back, one made here or one that came from outside. False when there is none.
+
+        The step's changes are made one by one, the last of them first. Where one is refused, those made before
+        it are put back, the step stays the one to take back, the message is the refusal and the answer is false.
+        """
+        return self._replay(self._history.undo(), self._history.redo)
+
+    def redo(self) -> bool:
+        """Makes again the step taken back last. False when there is none, and when it is refused, as in `undo`."""
+        return self._replay(self._history.redo(), self._history.undo)
 
     def play(self) -> None:
         """Plays the picked thing from its start: now if its render is ready, and else as soon as it is.
@@ -218,8 +310,8 @@ class Session:
     def _look(self, now: float, first: bool) -> None:
         """Looks at the file and takes up what changed in it. `first` is for the first look there is.
 
-        The render of the picked thing and the checks are started at the first look, and again after each change:
-        the model keeps both for as long as nothing in the project differs.
+        What changed glows, is named in the message, and is a step that can be taken back. The render of the
+        picked thing and the checks are started at the first look, and again after each change.
         """
         if first and self.player is None:
             self._said = NO_SOUND
@@ -228,19 +320,72 @@ class Session:
         if changed:
             self._lit.update((thing, now) for thing in changed)
             self._said = _told(changed)
-            # The model has let go of what it kept of the project as it was.
-            self._taken = self._checked = False
+            self._history.add(self.model.changes, self._said)
+        if changed or first:
+            self._renew(before)
+
+    def _renew(self, before: tuple[str, str] | None) -> None:
+        """Starts the render of the picked thing and the checks, at the first look and after a change to the project.
+
+        `before` is what was picked before the change. The model keeps a render and the findings for as long as
+        nothing in the project differs, so with nothing let go of nothing is made again.
+        """
+        # What the model has let go of, with the project as it was, is to be taken up when it is there again.
+        self._taken = self._taken and self.model.render_ready()
+        self._checked = self._checked and self.model.findings_ready()
         if before is not None and self.model.picked is None:
-            # The picked thing was removed outside: the first thing of the listing takes its place.
+            # The picked thing was removed: the first thing of the listing takes its place.
             self._drop()
             for section, things in self.model.listing():
                 if things:
                     self.model.pick(KINDS[section], things[0][0])
                     break
-        if changed or first:
-            if self.model.picked is not None:
-                self.model.start_render()
-            self.model.start_findings()
+        if self.model.picked is not None:
+            self.model.start_render()
+        self.model.start_findings()
+
+    def _held(self, where: str) -> object:
+        """What the project holds at a place, as it is known here. NOTHING for a place that holds nothing."""
+        try:
+            return get_in(self.model.project.to_dict(), where)
+        except RowSynthError:
+            return NOTHING
+
+    def _put(self, where: str, value: object) -> str:
+        """Puts a value at a place through the model, or with NOTHING takes out what is there.
+
+        The answer is "" when that is done, and the refusal in its own words when it is not.
+        """
+        try:
+            self.model.change(where, value, delete=value is NOTHING)
+        except RowSynthError as error:
+            return str(error)
+        return ""
+
+    def _replay(self, changes: Iterable[Change] | None, back: Callable[[], object]) -> bool:
+        """Makes the changes of a step the history has just moved, one by one. None is for no step, and false.
+
+        `back` moves the step to where it was. Where a change is refused, those made before it are put back,
+        the step is moved back, the message is the refusal and the answer is false.
+        """
+        if changes is None:
+            return False
+        before = self.model.picked
+        made: list[tuple[str, object]] = []
+        refused = ""
+        for where, was, now in changes:
+            refused = self._put(where, now)
+            if refused:
+                break
+            made.append((where, was))
+        if refused:
+            for where, was in reversed(made):
+                self._put(where, was)
+            back()
+        self._said = refused
+        if made:
+            self._renew(before)
+        return not refused
 
     def _take(self) -> None:
         """Takes up the render the model has ready.

@@ -16,9 +16,10 @@ import numpy as np
 
 from rowsynth import checks
 from rowsynth.bank import render_entry
+from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.model import Model
+from rowsynth.gui.model import SAVE_WAITS, Model
 from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
 from rowsynth.song import render_loop
@@ -400,6 +401,134 @@ class PollTest(ModelCase):
         self.assertEqual(model.poll(), set())
         self.assertIsNone(model.problem)
         self.assertIs(model.render(), made)
+
+    def test_the_changes_of_a_look_are_each_whole_thing_that_was_added_removed_or_changed(self):
+        chord = {"root": 0, "tones": [0, 4, 7]}
+        before = {**copy.deepcopy(PROJECT), "chords": {"C": chord, "Am": chord}}
+        before["instruments"]["spare"] = {"wave": "saw"}
+        model = self.opened(before)
+        self.assertEqual(model.changes, [])
+        after = copy.deepcopy(before)
+        del after["instruments"]["spare"], after["sounds"]["crash"], after["songs"]["air"], after["chords"]["C"]
+        after["instruments"].update(beep={"vol": 9}, bell={"wave": "tri"})
+        after["sounds"].update(ping={"def": sound("b4", inst="bell")}, pong={"def": sound("d4")})
+        after["chords"]["G"] = {"root": 7, "tones": [7, 11, 2]}
+        self.write(after)
+        self.assertEqual(len(model.poll()), 9)
+        # What a song or a sound may name comes before them when it is new, and after them when it is gone.
+        self.assertEqual(model.changes, [
+            ("instruments.beep", {"vol": [15, 12, 9, 6]}, {"vol": 9}),
+            ("instruments.bell", NOTHING, {"wave": "tri"}),
+            ("chords.G", NOTHING, {"root": 7, "tones": [7, 11, 2]}),
+            ("songs.air", PROJECT["songs"]["air"], NOTHING),
+            ("sounds.ping", PROJECT["sounds"]["ping"], {"def": sound("b4", inst="bell")}),
+            ("sounds.crash", PROJECT["sounds"]["crash"], NOTHING),
+            ("sounds.pong", NOTHING, {"def": sound("d4")}),
+            ("instruments.spare", {"wave": "saw"}, NOTHING),
+            ("chords.C", chord, NOTHING),
+        ])
+        self.assertEqual([model.poll(), model.changes], [set(), []])
+        # A look that cannot read the file has no changes either.
+        self.write("{")
+        self.assertEqual([model.poll(), model.changes], [set(), []])
+
+
+class ChangeTest(ModelCase):
+    def held(self) -> dict:
+        """What the file holds now."""
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def blocked(self, times: int) -> mock.Mock:
+        """Has the file refuse to be put in place `times` times, as it does while another program has it open."""
+        replace, left = os.replace, [times]
+
+        def blocked(source: str, target: Path) -> None:
+            if left[0]:
+                left[0] -= 1
+                raise PermissionError(13, "Permission denied")
+            replace(source, target)
+
+        patch = mock.patch.object(os, "replace", side_effect=blocked)
+        self.addCleanup(patch.stop)
+        return patch.start()
+
+    def test_a_change_is_in_the_file_and_in_the_project_and_the_next_look_finds_nothing_in_it(self):
+        model = self.opened()
+        before = model.project
+        model.render()
+        model.findings()
+        where, after = "songs.tune.patterns.a.tune", changed(songs={"tune": song("l4 c e g a")})
+        self.assertEqual(model.change(where, "l4 c e g a"),
+                         {"file": str(self.path), "where": where, "was": "l4 c e g > c", "now": "l4 c e g a"})
+        self.assertEqual(self.held(), after)
+        self.assertIsNot(model.project, before)
+        self.assertEqual(model.project, Project.from_dict(after))
+        # What was kept is of a project that is no more, as after any load.
+        self.assertEqual([model.render_ready(), model.findings_ready()], [False, False])
+        made = model.render()
+        self.assert_loop(made, after, "tune")
+        self.assertEqual([model.poll(), model.changes, model.problem], [set(), [], None])
+        self.assertIs(model.render(), made)
+        # What is there already is not written, and the model stays as it is.
+        project = model.project
+        self.assertTrue(model.change(where, "l4 c e g a")["same"])
+        self.assertIs(model.project, project)
+        self.assertIs(model.render(), made)
+
+    def test_a_delete_takes_a_thing_out_of_the_file_and_a_picked_thing_that_is_gone_is_picked_no_longer(self):
+        model = self.opened()
+        model.pick("sound", "crash")
+        self.assertEqual(model.change("sounds.crash", delete=True),
+                         {"file": str(self.path), "where": "sounds.crash", "was": PROJECT["sounds"]["crash"]})
+        self.assertEqual(self.held(), changed(sounds={"crash": None}))
+        self.assertIsNone(model.picked)
+        self.assertEqual(model.poll(), set())
+
+    def test_a_change_that_is_refused_leaves_the_file_and_the_model_as_they_were(self):
+        model = self.opened()
+        project, made, written = model.project, model.render(), self.path.read_bytes()
+        with self.assertRaises(RowSynthError) as refused:
+            model.change("sounds.ping.def.voices[0].inst", "bell")
+        self.assertEqual(str(refused.exception), "sounds.ping.def.voices[0].inst: no instrument named 'bell'")
+        self.assertEqual(self.path.read_bytes(), written)
+        self.assertIs(model.project, project)
+        self.assertIs(model.render(), made)
+        self.assertEqual(model.poll(), set())
+        # A file that is gone is refused in plain words, and not waited for.
+        self.path.unlink()
+        with self.assertRaises(RowSynthError) as refused:
+            model.change("songs.tune.gain", 0.3)
+        self.assertEqual(str(refused.exception), f"{self.path}: No such file or directory")
+        self.assertIs(model.project, project)
+
+    def test_a_save_another_program_stands_in_the_way_of_is_tried_again_after_a_wait(self):
+        self.write(PROJECT)
+        waits: list[float] = []
+        model = Model(self.path, RATE, wait=waits.append)
+        replace = self.blocked(2)
+        self.assertEqual(model.change("songs.tune.gain", 0.3)["now"], 0.3)
+        self.assertEqual([replace.call_count, waits], [3, list(SAVE_WAITS[:2])])
+        self.assertEqual([self.held()["songs"]["tune"]["gain"], model.project.songs["tune"]["gain"]], [0.3, 0.3])
+        # No try has left a file of its own beside the project.
+        self.assertEqual(os.listdir(self.path.parent), [self.path.name])
+        self.assertEqual(model.poll(), set())
+
+    def test_a_save_that_fails_at_the_last_try_too_is_refused_and_nothing_is_changed(self):
+        self.write(PROJECT)
+        waits: list[float] = []
+        model = Model(self.path, RATE, wait=waits.append)
+        project, written = model.project, self.path.read_bytes()
+        replace = self.blocked(len(SAVE_WAITS) + 1)
+        with self.assertRaises(RowSynthError) as refused:
+            model.change("songs.tune.gain", 0.3)
+        self.assertEqual(str(refused.exception),
+                         f"{self.path}: another program has the file open, so the change was not saved")
+        self.assertEqual([replace.call_count, waits], [len(SAVE_WAITS) + 1, list(SAVE_WAITS)])
+        # The waits are about a fifth of a second in all.
+        self.assertAlmostEqual(sum(SAVE_WAITS), 0.2)
+        self.assertEqual(self.path.read_bytes(), written)
+        self.assertIs(model.project, project)
+        self.assertEqual(model.poll(), set())
 
 
 class WorkerTest(ModelCase):

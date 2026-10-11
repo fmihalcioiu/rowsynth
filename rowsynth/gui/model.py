@@ -4,12 +4,14 @@ from __future__ import annotations
 import copy
 import os
 import threading
+import time
 from collections.abc import Callable
 from pathlib import Path
 
 from .. import checks
 from ..bank import render_entry
 from ..commands import mono
+from ..edit import NOTHING, change_file
 from ..errors import RowSynthError
 from ..measure import brightness, measure
 from ..note import DEFAULT_RATE
@@ -18,6 +20,15 @@ from ..song import render_loop
 
 # The sections of the listing in the order they are shown, and the kind of the things each one holds.
 KINDS = {"songs": "song", "sounds": "sound", "instruments": "instrument"}
+
+# Every table of a project, with the kind of the things in it. The chords are in no section of the listing.
+_TABLES = {**KINDS, "chords": "chord"}
+# The tables whose things are named by the things of the other two.
+_NAMED = ("instruments", "chords")
+
+# The seconds waited before each new try of a save that another program stood in the way of: a fifth of a second
+# in all, and then the change is refused.
+SAVE_WAITS = (0.02, 0.04, 0.06, 0.08)
 
 # The note an instrument is heard by when it is the picked thing, and the ticks that note is held for.
 TEST_NOTE = "c4"
@@ -55,17 +66,26 @@ def _first(project: Project) -> tuple[str, str] | None:
     return None
 
 
-def _differ(old: Project, new: Project) -> set[tuple[str, str]]:
-    """The things two projects do not share, each as (kind, name): what only one of them has, and what changed.
+def _differ(old: Project, new: Project) -> list[tuple[str, str, object, object]]:
+    """What two projects do not share, as the changes that make the first of them into the second.
 
-    A chord is a thing here, of the kind "chord", though no section of the listing holds it. With the chords
-    every table of a project is looked at, so two projects that differ in nothing here are the same project.
+    Each is (table, name, was, now) for one whole thing: a song, a sound, an instrument or a chord that only one
+    of the two has, or that changed. NOTHING is for a thing that is not there. With the chords every table of a
+    project is looked at, so two projects that differ in nothing here are the same project.
+
+    The changes come in an order they can be made in one at a time, the project holding after each, and taken
+    back in from the last to the first: the instruments and chords that are new or changed, then the songs and
+    sounds, then the instruments and chords that are gone. A song or a sound names instruments and chords, and
+    none of those names a song or a sound.
     """
-    found = set()
-    for section, kind in {**KINDS, "chords": "chord"}.items():
-        before, after = getattr(old, section), getattr(new, section)
-        found |= {(kind, name) for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
-    return found
+    found = []
+    for table in _TABLES:
+        before, after = getattr(old, table), getattr(new, table)
+        for name in [*before, *(name for name in after if name not in before)]:
+            was, now = before.get(name, NOTHING), after.get(name, NOTHING)
+            if was != now:
+                found.append((table, name, was, now))
+    return sorted(found, key=lambda change: (2 if change[3] is NOTHING else 0) if change[0] in _NAMED else 1)
 
 
 def _look(path: Path) -> tuple[int, int] | None:
@@ -205,12 +225,20 @@ class Model:
     they are of the project as it is loaded now.
     """
 
-    def __init__(self, path: str | Path, rate: int = DEFAULT_RATE) -> None:
-        """Opens the project file at `path`, to be rendered at `rate`. What `Project.load` refuses is refused."""
+    def __init__(self, path: str | Path, rate: int = DEFAULT_RATE,
+                 wait: Callable[[float], None] = time.sleep) -> None:
+        """Opens the project file at `path`, to be rendered at `rate`. What `Project.load` refuses is refused.
+
+        `wait` is what waits a number of seconds, between two tries of a save another program stands in the way of.
+        """
         self.path = Path(path)
         self.rate = rate
         # What kept the last look at the file from going well, or None when it went well.
         self.problem: str | None = None
+        # What the last look found changed outside, each whole thing as (where, was, now), in an order the changes
+        # can be made in one at a time. NOTHING is for a thing that is not there.
+        self.changes: list[tuple[str, object, object]] = []
+        self._wait = wait
         # The file is looked at before it is read, so that a change made while it is read shows at the next look.
         # A file that cannot be looked at cannot be read either, and the reading says what is wrong with it.
         self._seen = _look(self.path)
@@ -326,16 +354,55 @@ class Model:
         After a load in which something differs, the picked thing stays picked if the project still has it, and
         nothing is picked if it does not, and the kept render, numbers and findings are dropped. A file written
         again with nothing in it changed drops none of them: only the order of its names is taken from it.
+
+        `changes` then holds the same things as changes to the file: (where, was, now) for each whole thing, as
+        in ("sounds.zap", what the sound was, what it is now), with NOTHING for a thing that is not there. They
+        are in an order they can be made in one at a time, and taken back in from the last to the first.
         """
+        self.changes = []
         seen = _look(self.path)
         if seen is not None and seen == self._seen:
             self.problem = None
             return set()
+        found = self._load(seen)
+        self.changes = [(f"{table}.{name}", was, now) for table, name, was, now in found]
+        return {(_TABLES[table], name) for table, name, _, _ in found}
+
+    def change(self, where: str, value: object = NOTHING, delete: bool = False) -> dict:
+        """Makes one change to the file, as `change_file` makes it, and takes the file in as it then is.
+
+        The answer is the one `change_file` gives. The project is then the one the file holds, what was kept of
+        the project before is dropped as after any load, and the next `poll` finds nothing in this write. A
+        change that is refused is refused here, and then the file and the model are as they were. A file that
+        another program has open cannot be written: the change is tried again after each wait of `SAVE_WAITS`,
+        and refused when the last try fails too.
+        """
+        for pause in (*SAVE_WAITS, None):
+            try:
+                told = change_file(self.path, where, value, delete)
+                break
+            except PermissionError as error:
+                if pause is None:
+                    raise RowSynthError(f"{self.path}: another program has the file open, so the change was not "
+                                        "saved") from error
+                self._wait(pause)
+            except OSError as error:
+                raise RowSynthError(f"{self.path}: {error.strerror}") from error
+        if not told.get("same"):
+            self._load(_look(self.path))
+        return told
+
+    def _load(self, seen: tuple[int, int] | None) -> list[tuple[str, str, object, object]]:
+        """Reads the file, which was looked at as `seen`, and puts what it holds in the place of the project.
+
+        What differs is given as `_differ` gives it. A file that cannot be read leaves everything as it was but
+        `problem`, and nothing is given.
+        """
         try:
             project = Project.load(self.path)
         except (OSError, RowSynthError) as error:
             self.problem = f"{self.path}: {error.strerror}" if isinstance(error, OSError) else str(error)
-            return set()
+            return []
         found = _differ(self._project, project)
         with self._lock:
             self._project = project
