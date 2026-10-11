@@ -11,7 +11,7 @@ from unittest import mock
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
-from rowsynth.gui.middle import EMPTY, SONG, SOUND, Middle, fitting
+from rowsynth.gui.middle import EMPTY, INSTRUMENT, SONG, SOUND, Middle, fitting
 from rowsynth.gui.model import Model
 from rowsynth.gui.ui import Event, Ui
 
@@ -50,9 +50,9 @@ class Stand:
 
 
 class Fitting(unittest.TestCase):
-    def test_a_song_fits_the_song_panel_a_sound_or_an_instrument_the_sound_panel_and_nothing_neither(self) -> None:
+    def test_a_song_a_sound_and_an_instrument_each_fit_the_panel_of_their_kind_and_nothing_fits_none(self) -> None:
         self.assertEqual([fitting(picked) for picked in (("song", "walk"), ("sound", "ping"), ("instrument", "tone"),
-                                                         None)], [SONG, SOUND, SOUND, None])
+                                                         None)], [SONG, SOUND, INSTRUMENT, None])
 
 
 class Shown(unittest.TestCase):
@@ -65,7 +65,7 @@ class Shown(unittest.TestCase):
         self.middle = Middle(Stand(self.model), self.ui)
         self.middle.place(RECT)
         self.middle.update()
-        self.song, self.sound = self.middle.panels[SONG], self.middle.panels[SOUND]
+        self.song, self.sound, self.inst = (self.middle.panels[name] for name in (SONG, SOUND, INSTRUMENT))
 
     def pick(self, kind: str, name: str) -> None:
         """Pick a thing of the project, and have the middle take a frame."""
@@ -73,58 +73,75 @@ class Shown(unittest.TestCase):
         self.middle.update()
 
     def seen(self) -> list[str]:
-        """Which of the two panels have a widget that is seen, by what they are called."""
+        """Which of the three panels have a widget that is seen, by what they are called."""
         return [name for name, panel in self.middle.panels.items() if any(widget.visible for widget in panel.widgets)]
 
-    def test_a_song_picked_is_shown_in_the_song_panel_with_the_sound_panel_off_the_window(self) -> None:
+    def test_a_song_picked_is_shown_in_the_song_panel_with_the_other_two_off_the_window(self) -> None:
         self.assertEqual((self.model.picked, self.middle.fits, self.seen()), (("song", "walk"), SONG, [SONG]))
-        self.assertEqual((self.song.shown, self.sound.shown), (True, False))
+        self.assertEqual((self.song.shown, self.sound.shown, self.inst.shown), (True, False, False))
         names = tuple(block.name for block in self.song.strip.map.blocks)
-        self.assertEqual((names, self.song.channel, self.sound.heading), (("a",), "air", None))
-        # Both have the whole rectangle, the one that is off the window too.
-        self.assertEqual((self.middle.rect, self.song.rect, self.sound.rect), (RECT, RECT, RECT))
+        self.assertEqual((names, self.song.channel, self.sound.heading, self.inst.name), (("a",), "air", None, None))
+        # All have the whole rectangle, those that are off the window too.
+        self.assertEqual((self.middle.rect, self.song.rect, self.sound.rect, self.inst.rect), (RECT,) * 4)
 
-    def test_a_sound_or_an_instrument_picked_is_shown_in_the_sound_panel_with_the_song_panel_off(self) -> None:
-        for kind, name in (("sound", "ping"), ("instrument", "tone")):
-            self.pick(kind, name)
-            self.assertEqual((self.middle.fits, self.seen(), self.song.shown, self.sound.shown),
-                             (SOUND, [SOUND], False, True))
-            self.assertEqual(self.sound.heading, (kind.upper(), name))
+    def test_a_sound_picked_is_shown_in_the_sound_panel_and_an_instrument_in_the_instrument_panel(self) -> None:
+        self.pick("sound", "ping")
+        self.assertEqual((self.middle.fits, self.seen()), (SOUND, [SOUND]))
+        self.assertEqual((self.song.shown, self.sound.shown, self.inst.shown), (False, True, False))
+        self.assertEqual((self.sound.heading, self.inst.name), (("SOUND", "ping"), None))
+        self.pick("instrument", "tone")
+        self.assertEqual((self.middle.fits, self.seen()), (INSTRUMENT, [INSTRUMENT]))
+        self.assertEqual((self.song.shown, self.sound.shown, self.inst.shown), (False, False, True))
+        # The instrument has its settings to change, and the sound panel does not show the wave of its test note.
+        self.assertEqual((self.inst.name, self.inst.wave.options[self.inst.wave.picked], self.inst.wave.visible),
+                         ("tone", "TRI", True))
+        self.assertFalse(self.sound.view.visible)
 
-    def test_with_nothing_picked_neither_panel_is_on_the_window(self) -> None:
+    def test_with_nothing_picked_no_panel_is_on_the_window(self) -> None:
         # The file is emptied outside, and with it goes what was picked.
         self.path.write_text("{}", encoding="utf-8")
         self.model.poll()
         self.middle.update()
         self.assertEqual((self.model.picked, self.middle.fits, self.seen()), (None, None, []))
-        self.assertEqual((self.song.shown, self.sound.shown), (False, False))
+        self.assertEqual((self.song.shown, self.sound.shown, self.inst.shown), (False, False, False))
 
-    def test_picked_back_and_forth_no_widget_of_the_panel_that_is_off_takes_the_mouse(self) -> None:
+    def test_picked_back_and_forth_no_widget_of_a_panel_that_is_off_takes_the_mouse(self) -> None:
         self.ui.handle(Event("move", CENTRE))
+        panels = {"song": self.song, "sound": self.sound, "instrument": self.inst}
         for kind, name in (("sound", "ping"), ("song", "walk"), ("instrument", "tone"), ("song", "walk"),
-                           ("sound", "ping")):
+                           ("instrument", "tone"), ("sound", "ping")):
             self.pick(kind, name)
-            on, off = (self.song, self.sound) if kind == "song" else (self.sound, self.song)
-            self.assertEqual([widget for widget in off.widgets if widget.visible], [])
-            # The mouse rests where the roll of the one and the view of the other are: the wheel zooms one of them.
-            self.assertIn(self.ui.hot, on.widgets)
+            for other, off in panels.items():
+                if other != kind:
+                    self.assertEqual([widget for widget in off.widgets if widget.visible], [])
+            # The mouse rests where the roll of the one, the view of the other and a table of the third are.
+            self.assertIn(self.ui.hot, panels[kind].widgets)
             before = (self.song.roll.row_w, self.sound.view.zoom)
-            self.assertTrue(self.ui.handle(Event("wheel", CENTRE, wheel=1, mods=frozenset({"ctrl"}))))
+            used = self.ui.handle(Event("wheel", CENTRE, wheel=1, mods=frozenset({"ctrl"})))
             zoomed = (self.song.roll.row_w - before[0], self.sound.view.zoom - before[1])
-            self.assertEqual(zoomed, (1, 0) if kind == "song" else (0, 1))
+            # The wheel zooms the roll or the view. A table has no use for it, and its page fits, so nothing has.
+            self.assertEqual((used, zoomed), {"song": (True, (1, 0)), "sound": (True, (0, 1)),
+                                              "instrument": (False, (0, 0))}[kind])
 
-    def test_taken_off_the_window_neither_panel_is_on_it_and_brought_back_the_one_that_fits_is(self) -> None:
+    def test_taken_off_the_window_no_panel_is_on_it_and_brought_back_the_one_that_fits_is(self) -> None:
         self.middle.show(False)
-        self.assertEqual((self.seen(), self.song.shown, self.sound.shown), ([], False, False))
+        self.assertEqual((self.seen(), self.song.shown, self.sound.shown, self.inst.shown), ([], False, False, False))
         self.pick("sound", "ping")
         self.assertEqual((self.middle.fits, self.seen(), self.sound.heading), (SOUND, [], None))
         self.middle.show(True)
         self.middle.update()
         self.assertEqual((self.seen(), self.sound.heading), ([SOUND], ("SOUND", "ping")))
 
-    def test_the_seconds_of_a_frame_reach_the_panel_that_is_shown_and_the_other_takes_no_frame(self) -> None:
+    def test_the_seconds_of_a_frame_reach_the_panel_that_is_shown_and_the_others_take_no_frame(self) -> None:
         self.model.pick("sound", "ping")
-        with mock.patch.object(self.sound, "update") as told, mock.patch.object(self.song, "update") as other:
+        with mock.patch.object(self.sound, "update") as told, mock.patch.object(self.song, "update") as other, \
+                mock.patch.object(self.inst, "update") as third:
+            self.middle.update(0.016)
+        told.assert_called_once_with(0.016)
+        other.assert_not_called()
+        third.assert_not_called()
+        self.model.pick("instrument", "tone")
+        with mock.patch.object(self.sound, "update") as other, mock.patch.object(self.inst, "update") as told:
             self.middle.update(0.016)
         told.assert_called_once_with(0.016)
         other.assert_not_called()
