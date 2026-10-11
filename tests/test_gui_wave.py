@@ -1,6 +1,8 @@
-"""Tests for rowsynth.gui.wave: the sums of the view of a sound, its clock under the wheel, and what it draws."""
+"""Tests for rowsynth.gui.wave: the sums of the view of a sound, its clock, its gestures, and what it draws."""
 from __future__ import annotations
 
+import copy
+import math
 import os
 import unittest
 from dataclasses import replace
@@ -10,14 +12,15 @@ import numpy as np
 
 from rowsynth.bank import entry_kind, render_entry
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, soundview, sprites, theme
+from rowsynth.gui import layout, soundedit, soundview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
-from rowsynth.gui.roll import DARKER, LIGHTER, mix
+from rowsynth.gui.roll import BOX, DARKER, LIGHTER, MOVE, PICK, PLACE, REMOVE, STRETCH, mix
 from rowsynth.gui.soundview import Bar, Shape
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import (VARIANT_GAP, ZONES, ZOOM_MOST, Map, SoundView, echo_colour, joined, keys, places,
-                               ruler_step, stretch, tint, voice_colour)
+from rowsynth.gui.wave import (STALE, VARIANT_GAP, ZONES, ZOOM_MOST, Map, SoundView, Span, bars, begins, called,
+                               echo_colour, joined, keys, places, ruler_step, span_at, spans, spelt, stretch, tint,
+                               voice_colour)
 from rowsynth.project import Project
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -69,6 +72,47 @@ HELD = [("start", 0.0, Shape((bar(0.0, 0.25, 60),), 0.25, ())), ("loop", 0.25, S
 OWN = {"instruments": {"tone": {"wave": "tri"}},
        "sounds": {"pair": {"defs": [{"voices": [{"inst": "tone", "notes": [[0, "c4", 6]]}]},
                                     {"voices": [{"inst": "tone", "notes": [[0, "c5", 12]]}]}], "db": [0, -12]}}}
+
+
+#: The instruments of the sounds that a hand changes here. Neither fades, so a sound ends two ticks after its notes.
+INSTRUMENTS = {"tone": {"wave": "tri", "release": 0}, "buzz": {"wave": "saw", "release": 0}}
+#: The notes of a sound of two voices: c4 and then e4 in the first, and between them g4 in the second, each held
+#: for 6 ticks. The sound is 20 ticks long, so on the grid of the view a tick is 20 pixels. With three keys kept
+#: free over the notes and under them, c4 is the row from y 162, e4 that from y 118 and g4 that from y 85.
+FIRST = [[0, "c4", 6], [12, "e4", 6]]
+SECOND = [[6, "g4", 6]]
+C4, E4, G4 = (0, 0), (0, 1), (1, 0)
+
+
+def duo(first: list, second: list) -> dict:
+    """The definition of a sound of two voices with some notes in each: the first plays tone and the second buzz."""
+    return {"voices": [{"inst": "tone", "notes": first}, {"inst": "buzz", "notes": second}]}
+
+
+def solo(*notes: list, inst: str = "tone") -> dict:
+    """The definition of a sound of one voice with some notes."""
+    return {"voices": [{"inst": inst, "notes": list(notes)}]}
+
+
+DUO = {"def": duo(FIRST, SECOND)}
+SOLO = {"def": solo([0, "c4", 6])}
+#: Two variants, of 8 ticks and of 14: the second starts 10.8 ticks after the first, which is at 0.18 s.
+TWINS = {"defs": [solo([0, "c4", 6]), solo([0, "c5", 12])], "db": [0, -12]}
+#: Two parts that lie over one another: the second starts a tenth of a second after the first, which is 6 ticks.
+LAYERS = {"parts": [[0, {"def": solo([0, "c4", 10]), "db": -3}], [0.1, {"def": solo([0, "c5", 6], inst="buzz")}]]}
+#: A held sound: its note is held for 60 ticks, of which the start and the loop take 36, and then comes its end.
+HUM = {"held": {"note": solo([0, "c3", 60]), "start": 6, "loop": 30, "join": 3, "end": solo([0, "c3", 2]),
+                "let_go": 4}, "db": -6}
+
+
+def laid_out(entry: dict) -> tuple[Map, tuple[Span, ...]]:
+    """An entry as a view in `RECT` lays it out: the sums of that view, and the sounds of the entry as spans."""
+    kind = entry_kind(entry)
+    shapes = soundview.shapes(entry, instruments=INSTRUMENTS)
+    view = SoundView(RECT)
+    view.show(shapes, [], 44100, theme.SOUND, kind, entry)
+    laid = [(label, place, shape) for (label, _, shape), place in zip(shapes, places(shapes, kind == "defs"))]
+    return view.map, spans(entry, laid)
 
 
 def rows(*seconds: float) -> list[np.ndarray]:
@@ -183,6 +227,90 @@ class Sums(unittest.TestCase):
     def test_a_place_is_in_the_stretch_that_starts_last_before_it_or_at_it(self) -> None:
         self.assertEqual([stretch([58, 258], at) for at in (57, 58, 257, 258, 1000)], [None, 0, 0, 1, 1])
         self.assertEqual((stretch([], 5), stretch([0.0, 0.5, 0.5], 0.5)), (None, 2))
+
+
+class Hands(unittest.TestCase):
+    def test_the_sounds_of_an_entry_lie_where_their_shapes_do_each_with_room_up_to_the_next(self) -> None:
+        _, (one,) = laid_out(DUO)
+        self.assertEqual((one.at, one.until, one.defn, one.echo), (0.0, math.inf, DUO["def"], ()))
+        # A variant has room up to where the next starts, and the last has no end to it.
+        _, twins = laid_out(TWINS)
+        self.assertEqual([(round(span.at, 9), round(span.until, 9)) for span in twins], [(0.0, 0.18), (0.18, math.inf)])
+        self.assertEqual([span.defn for span in twins], TWINS["defs"])
+        # Parts lie over one another. The note of a held sound lies under its start and its loop, and its end
+        # under the third shape.
+        _, layers = laid_out(LAYERS)
+        _, hum = laid_out(HUM)
+        self.assertEqual([(span.at, span.until) for span in layers], [(0.0, math.inf), (0.1, math.inf)])
+        self.assertEqual([(span.at, span.until, span.defn) for span in hum],
+                         [(0.0, 0.6, HUM["held"]["note"]), (0.6, math.inf, HUM["held"]["end"])])
+        # A span has the repeats of its sound's echo, and what it holds is a copy: the entry is not the hand's.
+        ring = {"def": {**solo([0, "a4", 6]), "echo": {"time": 0.1}}}
+        _, (echoed,) = laid_out(ring)
+        self.assertEqual((echoed.echo, echoed.defn is ring["def"]),
+                         (soundview.shapes(ring, instruments=INSTRUMENTS)[0][2].echo, False))
+        self.assertGreater(len(echoed.echo), 1)
+        with self.assertRaises(RowSynthError) as refused:
+            spans(TWINS, [])
+        self.assertEqual(str(refused.exception),
+                         "entry: must be the entry the shapes were made of: it has 2, and there are 0")
+        # A second is in the room of one variant. Of the parts that have it, it is in the one the hand was in
+        # last, and else in the one that starts last.
+        self.assertEqual([span_at(twins, second) for second in (0.0, 0.17, 0.18, 0.4)], [0, 0, 1, 1])
+        self.assertEqual([span_at(layers, second, last) for second, last in ((0.05, 1), (0.15, 0), (0.15, 1),
+                                                                             (0.15, 5))], [0, 0, 1, 1])
+        self.assertIsNone(span_at((), 0.1))
+        self.assertEqual([called(kind, index) for kind, index in (("def", 0), ("defs", 1), ("parts", 0), ("held", 0),
+                                                                  ("held", 1))],
+                         ["", "variant 2", "part 1", "the note", "the end"])
+        self.assertEqual([spelt(pitch) for pitch in (60, 61, 70, 59, -96, 131)],
+                         ["c4", "c#4", "a#4", "b3", "c-9", "b9"])
+
+    def test_the_bar_of_a_note_is_at_its_ticks_and_is_cut_where_the_room_of_its_sound_ends(self) -> None:
+        seen, (one,) = laid_out(DUO)
+        self.assertEqual((seen.scale, seen.top, seen.key_h), (1200.0, 72, 11))
+        self.assertEqual(bars(seen, one), [(C4, (59, 162, 119, 10), True), (E4, (299, 118, 119, 10), True),
+                                           (G4, (179, 85, 119, 10), True)])
+        # The tick of an x is counted from where the sound starts, and no x is before its tick 0.
+        self.assertEqual([round(seen.tick_at(x), 9) for x in (58, 68, 258)], [0.0, 0.5, 10.0])
+        self.assertEqual([round(seen.tick_at(x, 0.1), 9) for x in (58, 178, 198)], [0.0, 0.0, 1.0])
+        # The note of the held sound goes on past the 36 ticks of its start and its loop, and its bar does not.
+        seen, (note, end) = laid_out(HUM)
+        self.assertEqual((bars(seen, note), bars(seen, end)),
+                         ([((0, 0), (59, 128, 359, 10), False)], [((0, 0), (419, 128, 19, 10), True)]))
+        # A note that starts past the room of its sound has no bar.
+        late = replace(note, defn=solo([40, "c3", 6]))
+        self.assertEqual(bars(seen, late), [])
+
+    def test_a_press_on_a_bar_moves_stretches_or_picks_its_note_and_where_no_bar_is_places_or_boxes(self) -> None:
+        seen, laid = laid_out(DUO)
+        # The bar of c4 is 119 pixels from x 59: its last three are for stretching.
+        self.assertEqual([begins(seen, laid, (x, 166)) for x in (59, 174, 175, 177)],
+                         [(MOVE, 0, C4), (MOVE, 0, C4), (STRETCH, 0, C4), (STRETCH, 0, C4)])
+        ctrl, shift = frozenset({"ctrl"}), frozenset({"shift"})
+        self.assertEqual((begins(seen, laid, (100, 166), 1, ctrl), begins(seen, laid, (177, 166), 3)),
+                         ((PICK, 0, C4), (REMOVE, 0, C4)))
+        # Where no bar is: also on the line of pixels a bar leaves free under it, and just after its end.
+        for pos in ((100, 100), (100, 172), (178, 166)):
+            self.assertEqual([begins(seen, laid, pos, button, mods) for button, mods in ((1, frozenset()), (1, shift),
+                                                                                         (1, ctrl | shift), (3, ctrl))],
+                             [(PLACE, 0, None), (BOX, 0, None), (BOX, 0, None), (REMOVE, 0, None)], pos)
+        # The middle button begins nothing, and neither does a press on the keys, the ruler or the wave.
+        nothing = ("", None, None)
+        self.assertEqual([begins(seen, laid, (100, 166), 2), begins(seen, laid, (20, 166)),
+                          begins(seen, laid, (100, 25)), begins(seen, laid, (100, 280))], [nothing] * 4)
+        # The bar of the held note is cut at x 418: its last pixel moves it. The end of the sound is a sound
+        # of its own, whose bar is stretched at its own end.
+        seen, laid = laid_out(HUM)
+        self.assertEqual([begins(seen, laid, (x, 132)) for x in (417, 419, 437)],
+                         [(MOVE, 0, (0, 0)), (MOVE, 1, (0, 0)), (STRETCH, 1, (0, 0))])
+        self.assertEqual([begins(seen, laid, (x, 100)) for x in (416, 420)], [(PLACE, 0, None), (PLACE, 1, None)])
+        # Of two parts that lie over one another, a press where no bar is is in the one the hand was in last.
+        seen, laid = laid_out(LAYERS)
+        at = seen.x(0.15)
+        self.assertEqual([begins(seen, laid, (at, 100), last=last) for last in (0, 1)],
+                         [(PLACE, 0, None), (PLACE, 1, None)])
+        self.assertEqual(begins(seen, laid, (seen.x(0.05), 100), last=1), (PLACE, 0, None))
 
 
 class View(unittest.TestCase):
@@ -358,6 +486,344 @@ class View(unittest.TestCase):
         self.assertEqual((self.view.clock(0, 0.26), self.view.clock(2, 0.25)), (None, 1.0))
         self.view.show(ONE, [wave()], RATE, theme.SOUND)
         self.assertEqual((self.view.clock(0, 0.3), self.view.clock(0, 1.1)), (0.3, None))
+
+
+class Edits(unittest.TestCase):
+    def setUp(self) -> None:
+        self.ui = Ui()
+        self.view = self.ui.add(SoundView(RECT, "the notes of a sound"))
+        self.edits: list[tuple[int, dict, str]] = []
+        self.heard: list[tuple[object, float]] = []
+        self.told: list[str] = []
+        # Whether the owner saves what it is handed. One that does not answers false.
+        self.saves = True
+        self.view.edited = self.save
+        self.view.sounded = lambda inst, pitch: self.heard.append((inst, pitch))
+        self.view.refused = self.told.append
+        self.show(DUO)
+
+    def show(self, entry: dict | None = None) -> None:
+        """Show the view an entry, or again the one it has, with no wave under it."""
+        self.entry = self.entry if entry is None else copy.deepcopy(entry)
+        shapes = soundview.shapes(self.entry, instruments=INSTRUMENTS)
+        self.view.show(shapes, [], 44100, theme.SOUND, entry_kind(self.entry), self.entry)
+
+    def save(self, index: int, defn: dict, label: str) -> bool:
+        """What an owner does with an edit: it is kept here, put in the entry, and the view is shown the entry."""
+        self.edits.append((index, defn, label))
+        if self.saves:
+            self.show(soundedit.with_sound(self.entry, index, defn, INSTRUMENTS))
+        return self.saves
+
+    def at(self, tick: float, pitch: int, sound: int = 0) -> tuple[int, int]:
+        """A pixel in the middle of a tick of a sound of the entry, and of a key."""
+        seen, laid = laid_out(self.entry)
+        return seen.x(laid[sound].at + (tick + 0.5) / 60), seen.y(pitch) + 4
+
+    def end(self, pick: tuple[int, int], sound: int = 0) -> tuple[int, int]:
+        """The last pixel of the bar of a note of a sound of the entry."""
+        seen, laid = laid_out(self.entry)
+        x, y, w, _ = next(rect for found, rect, _ in bars(seen, laid[sound]) if found == pick)
+        return x + w - 1, y + 4
+
+    def mouse(self, kind: str, pos: tuple[int, int], button: int = 1, *mods: str) -> bool:
+        """Hand the Ui what the mouse did, some keys held. Whether it was used."""
+        return self.ui.handle(Event(kind, pos, button=0 if kind == "move" else button, mods=frozenset(mods)))
+
+    def drag(self, *stops: tuple[int, int], button: int = 1, mods: tuple[str, ...] = ()) -> None:
+        """Press at the first position, move to each of the others in turn, and release at the last."""
+        self.mouse("down", stops[0], button, *mods)
+        for stop in stops[1:]:
+            self.mouse("move", stop, button, *mods)
+        self.mouse("up", stops[-1], button, *mods)
+
+    def key(self, key: str, *mods: str) -> bool:
+        """Hand the view a key, as the Ui does while the view has the focus. Whether it is one of the view's."""
+        return self.view.key(Event("key", key=key, mods=frozenset(mods)))
+
+    def notes(self, voice: int = 0) -> list:
+        """The notes of a voice of the sound the hand is in, as the view draws them."""
+        return self.view.drawn["voices"][voice]["notes"]
+
+    def test_a_click_places_a_note_of_six_ticks_in_the_picked_voice_and_a_drag_one_as_long_as_it_goes(self) -> None:
+        self.assertEqual((self.view.grid, self.view.voice, self.view.sound, self.view.drawn), (1, 0, 0, DUO["def"]))
+        self.assertTrue(self.mouse("down", self.at(8, 62)))
+        self.assertEqual((self.edits, self.heard, self.view.busy), ([], [], True))
+        self.mouse("up", self.at(8, 62))
+        placed = duo([*FIRST, [8, "d4", 6]], SECOND)
+        self.assertEqual((self.edits, self.heard), ([(0, placed, "note placed")], [("tone", 62)]))
+        self.assertEqual((self.view.drawn, self.view.picked, self.view.busy), (placed, frozenset(), False))
+        # In the second voice, dragged from tick 2 into tick 4, it is 3 ticks long: a black key is spelt sharp.
+        self.view.voice = 1
+        self.drag(self.at(2, 70), self.at(4, 65))
+        self.assertEqual((self.notes(1), self.heard[1:]), ([*SECOND, [2, "a#4", 3]], [("buzz", 70)]))
+        # A click then places a note of that length. Dragged back before its start, a note is one step long.
+        self.drag(self.at(15, 60))
+        self.drag(self.at(10, 58), self.at(3, 58))
+        self.assertEqual(self.notes(1)[2:], [[15, "c4", 3], [10, "a#3", 1]])
+        # With steps of 4 ticks it begins where its step does, and ends with the step the mouse is in.
+        self.view.grid = 4
+        self.drag(self.at(9, 65), self.at(14, 65))
+        self.assertEqual((self.notes(1)[4:], self.notes(0)), ([[8, "f4", 8]], placed["voices"][0]["notes"]))
+        self.assertEqual([(index, label) for index, _, label in self.edits], [(0, "note placed")] * 5)
+        # A sound with fewer voices than the picked one takes the note in its last.
+        self.show(SOLO)
+        self.drag(self.at(4, 62))
+        self.assertEqual((self.notes(0), self.heard[-1]), ([[0, "c4", 6], [4, "d4", 8]], ("tone", 62)))
+
+    def test_a_drag_moves_the_picked_notes_and_two_of_one_voice_that_then_overlap_are_both_kept(self) -> None:
+        # c4 goes 12 ticks on and 4 keys up, onto the e4 of its own voice.
+        self.mouse("down", self.at(1, 60))
+        self.mouse("move", self.at(13, 64))
+        moved = duo([[12, "e4", 6], [12, "e4", 6]], SECOND)
+        # While it is dragged the view draws what the release would give, and nothing is handed on.
+        self.assertEqual((self.view.drawn, self.view.picked, self.ui.help, self.edits), (moved, {C4}, "move c4", []))
+        self.mouse("up", self.at(13, 64))
+        self.assertEqual((self.edits, self.view.drawn, self.view.picked), ([(0, moved, "note moved")], moved, {C4}))
+        # Picked notes of two voices move together, and stop together at tick 0: g4 is 6 ticks from it.
+        self.show(DUO)
+        self.drag(self.at(13, 64), mods=("ctrl",))
+        self.drag(self.at(7, 67), mods=("ctrl",))
+        self.drag(self.at(7, 67), (60, self.at(7, 69)[1]))
+        both = duo([FIRST[0], [6, "f#4", 6]], [[0, "a4", 6]])
+        self.assertEqual((self.edits[1:], self.view.picked), ([(0, both, "2 notes moved")], {E4, G4}))
+
+    def test_a_drag_from_the_end_of_a_bar_stretches_the_picked_notes_and_none_is_shorter_than_a_step(self) -> None:
+        self.mouse("move", self.end(C4))
+        self.assertEqual(self.ui.help, "stretch c4")
+        # From tick 5, where c4 ends, into tick 8.
+        self.drag(self.end(C4), self.at(8, 60))
+        self.assertEqual(self.edits, [(0, duo([[0, "c4", 9], FIRST[1]], SECOND), "note stretched")])
+        self.assertEqual(self.view.picked, {C4})
+        self.drag(self.end(C4), (60, 166))
+        self.assertEqual(self.notes(0), [[0, "c4", 1], FIRST[1]])
+        # With e4 picked as well, both are 2 ticks longer, and a click then places a note as long as the one
+        # that was under the hand.
+        self.drag(self.at(13, 64), mods=("ctrl",))
+        self.drag(self.end(E4), self.at(19, 64))
+        self.assertEqual((self.notes(0), self.edits[-1][2], self.view.picked),
+                         ([[0, "c4", 3], [12, "e4", 8]], "2 notes stretched", {C4, E4}))
+        self.drag(self.at(3, 70))
+        self.assertEqual(self.notes(0)[2:], [[3, "a#4", 8]])
+
+    def test_the_right_button_removes_the_note_under_it_and_dragged_every_note_it_passes(self) -> None:
+        self.drag(self.at(7, 67), button=3)
+        self.assertEqual((self.edits, self.view.picked), ([(0, duo(FIRST, []), "note removed")], frozenset()))
+        # From c4 in a straight line to e4, which does not pass g4: the two are one edit.
+        self.show(DUO)
+        self.drag(self.at(1, 60), self.at(13, 64), button=3)
+        self.assertEqual(self.edits[1:], [(0, duo([], SECOND), "2 notes removed")])
+        # Where no bar is, the right button removes nothing.
+        self.drag(self.at(10, 70), self.at(12, 70), button=3)
+        self.assertEqual((len(self.edits), self.heard), (2, []))
+
+    def test_ctrl_adds_to_the_picked_notes_and_a_box_and_ctrl_a_take_those_of_the_picked_voice(self) -> None:
+        for pos, picked in ((self.at(1, 60), {C4}), (self.at(7, 67), {C4, G4}), (self.at(1, 60), {G4})):
+            self.drag(pos, self.at(10, 70), mods=("ctrl",))
+            self.assertEqual(self.view.picked, picked)
+        # A press without ctrl on a note that is not picked picks it alone.
+        self.drag(self.at(13, 64))
+        self.assertEqual(self.view.picked, {E4})
+        # A box from tick 0 of a4 to tick 19 of a#3 touches all three notes: it picks those of the picked voice.
+        self.assertTrue(self.mouse("down", self.at(0, 69), 1, "shift"))
+        self.mouse("move", self.at(19, 58), 1, "shift")
+        self.assertEqual((self.view.picked, self.ui.help), ({E4}, "pick the notes of voice 1 that a box touches"))
+        self.mouse("up", self.at(19, 58), 1, "shift")
+        self.assertEqual(self.view.picked, {C4, E4})
+        self.view.voice = 1
+        self.drag(self.at(0, 69), self.at(19, 58), mods=("shift",))
+        self.assertEqual(self.view.picked, {G4})
+        # With ctrl held as well it picks those of every voice. A box that ends in tick 5 does not touch g4.
+        self.drag(self.at(0, 69), self.at(19, 58), mods=("shift", "ctrl"))
+        self.assertEqual(self.view.picked, {C4, E4, G4})
+        self.drag(self.at(0, 69), self.at(5, 58), mods=("shift", "ctrl"))
+        self.assertEqual(self.view.picked, {C4})
+        # A click with shift picks nothing. Ctrl and a picks the notes of the picked voice, with shift all.
+        self.drag(self.at(0, 69), mods=("shift",))
+        self.assertEqual(self.view.picked, frozenset())
+        self.assertTrue(self.key("a", "ctrl"))
+        self.assertEqual(self.view.picked, {G4})
+        self.view.voice = 0
+        self.assertEqual((self.key("a", "ctrl"), self.view.picked), (True, {C4, E4}))
+        self.assertEqual((self.key("a", "ctrl", "shift"), self.view.picked), (True, {C4, E4, G4}))
+        self.assertEqual((self.edits, self.heard), ([], []))
+
+    def test_a_release_where_the_press_was_calls_nothing_and_escape_drops_a_gesture(self) -> None:
+        x, y = self.at(1, 60)
+        # A press on a note picks it. Released there, after straying two pixels, or back where it began, it
+        # has moved nothing.
+        self.drag((x, y))
+        self.drag((x, y), (x + 2, y - 2))
+        self.drag((x, y), self.at(9, 65), (x, y))
+        self.drag(self.end(E4))
+        self.assertEqual((self.view.picked, self.view.drawn, self.edits, self.heard), ({E4}, DUO["def"], [], [(
+            "tone", 65), ("tone", 60)]))
+        # A place whose mouse strays two pixels is a click, and three pixels are a drag: of one step here.
+        x, y = self.at(8, 70)
+        self.drag((x, y), (x + 2, y))
+        x, y = self.at(8, 58)
+        self.drag((x, y), (x + 3, y))
+        self.assertEqual(self.notes(0)[2:], [[8, "a#4", 6], [8, "a#3", 1]])
+        # Escape drops the gesture that is under way: the notes are drawn as they are, and its release does
+        # nothing. With none under way it drops what is picked.
+        self.mouse("down", self.at(1, 60))
+        self.mouse("move", self.at(5, 62))
+        self.assertEqual((self.view.busy, self.notes(0)[0], self.key("delete")), (True, [4, "d4", 6], False))
+        self.assertEqual((self.key("escape"), self.view.busy, self.notes(0)[0]), (True, False, [0, "c4", 6]))
+        self.mouse("up", self.at(5, 62))
+        self.assertEqual((len(self.edits), self.view.picked), (2, {C4}))
+        self.assertEqual((self.key("escape"), self.view.picked), (True, frozenset()))
+
+    def test_the_keys_move_remove_copy_and_paste_the_picked_notes(self) -> None:
+        self.drag(self.at(1, 60))
+        # With the focus the Ui hands the view its keys. Up is a semitone, and with shift down an octave.
+        self.assertTrue(self.ui.handle(Event("key", key="up")))
+        self.assertEqual(self.edits, [(0, duo([[0, "c#4", 6], FIRST[1]], SECOND), "note moved")])
+        self.assertTrue(self.key("down", "shift"))
+        self.assertTrue(self.key("right"))
+        self.assertEqual((self.notes(0)[0], self.view.picked), ([1, "c#3", 6], {C4}))
+        # Left is a step of the grid back, and at tick 0 it moves nothing.
+        self.assertEqual((self.key("left"), self.key("left"), self.notes(0)[0], len(self.edits)),
+                         (True, True, [0, "c#3", 6], 4))
+        # Copied, the note is pasted at the tick under the mouse, in its own voice, and is the picked one.
+        self.assertTrue(self.key("c", "ctrl"))
+        self.mouse("move", self.at(14, 70))
+        self.assertTrue(self.key("v", "ctrl"))
+        pasted = duo([[0, "c#3", 6], FIRST[1], [14, "c#3", 6]], SECOND)
+        self.assertEqual((self.edits[-1], self.view.picked), ((0, pasted, "note pasted"), {(0, 2)}))
+        # With the mouse off the grid it is pasted at the first tick in view.
+        self.mouse("move", (20, 25))
+        self.key("v", "ctrl")
+        self.assertEqual((self.notes(0)[3:], self.view.picked), ([[0, "c#3", 6]], {(0, 3)}))
+        self.assertTrue(self.key("delete"))
+        self.assertEqual((self.edits[-1], self.view.picked), ((0, pasted, "note removed"), frozenset()))
+        # With nothing picked backspace removes nothing, and other keys are not the view's.
+        self.assertEqual((self.key("backspace"), self.key("space"), self.key("a"), self.key("up", "ctrl"),
+                          len(self.edits)), (True, False, False, False, 7))
+        # A sound with one voice refuses a note that was copied from a second voice, and the owner is told.
+        self.drag(self.at(7, 67))
+        self.key("c", "ctrl")
+        self.show(SOLO)
+        self.assertTrue(self.key("v", "ctrl"))
+        self.assertEqual((self.told, len(self.edits), self.view.drawn),
+                         (["1 is no voice of the sound, of which there are 1, counted from 0"], 7, SOLO["def"]))
+        # Shown shapes alone, the view has no keys.
+        self.view.show(ONE, [], RATE, theme.SOUND)
+        self.assertEqual((self.key("delete"), self.key("escape"), self.view.drawn), (False, False, None))
+
+    def test_a_note_is_heard_once_at_each_pitch_it_is_moved_to_and_when_it_is_placed_and_saved(self) -> None:
+        self.mouse("down", self.at(1, 60))
+        for stop in (self.at(1, 61), self.at(3, 61), self.at(3, 63), self.at(4, 63), self.at(4, 61)):
+            self.mouse("move", stop)
+        self.assertEqual(self.heard, [("tone", 61), ("tone", 63), ("tone", 61)])
+        self.mouse("up", self.at(4, 61))
+        # A note of the second voice is heard on the instrument of that voice. A stretch is not heard.
+        self.drag(self.at(7, 67), self.at(7, 68))
+        self.drag(self.end(G4), self.at(14, 68))
+        self.assertEqual((self.heard[3:], len(self.edits)), ([("buzz", 68)], 3))
+        # A note that is placed is not heard where the owner answers that it was not saved.
+        self.saves = False
+        self.drag(self.at(16, 70))
+        self.assertEqual((len(self.edits), len(self.heard), self.view.drawn), (4, 4, self.entry["def"]))
+
+    def test_the_help_line_says_what_a_press_where_the_mouse_is_would_do(self) -> None:
+        self.assertEqual((self.view.help, self.ui.help), ("the notes of a sound", ""))
+        for pos, mods, line in ((self.at(8, 62), (), "place a note at d4, tick 8, voice 1"),
+                                (self.at(1, 60), (), "move c4"),
+                                (self.end(G4), (), "stretch g4"),
+                                (self.at(1, 60), ("ctrl",), "pick c4 as well"),
+                                (self.at(8, 62), ("shift",), "pick the notes of voice 1 that a box touches"),
+                                (self.at(8, 62), ("shift", "ctrl"), "pick the notes that a box touches"),
+                                ((20, 166), (), "the notes of a sound"),
+                                ((100, 25), (), "the notes of a sound")):
+            self.mouse("move", pos, 0, *mods)
+            self.assertEqual(self.ui.help, line, (pos, mods))
+        # A picked note is left out by ctrl, and the place of a note is told in steps of the grid.
+        self.drag(self.at(1, 60))
+        self.mouse("move", self.at(1, 60), 0, "ctrl")
+        self.assertEqual(self.ui.help, "leave c4 out of the picked notes")
+        self.view.grid, self.view.voice = 4, 1
+        self.mouse("move", self.at(11, 70))
+        self.assertEqual(self.ui.help, "place a note at a#4, tick 8, voice 2")
+        # A sound of one voice names no voice. In one of several sounds the place is told with its sound.
+        self.show(SOLO)
+        self.mouse("move", self.at(3, 62), 0, "shift")
+        self.assertEqual(self.ui.help, "pick the notes that a box touches")
+        self.view.grid = 1
+        self.show(TWINS)
+        self.mouse("move", self.at(2, 74, 1))
+        self.assertEqual(self.ui.help, "place a note at d5, tick 2, variant 2")
+
+    def test_the_hand_is_in_the_sound_it_pressed_in_last_on_the_grid_or_on_a_label(self) -> None:
+        self.show(TWINS)
+        # A click in the room of the second variant places a note in that one, counted from its own start.
+        self.drag(self.at(2, 74, 1))
+        second = solo([0, "c5", 12], [2, "d5", 6])
+        self.assertEqual((self.edits, self.view.sound, self.view.drawn), ([(1, second, "note placed")], 1, second))
+        self.assertEqual(self.entry["defs"], [TWINS["defs"][0], second])
+        # A box in its room picks of its notes. A press on a note of the first variant has the hand in the
+        # first, with nothing of the second picked.
+        self.drag(self.at(8, 76, 1), self.at(1, 73, 1), mods=("shift",))
+        self.assertEqual(self.view.picked, {(0, 1)})
+        self.drag(self.at(1, 60))
+        self.assertEqual((self.view.sound, self.view.picked, self.view.drawn), (0, {(0, 0)}, TWINS["defs"][0]))
+        # A press on the label of a variant has the hand in it, and with someone to tell it is chosen as well.
+        seen = self.view.map
+        label = (seen.x(0.18) + 5, seen.names[1] + 2)
+        self.mouse("move", label)
+        self.assertEqual(self.ui.help, "click to work on variant 2")
+        self.assertEqual((self.mouse("down", label), self.view.sound, self.view.picked, self.view.busy),
+                         (True, 1, frozenset(), False))
+        self.mouse("up", label)
+        chosen: list[int] = []
+        self.view.chosen = chosen.append
+        self.assertEqual((self.ui.help, self.mouse("down", (label[0] - 100, label[1])), self.view.sound, chosen),
+                         ("click to hear variant 2", True, 0, [0]))
+        self.mouse("up", label)
+        # Of two parts that lie over one another, a click where no bar is goes to the part the hand is in.
+        self.show(LAYERS)
+        self.drag(self.at(8, 70))
+        self.drag(self.at(1, 72, 1))
+        self.drag(self.at(4, 68, 1))
+        self.assertEqual([(index, defn["voices"][0]["notes"][-1]) for index, defn, _ in self.edits[1:]],
+                         [(0, [8, "a#4", 6]), (1, [4, "g#4", 6])])
+        # The start and the loop of a held sound are both its note, and its end is a sound of its own.
+        self.show(HUM)
+        seen = self.view.map
+        for x, sound, line in ((seen.x(0.65), 1, "click to work on the end"), (seen.x(0.3), 0, "click to work on "
+                                                                                                 "the note")):
+            self.mouse("move", (x, seen.names[1] + 2))
+            self.assertEqual((self.ui.help, self.mouse("down", (x, seen.names[1] + 2)), self.view.sound),
+                             (line, True, sound))
+            self.mouse("up", (x, seen.names[1] + 2))
+        self.assertEqual(len(self.edits), 3)
+
+    def test_what_is_picked_stays_picked_while_its_sound_has_the_notes_it_had(self) -> None:
+        self.drag(self.at(1, 60))
+        self.drag(self.at(7, 67), mods=("ctrl",))
+        # The same entry shown again, as when its render has come, and one with another echo: the notes are
+        # the ones there were.
+        self.show()
+        self.show({"def": {**DUO["def"], "echo": {"time": 0.1}}})
+        self.assertEqual(self.view.picked, {C4, G4})
+        # A gesture goes on when the entry it began in is shown again, and is dropped by another.
+        self.mouse("down", self.at(1, 60))
+        self.mouse("move", self.at(3, 60))
+        self.show()
+        self.assertEqual((self.view.busy, self.notes(0)[0]), (True, [2, "c4", 6]))
+        self.show(DUO)
+        self.assertEqual((self.view.busy, self.notes(0)[0], self.view.picked), (False, [0, "c4", 6], {C4, G4}))
+        self.mouse("up", self.at(3, 60))
+        self.assertEqual(self.edits, [])
+        # Other notes shown, as after a step taken back, are shown with nothing picked.
+        self.show({"def": duo(FIRST, [])})
+        self.assertEqual(self.view.picked, frozenset())
+        # What an edit leaves picked is picked when its sound is shown, and not when the owner did not save.
+        self.drag(self.at(1, 60), self.at(2, 60))
+        self.assertEqual((self.view.picked, self.notes(0)[0]), ({C4}, [1, "c4", 6]))
+        self.saves = False
+        self.drag(self.at(13, 64), button=3)
+        self.assertEqual((self.view.picked, self.notes(0), len(self.edits)), ({C4}, [[1, "c4", 6], FIRST[1]], 2))
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -616,6 +1082,47 @@ class Drawn(unittest.TestCase):
         self.view.show(ONE, [wave()], RATE, theme.SOUND)
         self.draw()
         self.assertEqual(self.colours(RECT) & every, set())
+
+    def test_a_picked_note_is_outlined_a_gesture_is_drawn_as_its_release_would_leave_it_and_a_stale_wave_is_dim(
+            self) -> None:
+        shapes = soundview.shapes(DUO, instruments=INSTRUMENTS)
+        self.view.show(shapes, [wave()[:266]], RATE, theme.SOUND, "def", DUO)
+        seen = self.draw()
+        # The bars are those of the entry, each in the colour of its voice, and nothing is outlined.
+        self.assertEqual((self.at(100, 166), self.at(340, 122), self.at(220, 89), self.where(theme.TEXT, seen.grid)),
+                         (theme.SOUND, theme.SOUND, theme.SALMON, set()))
+        # A click on c4 picks it: its bar (59, 162, 119, 10) has a bright outline in place of its edges.
+        for kind in ("down", "up"):
+            self.ui.handle(Event(kind, (100, 166), button=1))
+        self.draw()
+        outline = {(x, y) for x in range(59, 178) for y in range(162, 172) if x in (59, 177) or y in (162, 171)}
+        self.assertEqual((self.where(theme.TEXT, seen.grid), self.at(100, 166)), (outline, theme.SOUND))
+        # Dragged 4 ticks on and 2 keys up, it is drawn where the release would leave it, and not where it is.
+        self.ui.handle(Event("down", (100, 166), button=1))
+        self.ui.handle(Event("move", (180, 144)))
+        self.draw()
+        moved = {(x + 80, y - 22) for x, y in outline}
+        self.assertEqual((self.where(theme.TEXT, seen.grid), self.at(180, 144), self.at(100, 166)),
+                         (moved, theme.SOUND, theme.RAISED))
+        # With nobody to save it, the release leaves the notes as they were shown.
+        self.ui.handle(Event("up", (180, 144), button=1))
+        self.draw()
+        self.assertEqual(self.where(theme.TEXT, seen.grid), outline)
+        # A box is outlined while it is drawn, from the pixel of the press to the pixel of the mouse.
+        self.ui.handle(Event("down", (100, 100), button=1, mods=frozenset({"shift"})))
+        self.ui.handle(Event("move", (160, 150), mods=frozenset({"shift"})))
+        self.draw()
+        frame = {(x, y) for x in range(100, 161) for y in range(100, 151) if x in (100, 160) or y in (100, 150)}
+        self.assertEqual(self.where(theme.TEXT, seen.grid), frame)
+        self.ui.handle(Event("up", (160, 150), button=1, mods=frozenset({"shift"})))
+        # A stale wave has less than half of its colour, and a fresh one all of it.
+        dim = mix(theme.BACKGROUND, theme.SOUND, STALE)
+        for stale, inks in ((True, (True, False)), (False, (False, True))):
+            self.view.show(shapes, [wave()[:266]], RATE, theme.SOUND, "def", DUO, stale)
+            self.draw()
+            found = self.colours(seen.wave)
+            self.assertEqual((self.view.stale, dim in found, theme.SOUND in found), (stale, *inks))
+        self.assertLess(strength(dim, theme.BACKGROUND), strength(theme.SOUND, theme.BACKGROUND) / 2)
 
     def test_coin_of_the_arcade_example_is_its_two_bars_over_the_wave_of_its_render(self) -> None:
         view, seen, shapes, (samples,) = self.arcade("coin")
