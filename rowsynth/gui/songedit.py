@@ -242,8 +242,7 @@ def resized(song: dict, name: str, bars: int) -> dict:
     of the song.
 
     The chords written for the bars of the pattern are cut off as well. Where bars are added, each has the chord
-    of the last bar that was written: a bar with no chord is refused by the chord check as soon as a note
-    starts a beat in it.
+    of the last bar that was written, so that the notes there are held to a chord as those before them are.
 
     Refused are a pattern the song does not have, bars that are no whole number or fewer than 1, a pattern with
     a note that is off the grid of rows, and whatever `songview.text` refuses to write.

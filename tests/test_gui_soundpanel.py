@@ -937,6 +937,17 @@ class Saved(OnAFile):
         self.assertEqual((self.data(), self.session.message, self.session.undo_label, self.view.busy),
                          (written, "two: the project has no such sound any more", steps, False))
 
+    def test_a_level_let_go_of_after_its_sound_was_removed_outside_saves_nothing_and_says_so(self) -> None:
+        x, y = centre(self.panel.bar.level.rect)
+        self.mouse("down", (x, y))
+        self.mouse("move", (x, y + 10))
+        written = self.outside(lambda sounds: sounds.pop("two"))
+        self.panel.update()
+        steps = self.session.undo_label
+        self.mouse("up", (x, y + 10))
+        self.assertEqual((self.data(), self.session.message, self.session.undo_label),
+                         (written, "two: the project has no such sound any more", steps))
+
     def test_a_change_that_leaves_the_note_of_a_held_sound_too_short_is_refused_and_said_and_saves_nothing(
             self) -> None:
         self.pick("drone")

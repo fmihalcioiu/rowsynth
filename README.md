@@ -14,6 +14,8 @@ rowsynth reads JSON files of such sounds and songs and computes the audio sample
 
 It is made so that a program, or a person who cannot listen while writing, can still work. Every result can be read back as numbers: its level, the pitch at a given time, its brightness, and the jumps at its ends that would click.
 
+It also has a window, `rowsynth gui`: the same files as a piano roll, drum steps, knobs and a mixer, with every change written to the file as it is made.
+
 The two examples can be heard in a browser: [six sound effects and a layered tune](https://fmihalcioiu.github.io/rowsynth/), and [a longer piece](https://fmihalcioiu.github.io/rowsynth/piece/).
 
 ## Running it
@@ -357,7 +359,7 @@ It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of 
 | Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end how many findings `check` has for the project |
 | The list on the left | The songs, the sounds and the instruments. A click picks one, and a sound or an instrument is played as it is picked. The right button on one renames it, copies it or deletes it, and anywhere else in the list it makes a new one |
 | The middle | What is picked, to change: a song, an instrument or a sound, each as below |
-| The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in |
+| The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in. A finding with one sure repair has a `FIX` button: a channel that is short of its pattern, a song or a sound that is too loud, a group that a version names twice. `FIX ALL` makes all of them as one step |
 | Status line | One line of help for whatever the mouse is on, and what the window has to say. At its right end is what is picked |
 
 After every change the picked thing is rendered again and the checks are run again, so the numbers and the findings are those of the file as it is.
@@ -378,7 +380,7 @@ The grid is the rows. A pattern with a note that starts or ends between two rows
 
 `MIXER` has every channel side by side: a fader and a meter each, `M` to mute it and `S` to solo it, and a fader for the whole song. A mute or a solo is a way of listening. It is not written to the file, and it is not a step that is taken back.
 
-`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade.
+`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade. The right button on a version renames it, removes it, or has it premixed in a key. With more groups or versions than fit, the wheel moves along the groups, and over the headings along the versions.
 
 `TEMPO` steps through the tempos a song can have. A row lasts a whole number of ticks, so at four rows to a beat they are 900 over that number, from 40 to 300 beats a minute. The two buttons of `KEY` move every tuned note of the song a semitone down or up.
 
@@ -396,6 +398,10 @@ A sound is a timeline in seconds: its notes as bars, each voice in a colour of i
 
 The variants of a sound lie one after the other on the timeline, and a click on one plays it. The parts of a sound lie where they start. A held sound has its start, its loop and its end as three tinted zones, and a `HOLD` button: the sound is held for as long as the button is kept pressed, and its end is heard when the button is let go.
 
+The button in the heading that reads `ONE`, `VARIANTS`, `PARTS` or `HELD` is the kind of the sound. Its menu makes the sound another kind, and each item says what the sound would lose by it. A part has a numbered tab on the clock: the tab is dragged to move where the part starts. The `+` after the last one adds a part, or a variant to a sound of variants. The right button on a tab removes the part, copies it as a new one or sets its level, and on a variant it removes the variant or moves it a place. The two borders of a held sound are dragged along the clock, and `JOIN` and `LET GO` are knobs beside its level.
+
+`LIMITS` has what the checks hold the sound to: how long it may last, how far off zero and how bright it may be. The longest time is also a red line on the clock, set with the right button on the ruler and dragged from there.
+
 ### The FILE menu
 
 | Item | What it does |
@@ -403,8 +409,8 @@ The variants of a sound lie one after the other on the timeline, and a click on 
 | `New project...` | Asks for a file that is not there yet and puts the smallest project that can be heard in it: one instrument, one sound and one song |
 | `Open...` | Opens another project file in the window |
 | `Save a copy as...` | Writes the project as it is to another file. The open file stays the open one |
-| `Export...` | Opens a window with three tabs, for what `render`, `build` and `page` do: the picked sound or song as a WAV file, the songs for a player, or the listen page. It lists the files it will write, with their sizes where those are known and a mark on each that takes the place of a file that is there, and writes none of them until `WRITE` is pressed |
-| The files opened last | Eight at the most, each opened with a click |
+| `Export...` | Opens a window with three tabs, for what `render`, `build` and `page` do: the picked sound or song as a WAV file (one variant of a sound, or one part of a held sound, where it has them), the songs for a player, or the listen page. It lists the files it will write, with their sizes where those are known and a mark on each that takes the place of a file that is there, and writes none of them until `WRITE` is pressed |
+| The files opened last | Eight at the most, each opened with a click. One that is no longer there is dim |
 | `Close` | Closes the project and shows the first screen |
 
 There is no Save, because nothing is ever left unsaved.
@@ -419,9 +425,9 @@ Each change is also a step. Ctrl+Z takes the last step back and Ctrl+Y makes it 
 
 ### Another program on the same file
 
-The window looks at its file four times a second. When another program has written it, `rowsynth set` or an editor, the window reads it again and shows what it holds now. A song that is playing goes on from where it is, with the change in it. The status line names what changed, as in `changed outside: tune`, and the change is a step like any other: Ctrl+Z takes it back, in the file as well.
+The window looks at its file four times a second. When another program has written it, `rowsynth set` or an editor, the window reads it again and shows what it holds now. A song that is playing goes on from where it is, with the change in it. The status line names what changed, as in `changed outside: tune`, the thing glows in the list for a moment, and the change is a step like any other: Ctrl+Z takes it back, in the file as well.
 
-The window and the other program can both write between two looks. Changes to different places are both kept. Where both changed the same place, such as one channel of one pattern, the change made in the window is the one that stands. The status line says that it `was changed outside at the same moment: this change stands, and undo brings the other back`, and Ctrl+Z then puts in the file what the other program wrote.
+The window and the other program can both write between two looks. Changes to different places are both kept: what the other program changed is named and glows as above, and it is a step of its own under the window's, so Ctrl+Z takes the window's change back first. Where both changed the same place, such as one channel of one pattern, the change made in the window is the one that stands. The status line says that it `was changed outside at the same moment: this change stands, and undo brings the other back`, and Ctrl+Z then puts in the file what the other program wrote.
 
 A file that cannot be read just then, half written or no JSON, changes nothing in the window. The status line says what is wrong with it, a change made in the window is refused meanwhile, and the file is taken in when a later look finds it whole.
 

@@ -440,8 +440,11 @@ class SoundPanel(Panel):
 
     def _level(self, level: object, label: str) -> bool:
         """Save a level as the `db` of the picked entry, or with None take it out, and say whether it was saved."""
+        current = held(self.session.model).sounds.get(self.heading[1])
+        if current is None:
+            return self._refuse("the project has no such sound any more")
         try:
-            entry = soundedit.with_setting(held(self.session.model).sounds[self.heading[1]], "db", level)
+            entry = soundedit.with_setting(current, "db", level)
         except RowSynthError as error:
             return self._refuse(str(error))
         return self._put(entry, label, self.view.sound)
