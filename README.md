@@ -380,13 +380,15 @@ The grid is the rows. A pattern with a note that starts or ends between two rows
 
 `MIXER` has every channel side by side: a fader and a meter each, `M` to mute it and `S` to solo it, and a fader for the whole song. A mute or a solo is a way of listening. It is not written to the file, and it is not a step that is taken back.
 
-`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade. The right button on a version renames it, removes it, or has it premixed in a key. With more groups or versions than fit, the wheel moves along the groups, and over the headings along the versions.
+`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade. The right button on a version renames it, removes it, or has it premixed in a key. A press on the field of the keys opens a menu to hear the song in one of them. With more groups or versions than fit, the wheel moves along the groups, and over the headings along the versions.
 
 `TEMPO` steps through the tempos a song can have. A row lasts a whole number of ticks, so at four rows to a beat they are 900 over that number, from 40 to 300 beats a minute. The two buttons of `KEY` move every tuned note of the song a semitone down or up.
 
 ### Instruments
 
 An instrument has its wave as a row of buttons, its step tables as bars and its numbers as knobs. A table is drawn with the mouse: a press or a drag sets every step it passes, the right button sets them to zero, the handle after the last bar makes the table longer or shorter, and the bracket under the bars is its loop. A knob is dragged up and down, a tenth as fast with Shift held, or turned with the wheel, and a right click puts it back to what the engine takes when the file has no value.
+
+A song's own instruments stand in the list after the project's, each with the name of its song beside it, and are changed in the same way. The right button on one deletes it or makes it shared, which moves it to the instruments of the project.
 
 With the FM wave the eight wirings are pictures to click, and each of the four operators has its envelope as a line with points to drag, and knobs of its own.
 
