@@ -226,6 +226,8 @@ class Picking(unittest.TestCase):
 
     def test_the_keys_move_the_pick_past_a_heading_and_stop_at_both_ends(self) -> None:
         ui, rows, told = made(TALL, TREE)
+        # A press under its last row gives the list the focus, and picks nothing.
+        click(ui, (15, 215))
         for key, picked in (("down", "tune"), ("down", "coin"), ("up", "tune"), ("up", "tune"), ("end", "lead"),
                             ("down", "lead"), ("end", "lead"), ("home", "tune"), ("home", "tune")):
             self.assertTrue(press(ui, key))
@@ -245,6 +247,8 @@ class Picking(unittest.TestCase):
 
     def test_a_row_picked_by_key_is_scrolled_into_view_by_the_least_that_shows_it(self) -> None:
         ui, rows, _ = made(SHORT, FLAT)
+        # The keys go to the list that was last pressed.
+        click(ui, spot(rows, 0))
         for key, picked, offset in (("end", 9, 7 * ROW), ("home", 0, 0), ("down", 1, 0), ("down", 2, 0),
                                     ("down", 3, ROW), ("end", 9, 7 * ROW), ("up", 8, 7 * ROW), ("up", 7, 7 * ROW),
                                     ("up", 6, 6 * ROW)):

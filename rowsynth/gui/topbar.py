@@ -9,7 +9,7 @@ from .font import Font
 from .layout import Rect
 from .panels import Panel, within
 from .theme import Colour
-from .ui import Button, Label, Toggle, Ui
+from .ui import Button, Label, Toggle, Ui, Widget
 
 if TYPE_CHECKING:
     from .canvas import Canvas
@@ -19,6 +19,8 @@ if TYPE_CHECKING:
 WIDEST = "00:00.0 / 00:00.0"
 #: What stands in place of the count of findings while the checks run.
 RUNNING = "..."
+#: What the findings say of themselves, with the mouse on them, where the checks gave none.
+REFUSED = "the checks could not run on this project"
 
 
 def moment(seconds: float) -> str:
@@ -32,12 +34,15 @@ def timing(position: float, seconds: float) -> str:
     return f"{moment(position)} / {moment(seconds)}"
 
 
-def verdict(count: int | None) -> tuple[str, str, Colour]:
+def verdict(count: int | None, refused: bool = False) -> tuple[str, str, Colour]:
     """How a count of findings is shown: the name of an icon, a text, and the colour of the two.
 
     None is for checks that still run: dim dots, and "" for no icon. 0 is a tick in the colour of what is as it
-    should be. Anything more is the warning sign in the colour of what is wrong.
+    should be. Anything more is the warning sign in the colour of what is wrong. `refused` is for checks that
+    could not run, whatever the count: the warning sign in that colour, and "" for no number.
     """
+    if refused:
+        return "warn", "", theme.FAULT
     if count is None:
         return "", RUNNING, theme.DIM
     if count == 0:
@@ -81,7 +86,8 @@ def arrange(rect: Rect, name: str) -> dict[str, Rect]:
 class TopBar(Panel):
     """The bar along the top: what is open, what plays it, how far and how loud, and what the checks found.
 
-    `found` is how the findings are shown now, as `verdict` gives it.
+    `found` is how the findings are shown now, as `verdict` gives it. `sign` lies over them, and draws nothing:
+    it has the line of help that says so when the checks could not run.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
@@ -98,6 +104,7 @@ class TopBar(Panel):
         # A bar for the left side and under it one for the right.
         self.meter = ui.add(Meter(nowhere))
         self.meter.levels = (0.0, 0.0)
+        self.sign = ui.add(Widget(nowhere))
         self.found = verdict(None)
         self._places = arrange(nowhere, self.name.text)
 
@@ -111,6 +118,7 @@ class TopBar(Panel):
         self._places = arrange(rect, self.name.text)
         for thing in ("name", "play", "stop", "loop", "time", "meter"):
             getattr(self, thing).rect = self._places[thing]
+        self.sign.rect = self._places["found"]
         # A meter that has gone has no width, and is not drawn.
         self.meter.visible = self._places["meter"][2] > 0
 
@@ -125,10 +133,15 @@ class TopBar(Panel):
         self.time.text = timing(session.position(), session.seconds)
         self.meter.levels = session.level()
         self.meter.fall(passed)
-        self.found = verdict(session.finding_count())
+        refused = session.findings_refused
+        self.found = verdict(session.finding_count(), refused)
+        self.sign.help = REFUSED if refused else ""
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the sunk box the time stands in, and the findings: the count at the right end, its icon before it."""
+        """Draw the sunk box the time stands in, and the findings: the count at the right end, its icon before it.
+
+        With no count the icon stands at the right end.
+        """
         canvas.box(self._places["time"], theme.BACKGROUND)
         canvas.frame(self._places["time"], theme.LINE)
         icon, text, colour = self.found
@@ -138,4 +151,4 @@ class TopBar(Panel):
             canvas.text_in(text, (left, y, Font.width(text), h), colour)
             if icon:
                 wide, high = canvas.icon_size(icon)
-                canvas.icon(icon, left - theme.GAP - wide, y + (h - high) // 2, colour)
+                canvas.icon(icon, left - (theme.GAP if text else 0) - wide, y + (h - high) // 2, colour)

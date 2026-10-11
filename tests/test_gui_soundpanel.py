@@ -211,6 +211,9 @@ class Shown(unittest.TestCase):
             stand.at = at
             panel.update()
             self.assertEqual(panel.view.playhead, at)
+        # A frame that is told the seconds since the one before goes by the position of the session all the same.
+        stand.at = 0.4
+        self.assertEqual((panel.update(0.016), panel.view.playhead), (None, 0.4))
         stand.playing = False
         panel.update()
         self.assertIsNone(panel.view.playhead)

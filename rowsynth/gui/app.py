@@ -12,7 +12,9 @@ from .audio import Player
 from .browser import Browser
 from .canvas import Canvas
 from .font import Font
+from .inspector import Inspector
 from .layout import Rect
+from .middle import Middle
 from .model import Model
 from .panels import Panel
 from .screen import Screen
@@ -45,7 +47,7 @@ class App:
         """Read the project in the file, then open the window. A file that holds no project is refused first.
 
         The sound output is opened at the rate the project is rendered at. Where it cannot be opened the session
-        has none: everything else works, and the session says so when something is to play.
+        has none: everything else works, and the session says so from the first frame.
         """
         try:
             self.model = Model(path)
@@ -67,7 +69,9 @@ class App:
         self.ui = Ui()
         self.ui.keys[_PLAY] = self.session.toggle
         self.panels: dict[str, Panel] = {"top": TopBar(self.session, self.ui),
-                                         "left": Browser(self.session, self.ui)}
+                                         "left": Browser(self.session, self.ui),
+                                         "middle": Middle(self.session, self.ui),
+                                         "right": Inspector(self.session, self.ui)}
         self.place(self.screen.art.get_size())
 
     def place(self, size: tuple[int, int]) -> None:

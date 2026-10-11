@@ -1,4 +1,4 @@
-"""Tests for rowsynth.gui.ui: events, who they go to, and the first widgets."""
+"""Tests for rowsynth.gui.ui: events, who they go to, who has the focus, and the first widgets."""
 from __future__ import annotations
 
 import dataclasses
@@ -10,6 +10,7 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
+from rowsynth.gui.lists import List, Row
 from rowsynth.gui.ui import Button, Choice, Event, Label, Toggle, Ui, Widget, inside, share, translate
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -23,6 +24,9 @@ except ImportError:
 
 NEEDS = "pygame is not installed"
 CTRL = frozenset({"ctrl"})
+#: Five rows of a list, known by their numbers. In a list at the top of the screen, row 2 is 2 * ROW down.
+ROWS = tuple(Row(number, f"row {number}") for number in range(5))
+ROW = theme.LIST_ROW_H
 
 
 class Probe(Widget):
@@ -103,17 +107,76 @@ class Handing(unittest.TestCase):
         self.assertFalse(ui.handle(Event("move", (25, 5))))
         self.assertEqual((ui.hot, other.seen), (other, ["move"]))
 
-    def test_a_key_reaches_keys_only_when_no_widget_used_it(self) -> None:
+    def test_a_key_is_offered_to_the_widget_that_has_the_focus_and_to_no_other_and_then_to_keys(self) -> None:
         ui, called = Ui(), []
         ui.keys[("space", frozenset())] = lambda: called.append("play")
         ui.keys[("z", CTRL)] = lambda: called.append("undo")
-        deaf = ui.add(Probe((0, 0, 5, 5)))
+        deaf, keen = ui.add(Probe((0, 0, 5, 5), ("down",))), ui.add(Probe((10, 0, 5, 5), ("down", "key")))
+        # Before any press no widget has the focus, and a key is offered to none: not to one that would use it.
         self.assertEqual([ui.handle(Event("key", key="space")), ui.handle(Event("key", key="z")),
                           ui.handle(Event("key", key="z", mods=CTRL))], [True, False, True])
-        self.assertEqual((called, deaf.seen), (["play", "undo"], ["key", "key", "key"]))
-        ui.add(Probe((90, 90, 5, 5), ("key",)))
+        self.assertEqual((ui.focus, called, deaf.seen, keen.seen), (None, ["play", "undo"], [], []))
+        # The widget that used a press has the focus. What it does not use of the keys goes on to `keys`.
+        click(ui, (2, 2))
         self.assertTrue(ui.handle(Event("key", key="space")))
-        self.assertEqual(called, ["play", "undo"])
+        self.assertEqual((ui.focus, called, deaf.seen, keen.seen),
+                         (deaf, ["play", "undo", "play"], ["down", "up", "key"], []))
+        # A press that another widget uses takes the focus there, and a key that one uses goes no further.
+        click(ui, (12, 2))
+        self.assertTrue(ui.handle(Event("key", key="space")))
+        self.assertEqual((ui.focus, called, deaf.seen, keen.seen),
+                         (keen, ["play", "undo", "play"], ["down", "up", "key"], ["down", "up", "key"]))
+
+
+class Focus(unittest.TestCase):
+    def test_with_two_lists_the_arrow_keys_move_only_the_one_that_was_clicked(self) -> None:
+        ui = Ui()
+        left, right = ui.add(List((0, 0, 60, 100), ROWS)), ui.add(List((70, 0, 60, 100), ROWS))
+        click(ui, (5, ROW))
+        for _ in range(2):
+            self.assertTrue(ui.handle(Event("key", key="down")))
+        self.assertEqual((ui.focus, left.picked, right.picked), (left, 3, None))
+        # The list that was added last has no more claim to the keys than the other.
+        click(ui, (75, 0))
+        self.assertTrue(ui.handle(Event("key", key="end")))
+        self.assertEqual((ui.focus, left.picked, right.picked), (right, 3, 4))
+
+    def test_a_click_on_empty_ground_takes_the_focus_away_and_the_keys_then_reach_keys(self) -> None:
+        ui, called = Ui(), []
+        ui.keys[("down", frozenset())] = lambda: called.append("down")
+        rows = ui.add(List((0, 0, 60, 100), ROWS))
+        click(ui, (5, 0))
+        self.assertTrue(ui.handle(Event("key", key="down")))
+        self.assertEqual((ui.focus, rows.picked, called), (rows, 1, []))
+        self.assertFalse(click(ui, (80, 5)))
+        self.assertTrue(ui.handle(Event("key", key="down")))
+        self.assertEqual((ui.focus, rows.picked, called), (None, 1, ["down"]))
+
+    def test_a_widget_that_is_hidden_or_not_enabled_loses_the_focus_and_does_not_have_it_when_it_is_back(self) -> None:
+        for gone in ("visible", "enabled"):
+            ui = Ui()
+            probe = ui.add(Probe((0, 0, 10, 10), ("down", "key")))
+            click(ui, (5, 5))
+            self.assertIs(ui.focus, probe)
+            setattr(probe, gone, False)
+            self.assertIsNone(ui.focus)
+            setattr(probe, gone, True)
+            self.assertFalse(ui.handle(Event("key", key="up")))
+            self.assertEqual((ui.focus, probe.seen), (None, ["down", "up"]))
+        # Nobody has to ask in between: a frame drawn without the widget is enough. A probe draws on no canvas.
+        click(ui, (5, 5))
+        probe.visible = False
+        ui.draw(None)
+        probe.visible = True
+        self.assertIsNone(ui.focus)
+
+    def test_the_space_bar_reaches_keys_while_a_list_has_the_focus(self) -> None:
+        ui, called = Ui(), []
+        ui.keys[("space", frozenset())] = lambda: called.append("play")
+        rows = ui.add(List((0, 0, 60, 100), ROWS))
+        click(ui, (5, 0))
+        self.assertTrue(ui.handle(Event("key", key="space")))
+        self.assertEqual((ui.focus, rows.picked, called), (rows, 0, ["play"]))
 
 
 class Widgets(unittest.TestCase):

@@ -97,7 +97,7 @@ class SoundPanel(Panel):
         self._places = arrange(rect)
         self.view.rect = self._places["view"]
 
-    def update(self) -> None:
+    def update(self, passed: float = 0.0) -> None:
         """Show what is picked as it is now: its shapes made again only for another pick or another project.
 
         The view is given the render when that has come, and the session's position while the thing plays.

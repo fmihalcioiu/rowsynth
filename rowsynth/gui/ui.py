@@ -121,7 +121,8 @@ class Widget:
 class Ui:
     """The widgets in the order they are drawn, the last on top, and who among them an event goes to.
 
-    `keys` is from (key, mods) to a function, called when that key goes down and no widget used it.
+    `keys` is from (key, mods) to a function, called when that key goes down and the widget that has the focus
+    did not use it.
     """
 
     def __init__(self) -> None:
@@ -131,6 +132,7 @@ class Ui:
         #: The widget that used a "down" whose "up" has not come yet.
         self.held: Widget | None = None
         self._button = 0
+        self._focus: Widget | None = None
 
     def add(self, widget: Widget) -> Widget:
         """Put a widget on top of the others, and give it back."""
@@ -140,6 +142,20 @@ class Ui:
     def _live(self) -> list[Widget]:
         """The widgets that are offered events, the topmost first."""
         return [widget for widget in reversed(self.widgets) if widget.visible and widget.enabled]
+
+    @property
+    def focus(self) -> Widget | None:
+        """The widget the keys go to: the one that last used a "down". None while no widget has it.
+
+        A press that no widget used takes it away, and a widget that is not visible or not enabled has lost it.
+        """
+        self._settle()
+        return self._focus
+
+    def _settle(self) -> None:
+        """Take the focus from a widget that is not visible or not enabled."""
+        if self._focus is not None and not (self._focus.visible and self._focus.enabled):
+            self._focus = None
 
     @property
     def hot(self) -> Widget | None:
@@ -160,10 +176,12 @@ class Ui:
 
         What the mouse does is offered to the widgets under it, the topmost first, until one uses it. A widget that
         used a "down" is held: it gets everything the mouse does up to the "up" of the same button, also when the
-        mouse has left it. A key is offered to every widget, the topmost first, and then to `keys`.
+        mouse has left it. It has the focus as well, and a "down" that no widget used leaves the focus with none.
+        A key is offered to the widget that has the focus and to no other, and then to `keys`.
         """
         if event.kind == "key":
-            if any(widget.on(event, self) for widget in self._live()):
+            focus = self.focus
+            if focus is not None and focus.on(event, self):
                 return True
             action = self.keys.get((event.key, event.mods))
             if action is not None:
@@ -179,11 +197,18 @@ class Ui:
             if widget.hit(event.pos) and widget.on(event, self):
                 if event.kind == "down":
                     self.held, self._button = widget, event.button
+                    self._focus = widget
                 return True
+        if event.kind == "down":
+            self._focus = None
         return False
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the visible widgets, the first at the bottom, each told whether it is hot and whether it is held."""
+        """Draw the visible widgets, the first at the bottom, each told whether it is hot and whether it is held.
+
+        A widget that is not seen in a frame has lost the focus, also when it is seen again in the next.
+        """
+        self._settle()
         hot = self.hot
         for widget in self.widgets:
             if widget.visible:

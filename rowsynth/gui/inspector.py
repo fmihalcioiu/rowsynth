@@ -47,8 +47,9 @@ DOTS = "..."
 SILENT = "silent"
 NONE = "none"
 NO = "no"
-#: What is said where the checks found nothing.
+#: What is said where the checks found nothing, and where they could not read the project at all.
 NOTHING = "nothing found"
+REFUSED = "the checks could not run"
 #: What a variant of a sound is called, which a target counts from 0 and the panel from 1.
 VARIANT = "variant"
 
@@ -254,6 +255,8 @@ class Findings(Widget):
                  help: str = "") -> None:
         super().__init__(rect, help)
         self.found: tuple[Finding, ...] | None = None
+        #: Whether there are no findings because the checks could not read the project, and not because they run.
+        self.refused = False
         self.picked: tuple[str, str] | None = None
         self.changed = changed
         self.scroll = Scroll(row=Font.LINE)
@@ -324,7 +327,8 @@ class Findings(Widget):
         lit = self.at(self._mouse) if self.hot else None
         with canvas.clip(self.rect):
             if self.found is None:
-                canvas.text_in(DOTS, (left, y + AIR, room, Font.LINE), theme.DIM)
+                said, colour = (REFUSED, theme.FAULT) if self.refused else (DOTS, theme.DIM)
+                canvas.text_in(said, (left, y + AIR, room, Font.LINE), colour)
             for block in self._laid.blocks:
                 top = y + block.top - self.scroll.offset
                 high = block.bottom - block.top
@@ -372,14 +376,17 @@ class Inspector(Panel):
         self._places = arrange(rect)
         self.list.rect = self._places["list"]
 
-    def update(self) -> None:
+    def update(self, passed: float = 0.0) -> None:
         """Show the numbers of the picked thing and the findings as the session has them now."""
         session = self.session
         picked = session.model.picked
         self.values = table(picked[0] if picked else "", session.numbers())
-        # Findings that are not there yet are not asked for: the asking would wait for them.
-        ready = session.finding_count() is not None
+        # Findings that are not there yet are not asked for: the asking would wait for them. Nor are those of
+        # checks that could not read the project: there are none, and the asking would raise their refusal.
+        refused = session.findings_refused
+        ready = session.finding_count() is not None and not refused
         self.list.found = tuple(session.model.findings()) if ready else None
+        self.list.refused = refused
         self.list.picked = picked
 
     def draw(self, canvas: Canvas) -> None:

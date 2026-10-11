@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 import os
 import unittest
+from unittest import mock
 
 # No test opens a window that can be seen, or a sound device. This is said before pygame is first imported.
 os.environ["SDL_VIDEODRIVER"] = "dummy"
@@ -57,6 +58,7 @@ class Stand:
     def __init__(self) -> None:
         self.model = Held()
         self.told: dict | None = None
+        self.findings_refused = False
         self.asked: list[tuple[str, str]] = []
 
     def numbers(self) -> dict | None:
@@ -220,6 +222,9 @@ class Shown(unittest.TestCase):
         stand.model.picked, stand.told = None, None
         panel.update()
         self.assertEqual(panel.values[6], ("END", "...", theme.DIM))
+        # A frame that is told the seconds since the one before shows what the session has, as any frame does.
+        stand.told = COIN
+        self.assertEqual((panel.update(0.25), panel.values[6]), (None, ("END", "none", fine)))
 
     def test_the_findings_of_the_picked_thing_come_first_whatever_is_picked(self) -> None:
         stand, _, panel = made([CLICK, HARSH, SHORT])
@@ -352,6 +357,19 @@ class Drawn(unittest.TestCase):
         surface = self.frame(ui, panel)
         self.assertGreater(ink(surface, first, theme.FAULT), 0)
         self.assertEqual((ink(surface, view, theme.SOUND) > 0, ink(surface, view, theme.GOOD)), (True, 0))
+
+    def test_checks_that_could_not_run_are_said_so_in_the_colour_of_a_fault_and_not_asked_for_findings(self) -> None:
+        rect = (10, 10, 174, 280)
+        stand, ui, panel = made([], rect)
+        # The session counts none where the checks refused the project, and the model would raise if asked.
+        stand.findings_refused = True
+        with mock.patch.object(stand.model, "findings", side_effect=RowSynthError("refused")) as asked:
+            surface = self.frame(ui, panel)
+        asked.assert_not_called()
+        view = arrange(rect)["list"]
+        words = (view[0] + PAD, view[1] + AIR, Font.width("the checks could not run"), Font.LINE)
+        self.assertGreater(ink(surface, words, theme.FAULT), 0)
+        self.assertEqual(ink(surface, view, theme.FAULT) + ink(surface, view, GROUND), view[2] * view[3])
 
     def test_nothing_is_drawn_outside_the_panel_with_many_findings_scrolled_part_of_the_way(self) -> None:
         size = (220, 330)

@@ -1,4 +1,4 @@
-"""Tests for the shell of the GUI: the top bar, the left panel, and the app that joins them to a session."""
+"""Tests for the shell of the GUI: the top bar, the left panel, and the app that joins the panels to a session."""
 from __future__ import annotations
 
 import os
@@ -17,7 +17,7 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from rowsynth import checks
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, run, sprites, start, theme
+from rowsynth.gui import inspector, layout, run, soundpanel, sprites, start, theme
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.browser import Browser, rows_of
 from rowsynth.gui.canvas import Canvas
@@ -25,7 +25,7 @@ from rowsynth.gui.dials import bars
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.panels import within
-from rowsynth.gui.topbar import TopBar, arrange, moment, timing
+from rowsynth.gui.topbar import REFUSED, TopBar, arrange, moment, timing
 from rowsynth.gui.ui import Event, Ui
 
 try:
@@ -71,6 +71,7 @@ class Stand:
         self.at = 0.0
         self.loud = (0.0, 0.0)
         self.count: int | None = None
+        self.findings_refused = False
         self.lit: dict[tuple[str, str], float] = {}
 
     def play(self) -> None:
@@ -230,6 +231,20 @@ class Top(unittest.TestCase):
             shown.append(bar.found)
         self.assertEqual(shown, [("", "...", theme.DIM), ("tick", "0", theme.GOOD), ("warn", "3", theme.FAULT)])
 
+    def test_checks_that_could_not_run_are_the_sign_with_no_number_and_the_line_of_help_says_so(self) -> None:
+        stand, ui, bar = bar_on()
+        # The session counts no findings where the checks gave none.
+        stand.count = 0
+        ui.handle(Event("move", middle(arrange(BAR, "arcade.json")["found"])))
+        shown = []
+        for refused in (False, True, False):
+            stand.findings_refused = refused
+            bar.update()
+            shown.append((bar.found, ui.help))
+        self.assertEqual(shown, [(("tick", "0", theme.GOOD), ""), (("warn", "", theme.FAULT), REFUSED),
+                                 (("tick", "0", theme.GOOD), "")])
+        self.assertEqual((ui.hot, REFUSED), (bar.sign, "the checks could not run on this project"))
+
     def test_the_meter_lies_with_a_bar_for_each_side_and_takes_their_levels_from_the_session(self) -> None:
         stand, _, bar = bar_on()
         self.assertEqual((bar.meter.upright, bar.meter.levels, bar.meter.tops), (False, (0.0, 0.0), [0.0, 0.0]))
@@ -288,11 +303,12 @@ class Top(unittest.TestCase):
                                   "found": (925, 0, 29, 22)})
         things = ("name", "play", "stop", "loop", "time", "meter")
         self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
+        self.assertEqual(bar.sign.rect, places["found"])
         # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
         for rect in (BAR, (0, 0, 379, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
             # A meter that has gone is not drawn at all.
-            self.assertEqual((len(ui.widgets), bar.meter.visible), (6, rect == BAR))
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (7, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect, "arcade.json").values()), rect)
 
@@ -362,8 +378,10 @@ class Drawn(unittest.TestCase):
         stand, ui, bar = bar_on(rect)
         places = arrange(rect, "arcade.json")
         x, y, w, h = places["found"]
-        for count, colour, has_icon in ((None, theme.DIM, False), (0, theme.GOOD, True), (3, theme.FAULT, True)):
-            stand.count = count
+        # The last is of checks that could not run.
+        for count, refused, colour, has_icon in ((None, False, theme.DIM, False), (0, False, theme.GOOD, True),
+                                                 (3, False, theme.FAULT, True), (0, True, theme.FAULT, True)):
+            stand.count, stand.findings_refused = count, refused
             surface.fill(theme.PANEL)
             bar.update()
             bar.draw(canvas)
@@ -372,6 +390,9 @@ class Drawn(unittest.TestCase):
             self.assertEqual(ink(surface, places["found"], colour) + ink(surface, places["found"], theme.PANEL),
                              w * h)
             self.assertEqual(ink(surface, (x, y, w - Font.width(bar.found[1]), h), colour) > 0, has_icon)
+        # With no number after it the sign stands at the right end.
+        wide = canvas.icon_size("warn")[0]
+        self.assertEqual(ink(surface, (x, y, w - wide, h), theme.FAULT), 0)
         x, y, w, h = places["time"]
         self.assertEqual(ink(surface, places["time"], theme.LINE), 2 * w + 2 * h - 4)
         self.assertGreater(ink(surface, places["time"], theme.TEXT), 0)
@@ -461,6 +482,56 @@ class InTheApp(unittest.TestCase):
         heading = (x + theme.BROWSER_PAD + theme.LIST_PAD + theme.LIST_SQUARE + theme.LIST_SPACE,
                    y + theme.BROWSER_TOP, Font.width("SONGS"), theme.LIST_ROW_H)
         self.assertGreater(ink(drawn, heading, theme.SONG), 0)
+
+    def test_three_frames_on_the_trailer_piece_return_0(self) -> None:
+        self.held()
+        self.assertEqual(run(EXAMPLES / "piece.json", frames=3), 0)
+
+    def test_with_the_render_ready_a_frame_has_the_lead_in_the_middle_and_its_length_at_the_right(self) -> None:
+        app = start(EXAMPLES / "arcade.json")
+        # The first frame starts the render on its thread, and the model is asked for what it makes: that waits.
+        app.update()
+        numbers = app.model.numbers()
+        app.update()
+        art = app.screen.begin()
+        app.draw(art)
+        parts = layout.frame(art.get_size())
+        shown = app.panels["middle"]
+        song = shown.panels["song"]
+        self.assertEqual((shown.fits, song.channel, song.roll.colour), ("song", "lead", theme.SONG))
+        first = song.roll.notes[0]
+        bar = song.roll.map.note(first.row, first.rows, first.pitch)
+        self.assertTrue(lies_in(bar, parts["middle"]))
+        self.assertGreater(ink(art, bar, theme.SONG), bar[2] * bar[3] // 2)
+        # The first of the numbers is the length: its label is dim at the left of its line, its value at the right.
+        x, y, w, _ = inspector.arrange(parts["right"])["table"]
+        value = Font.width(inspector.worded("seconds", numbers["seconds"]))
+        self.assertGreater(ink(art, (x, y, Font.width("LENGTH"), Font.LINE), theme.DIM), 0)
+        self.assertGreater(ink(art, (x + w - value, y, value, Font.LINE), theme.TEXT), 0)
+
+    def test_a_click_on_a_sound_in_the_left_list_has_the_middle_show_that_sound(self) -> None:
+        self.held()
+        app = start(EXAMPLES / "arcade.json")
+        art = app.screen.begin()
+        shown, rows = app.panels["middle"], app.panels["left"].list
+        head = soundpanel.arrange(layout.frame(art.get_size())["middle"])["head"]
+
+        def named() -> bool:
+            """Of a frame made now: is something written in the colour of a sound where a sound has its name."""
+            app.update()
+            app.draw(art)
+            return ink(art, head, theme.SOUND) > 0
+
+        self.assertEqual((named(), shown.fits, app.model.picked), (False, "song", ("song", "tune")))
+        at = tuple(part * app.screen.scale for part in spot(rows, ("sound", "powerup")))
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONDOWN, pos=at, button=1))
+        app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=at, button=1))
+        self.assertEqual((named(), shown.fits, shown.panels["sound"].heading), (True, "sound", ("SOUND", "powerup")))
+        self.assertEqual([widget for widget in shown.panels["song"].widgets if widget.visible], [])
+        # The list has the focus and has no use for the space bar: the sound that waits to be heard is stopped.
+        self.assertEqual((app.ui.focus, app.session.playing), (rows, True))
+        self.space(app)
+        self.assertFalse(app.session.playing)
 
     def test_the_space_bar_plays_what_is_picked_and_stops_it(self) -> None:
         self.held()
