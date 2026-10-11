@@ -40,12 +40,17 @@ def _file(path: str, picked: Pick, sides: list[np.ndarray], rate: int) -> dict:
             "measure": measure(row, rate)}
 
 
+def stem_file(channel: str) -> str:
+    """The name of the file the loop of a channel is written to with --stems: CHANNEL.wav."""
+    return f"{channel}.wav"
+
+
 def _stems(song: dict, folder: str, rate: int) -> dict:
     """Write a song as one mono loop a channel, each CHANNEL.wav in the folder, and say what the files hold."""
     loops = render_stems(song, rate)
     files = []
     for stem in loops["stems"]:
-        file = f"{stem['name']}.wav"
+        file = stem_file(stem["name"])
         # A folder that is missing is made by the writer, which makes whatever is above the file it writes.
         save_wav(Path(folder, file), stem["samples"], rate)
         files.append({"channel": stem["name"], "file": file, "pan": stem["pan"],
