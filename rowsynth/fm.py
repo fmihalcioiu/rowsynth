@@ -40,6 +40,12 @@ CARRIER = np.array([
     [0, 1, 1, 1],
     [1, 1, 1, 1],
 ], dtype=np.int64)
+# The operator the feedback is on, in every algorithm: the one that bends itself by its own last sample.
+FEEDBACK_OPERATOR = 0
+
+# What an envelope is where it names nothing: no attack, a decay of 0.3 s to a sustain level that is the full
+# one and so no decay at all, nothing lost while held, and a release of 0.2 s.
+ENVELOPE = {"a": 0.0, "d": 0.3, "s": 1.0, "sd": 0.0, "r": 0.2}
 
 # An operator's settings are one row of params; what moves while it plays is one row of state.
 _PARAMS, _STATE = 14, 6
@@ -76,11 +82,7 @@ def _set_envelope(row: np.ndarray, env: dict, rate: int, where: str) -> None:
     """Turns an envelope's times and levels into steps a sample, in one row of params."""
     if not isinstance(env, dict):
         raise RowSynthError(f"{where}: not an envelope: {env!r}")
-    a = _number(env, "a", 0.0, where)
-    d = _number(env, "d", 0.3, where)
-    s = _number(env, "s", 1.0, where)
-    sd = _number(env, "sd", 0.0, where)
-    r = _number(env, "r", 0.2, where)
+    a, d, s, sd, r = (_number(env, key, fallback, where) for key, fallback in ENVELOPE.items())
     sustain_db = 20.0 * math.log10(max(s, 1e-4))
     row[_ATTACK] = 1.0 / (a * rate) if a > 0 else 1.0
     row[_SUSTAIN_DB] = sustain_db
@@ -123,7 +125,7 @@ def fm_voice(inst: dict, rate: int) -> tuple[np.ndarray, np.ndarray]:
         params[i, _DET] = _number(op, "det", 0.0, where)
         params[i, _LEVEL] = _number(op, "level", 1.0, where)
         _set_envelope(params[i], op.get("env", {}), rate, f"{where}.env")
-    params[0, _FEEDBACK] = fb
+    params[FEEDBACK_OPERATOR, _FEEDBACK] = fb
     params[:, _HEARD] = CARRIER[alg]
     params[:, _BENT_BY:] = INTO[alg]
     return params, state
