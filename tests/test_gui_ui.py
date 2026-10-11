@@ -81,6 +81,24 @@ class Handing(unittest.TestCase):
         top.visible, top.enabled = True, False
         self.assertIs(ui.hot, low)
 
+    def test_a_widget_that_is_not_enabled_still_gives_its_help_line_and_one_that_is_hidden_does_not(self) -> None:
+        ui = Ui()
+        low, top = ui.add(Probe((0, 0, 20, 20), help="low")), ui.add(Probe((10, 10, 20, 20), help="nothing to do"))
+        top.enabled = False
+        ui.handle(Event("move", (15, 15)))
+        self.assertEqual((ui.hot, ui.help), (low, "nothing to do"))
+        top.visible = False
+        self.assertEqual((ui.hot, ui.help), (low, "low"))
+        # While a widget is held the line is its own while the mouse is on it, and none when it has left.
+        top.visible, top.enabled = True, True
+        held = ui.add(Probe((30, 0, 10, 10), ("down",), help="held"))
+        ui.handle(Event("down", (35, 5), button=1))
+        self.assertEqual((ui.held, ui.help), (held, "held"))
+        ui.handle(Event("move", (15, 15)))
+        self.assertEqual(ui.help, "")
+        ui.handle(Event("up", (15, 15), button=1))
+        self.assertEqual(ui.help, "nothing to do")
+
     def test_what_the_topmost_widget_does_not_use_is_offered_to_the_one_below(self) -> None:
         ui = Ui()
         low, top = ui.add(Probe((0, 0, 20, 20), ("wheel",))), ui.add(Probe((10, 10, 20, 20)))
@@ -197,7 +215,8 @@ class Widgets(unittest.TestCase):
         self.assertEqual((fired, ui.hot, ui.help), (["go"], button, "go there"))
         button.enabled = False
         self.assertFalse(click(ui, (12, 12)))
-        self.assertEqual((fired, ui.hot, ui.help), (["go"], None, ""))
+        # It is not hot, and it still says what it is for: that is where a button tells why it does nothing.
+        self.assertEqual((fired, ui.hot, ui.help), (["go"], None, "go there"))
         # One with no action, on top of it, can be pressed, and nothing comes of it.
         ui.add(Button((10, 10, 30, 13)))
         self.assertTrue(click(ui, (12, 12)))

@@ -167,9 +167,17 @@ class Ui:
 
     @property
     def help(self) -> str:
-        """The help line of the hot widget, and nothing when there is none."""
-        hot = self.hot
-        return hot.help if hot is not None else ""
+        """The help line of the topmost visible widget under the mouse, and nothing when there is none.
+
+        One that is not enabled has its say too, though it is not hot and is offered no events: that is where a
+        button tells why it does nothing. While a widget is held, the line is that widget's or none.
+        """
+        if self.held is not None:
+            return self.held.help if self.held.hit(self.mouse) else ""
+        for widget in reversed(self.widgets):
+            if widget.visible and widget.hit(self.mouse):
+                return widget.help
+        return ""
 
     def handle(self, event: Event) -> bool:
         """Hand an event to the widgets, and say whether it was used.
