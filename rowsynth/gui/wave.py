@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 import numpy as np
 
+from ..errors import RowSynthError
 from ..note import DEFAULT_RATE
 from . import soundview, theme
 from .font import BODY_H, Font
@@ -57,6 +58,12 @@ VARIANT_GAP = 0.2
 #: copy keeps from the upper and the lower edge of its bar.
 ECHO_SHARE = 0.8
 ECHO_INSET = 2
+#: What an entry of a project's sounds can be, as `bank.entry_kind` names it: one sound, variants, parts, held.
+KINDS = ("def", "defs", "parts", "held")
+#: The colour of each zone of a held sound, its start, its loop and its end, which its label is in. The ground
+#: of a zone goes this far towards it.
+ZONES = (theme.GOOD, theme.MUSTARD, theme.SALMON)
+TINT = 0.14
 
 
 def _px(value: float) -> int:
@@ -64,13 +71,13 @@ def _px(value: float) -> int:
     return math.floor(value + 0.5)
 
 
-def places(shapes: Sequence[tuple[str, float, Shape]]) -> list[float]:
+def places(shapes: Sequence[tuple[str, float, Shape]], apart: bool = False) -> list[float]:
     """The second on the view's clock at which the clock of each shape starts.
 
-    That is the second the shape is at. But several shapes that are all at 0, as variants are, are laid one after
-    the other, with `VARIANT_GAP` of the longest of them left free between two.
+    That is the second the shape is at. But shapes that are `apart`, as variants are, are laid one after the
+    other, with `VARIANT_GAP` of the longest of them left free between two.
     """
-    if len(shapes) < 2 or any(at for _, at, _ in shapes):
+    if not apart or not shapes:
         return [float(at) for _, at, _ in shapes]
     gap = VARIANT_GAP * max(shape.seconds for _, _, shape in shapes)
     found, at = [], 0.0
@@ -78,6 +85,23 @@ def places(shapes: Sequence[tuple[str, float, Shape]]) -> list[float]:
         found.append(at)
         at += shape.seconds + gap
     return found
+
+
+def stretch(starts: Sequence[float], at: float) -> int | None:
+    """Which of the stretches of a line a place is in, counted from 0: each goes from its start to the next start.
+
+    The starts are in order, and the last stretch has no end. None for a place before the first of them.
+    """
+    found = None
+    for index, start in enumerate(starts):
+        if at >= start:
+            found = index
+    return found
+
+
+def tint(ground: Colour, zone: int) -> Colour:
+    """The colour a ground has in a zone of a held sound, counted from 0: `TINT` of the way to the zone's colour."""
+    return mix(ground, ZONES[zone], TINT)
 
 
 def keys(height: int, low: int, high: int) -> tuple[int, int]:
@@ -264,21 +288,30 @@ class Map:
 class SoundView(Widget):
     """The view of a sound: its notes as bars on a grid of seconds and keys, and under them its wave on the same clock.
 
-    It shows, and changes nothing. `playhead` is the second that is playing, or None: the owner sets it each frame.
-    `colour` is that of the kind of thing shown, and `seconds` how long its clock is. `start` and `zoom` are the
-    view, as a `Map` has them. `help`, while the mouse is on a bar or on the wave, says what is there; anywhere
-    else it is the line the view was made with.
+    It shows, and changes nothing. `playhead` is the second of its clock that is playing, or None: the owner sets
+    it each frame, and `clock` gives the second for a place in one of the shapes. `colour` is that of the kind of
+    thing shown, `kind` what its entry is, and `seconds` how long its clock is. `start` and `zoom` are the view,
+    as a `Map` has them. `help`, while the mouse is on a bar, on the wave or on the label of a variant, says what
+    is there; anywhere else it is the line the view was made with.
+
+    A variant can be chosen: `chosen` is called with its number, from 0, as the left button goes down on its
+    label or in its stretch of the wave. `played` is the shape whose label is lit, or None: the owner sets it to
+    the variant that was played last.
     """
 
     def __init__(self, rect: Rect, help: str = "") -> None:
         super().__init__(rect, help)
         self.colour: Colour = theme.SOUND
+        self.kind = KINDS[0]
         self.playhead: float | None = None
+        self.played: int | None = None
+        self.chosen: Callable[[int], object] | None = None
         self.seconds = 0.0
         self.start, self.zoom = 0.0, 0
         # The shapes that are shown, each as (label, the second of the view's clock its own starts at, shape).
         self._laid: tuple[tuple[str, float, Shape], ...] = ()
-        self._samples = np.zeros(0, dtype=np.float32)
+        # The waves under them, each as (the second of the view's clock it starts at, its samples).
+        self._waves: tuple[tuple[float, np.ndarray], ...] = ()
         self._rate = DEFAULT_RATE
         self._mouse: Pos = NOWHERE
 
@@ -300,20 +333,37 @@ class SoundView(Widget):
         top, key_h = keys(seen.grid[3], min(pitches), max(pitches))
         return replace(seen, top=top, key_h=key_h).within()
 
-    def show(self, shapes: Sequence[tuple[str, float, Shape]], samples: np.ndarray, rate: int,
-             colour: Colour) -> None:
+    def show(self, shapes: Sequence[tuple[str, float, Shape]], samples: Sequence[np.ndarray], rate: int,
+             colour: Colour, kind: str = "def") -> None:
         """Show some shapes, as `soundview.shapes` gives them, over the samples of their render at a rate.
 
-        The samples are one row, for a sound in two sides their mean, and start where the clock does. No shapes
-        are a wave alone, with no grid over it, and no samples are an empty wave. `colour` is that of the kind of
-        thing shown. The view stays where it was, as far as the new clock lets it: `fit` shows the whole again.
-        What is no wave and what is no rate are refused, and then nothing changes.
+        `kind` is what the entry of the shapes is, as `bank.entry_kind` names it. The shapes of "defs" are
+        variants, laid one after the other, and those of "held" are its zones, each tinted in its colour.
+
+        The samples are rows, as `render_entry` gives its buffers. Several rows are one for each shape: each is
+        the wave of its shape, and starts where that starts. One row alone starts where the clock does: it is
+        the wave of one sound or of parts added up, and with no shapes a wave alone, with no grid over it. No
+        rows are an empty wave. `colour` is that of the kind of thing shown. The view stays where it was, as far
+        as the new clock lets it: `fit` shows the whole again. What is no kind, no rows, no wave or no rate is
+        refused, and so are rows that are neither one nor one for each shape. Then nothing changes.
         """
-        soundview.columns(samples, 0)
+        if kind not in KINDS:
+            raise RowSynthError(f"kind: must be one of {', '.join(KINDS)}, not {kind!r}")
+        if not isinstance(samples, (list, tuple)):
+            raise RowSynthError("samples: must be a list of rows, each an array of one dimension")
+        for row in samples:
+            soundview.columns(row, 0)
+        if len(samples) not in (0, 1, len(shapes)):
+            raise RowSynthError(f"samples: must be one row, or a row for each of the {len(shapes)} shapes, "
+                                f"not {len(samples)} rows")
         soundview.ticks_to_seconds(0, rate)
-        laid = tuple((label, place, shape) for (label, _, shape), place in zip(shapes, places(shapes)))
-        self._laid, self._samples, self._rate, self.colour = laid, samples, rate, colour
-        self.seconds = max([place + shape.seconds for _, place, shape in laid] + [len(samples) / rate])
+        laid = tuple((label, place, shape)
+                     for (label, _, shape), place in zip(shapes, places(shapes, kind == "defs")))
+        each = len(samples) == len(laid) > 1
+        waves = tuple((laid[index][1] if each else 0.0, row) for index, row in enumerate(samples))
+        self._laid, self._waves, self._rate, self.colour, self.kind = laid, waves, rate, colour, kind
+        self.seconds = max([0.0] + [place + shape.seconds for _, place, shape in laid]
+                           + [place + len(row) / rate for place, row in waves])
         self._see(self.map)
 
     def fit(self) -> None:
@@ -336,40 +386,81 @@ class SoundView(Widget):
                         return bar
         return None
 
-    def columns(self) -> tuple[int, np.ndarray]:
-        """The wave as it is in view: the x of its first column, and the columns as `soundview.columns` gives them.
+    def clock(self, index: int, into: float) -> float | None:
+        """The second of the view's clock that is `into` seconds into one of the shapes, counted from 0.
 
-        There is a column for each pixel of the box that the samples reach, and none where they do not.
+        None where the shape is not: before its start, past its end, and for a shape there is none of. So a
+        playhead that goes by this stays in the stretch of its shape.
+        """
+        if not 0 <= index < len(self._laid):
+            return None
+        _, place, shape = self._laid[index]
+        return place + into if 0 <= into <= shape.seconds else None
+
+    def choice_at(self, pos: Pos) -> int | None:
+        """The variant a position chooses, counted from 0: the one whose label or whose stretch of the wave it is on.
+
+        A stretch goes from where its variant starts to where the next one does. None anywhere else, and for a
+        sound that has no variants.
+        """
+        seen = self.map
+        if self.kind != "defs" or not (inside(seen.names, pos) or inside(seen.wave, pos)):
+            return None
+        return stretch([seen.x(place) for _, place, _ in self._laid], pos[0])
+
+    def columns(self) -> list[tuple[int, np.ndarray]]:
+        """The waves as they are in view: of each the x of its first column, and its columns as `soundview.columns`
+        gives them.
+
+        A wave has a column for each pixel of the box that its samples reach, and none where they do not. With
+        its start in view its first column begins at its first sample, and with its end in view its last column
+        ends at its last.
         """
         seen = self.map
         x, _, w, _ = seen.wave
-        left = max(x, seen.x(0.0))
-        right = max(left, min(x + w, seen.x(len(self._samples) / self._rate)))
-        first, last = (max(0, round(seen.second_at(edge) * self._rate)) for edge in (left, right))
-        return left, soundview.columns(self._samples, right - left, first, last)
+        found = []
+        for place, samples in self._waves:
+            begins, ends = seen.x(place), seen.x(place + len(samples) / self._rate)
+            left = max(x, begins)
+            right = max(left, min(x + w, ends))
+            first = 0 if left == begins else max(0, round((seen.second_at(left) - place) * self._rate))
+            last = len(samples) if right == ends else max(0, round((seen.second_at(right) - place) * self._rate))
+            found.append((left, soundview.columns(samples, right - left, first, last)))
+        return found
 
     def _tell(self, pos: Pos) -> str:
-        """What is at a position, in plain words: a note, or a moment of the wave and its level. Else no words."""
+        """What is at a position, in plain words: a note, the label of a variant there is to choose, or a moment of
+        the wave and its level. Else no words."""
         bar = self.bar_at(pos)
         if bar is not None:
             line = f"{name(round(bar.pitch))}, {bar.seconds:.2f} s"
             return f"{line}, instrument {bar.inst}" if bar.inst else line
         seen = self.map
+        which = self.choice_at(pos)
+        if which is not None and self.chosen is not None and inside(seen.names, pos):
+            return f"click to hear variant {which + 1}"
         if not inside(seen.wave, pos):
             return ""
-        first, last = (round(seen.second_at(pos[0] + step) * self._rate) for step in (0, 1))
-        heard = self._samples[first:max(last, first + 1)]
-        if not len(heard):
-            return ""
-        peak = float(np.abs(heard).max())
-        level = f"{20 * math.log10(peak):.1f} dB" if peak > 0 else "silent"
-        return f"{seen.second_at(pos[0]):.2f} s, {level}"
+        for place, samples in self._waves:
+            first, last = (round((seen.second_at(pos[0] + step) - place) * self._rate) for step in (0, 1))
+            heard = samples[max(first, 0):max(last, first + 1, 0)]
+            if len(heard):
+                peak = float(np.abs(heard).max())
+                level = f"{20 * math.log10(peak):.1f} dB" if peak > 0 else "silent"
+                return f"{seen.second_at(pos[0]):.2f} s, {level}"
+        return ""
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Note where the mouse is, and use the wheel: with ctrl it zooms, and alone it scrolls a clock zoomed in."""
+        """Note where the mouse is, choose a variant the left button goes down on, and use the wheel: with ctrl
+        it zooms, and alone it scrolls a clock zoomed in."""
         if event.kind == "key":
             return False
         self._mouse = event.pos
+        if event.kind == "down" and event.button == 1 and self.chosen is not None:
+            which = self.choice_at(event.pos)
+            if which is not None:
+                self.chosen(which)
+            return which is not None
         if event.kind != "wheel":
             return False
         seen = self.map
@@ -424,14 +515,28 @@ class SoundView(Widget):
                 elif pitch % 12 == 0 and seen.key_h >= BODY_H + 2:
                     canvas.text_in(name(pitch), (x, key[1], w - 5, seen.key_h), theme.BACKGROUND, "right")
 
+    def _zones(self, seen: Map) -> list[tuple[int, int]]:
+        """The zones of a held sound from side to side, each as (x, width): one ends where the next starts, and the
+        last where the clock does. Anything else has none.
+        """
+        if self.kind != "held":
+            return []
+        edges = [seen.x(start) for _, start, _ in self._laid] + [seen.x(self.seconds)]
+        return [(left, right - left) for left, right in zip(edges, edges[1:])][:len(ZONES)]
+
     def _draw_grid(self, canvas: Canvas, seen: Map) -> None:
-        """The rows of the keys, and the lines of the ruler's marks down them: every tenth of them is stronger."""
+        """The rows of the keys, tinted in the zones of a held sound, and the lines of the ruler's marks down them:
+        every tenth of them is stronger."""
         x, y, w, h = seen.grid
         step = 10.0 ** ruler_step(seen.scale)
+        zones = self._zones(seen)
         with canvas.clip(seen.grid):
             for pitch in seen.pitches():
                 top = seen.y(pitch)
-                canvas.box((x, top, w, seen.key_h), theme.BACKGROUND if black(pitch) else theme.RAISED)
+                ground = theme.BACKGROUND if black(pitch) else theme.RAISED
+                canvas.box((x, top, w, seen.key_h), ground)
+                for zone, (left, wide) in enumerate(zones):
+                    canvas.box((left, top, wide, seen.key_h), tint(ground, zone))
                 if seen.key_h >= KEY_LINES_FROM:
                     canvas.hline(x, top + seen.key_h - 1, w, theme.PANEL)
             for mark in seen.marks():
@@ -462,6 +567,12 @@ class SoundView(Widget):
                     if w >= Font.width(label) + 5 and h >= BODY_H + 2:
                         canvas.text_in(label, (x + 3, y, w - 5, h), theme.BACKGROUND)
 
+    def _ink(self, index: int) -> Colour:
+        """The colour of the label of a shape: lit for the one that was played, and in a held sound that of its zone."""
+        if index == self.played:
+            return theme.ACTIVE
+        return ZONES[index] if self.kind == "held" and index < len(ZONES) else theme.TEXT
+
     def _draw_names(self, canvas: Canvas, seen: Map) -> None:
         """A line down the grid where each shape after the first starts, and over the grid the label of each shape."""
         x, y, w, h = seen.names
@@ -474,22 +585,29 @@ class SoundView(Widget):
                     canvas.vline(left, y, deep, theme.TEXT)
                 # A label has the room up to the next start there is after its own.
                 room = min((start for start in starts if start > left), default=x + w) - left - 4
-                canvas.text_in(label.upper(), (left + 3, y, max(0, room), h), theme.TEXT)
+                canvas.text_in(label.upper(), (left + 3, y, max(0, room), h), self._ink(index))
 
     def _draw_wave(self, canvas: Canvas, seen: Map) -> None:
-        """The box of the wave with its name beside it, the line at zero, and a column for each pixel with samples.
+        """The box of the waves with its name beside it, the line at zero, and of each wave a column for each pixel
+        with samples.
 
-        The columns are made to meet, so the wave is one line at any zoom.
+        The box is tinted in the zones of a held sound, and has a line where each variant after the first starts.
+        The columns of a wave are made to meet, so it is one line at any zoom.
         """
         x, y, w, h = seen.wave
         canvas.text_in("WAVE", (self.rect[0], y, KEYS_W - GAP, h), theme.DIM, "right")
         canvas.box(seen.wave, theme.BACKGROUND)
-        left, columns = self.columns()
         with canvas.clip((x + 1, y + 1, w - 2, h - 2)):
+            for zone, (left, wide) in enumerate(self._zones(seen)):
+                canvas.box((left, y, wide, h), tint(theme.BACKGROUND, zone))
             canvas.hline(x, seen.zero, w, theme.LINE)
-            spans = columns.tolist()
-            ends = joined([seen.column(lowest, highest) for lowest, highest in spans])
-            for column, ((lowest, highest), (upper, lower)) in enumerate(zip(spans, ends)):
-                clipped = max(highest, -lowest) >= FULL
-                canvas.vline(left + column, upper, lower - upper + 1, theme.FAULT if clipped else self.colour)
+            if self.kind == "defs":
+                for _, place, _ in self._laid[1:]:
+                    canvas.vline(seen.x(place), y, h, theme.LINE)
+            for left, columns in self.columns():
+                spans = columns.tolist()
+                ends = joined([seen.column(lowest, highest) for lowest, highest in spans])
+                for column, ((lowest, highest), (upper, lower)) in enumerate(zip(spans, ends)):
+                    clipped = max(highest, -lowest) >= FULL
+                    canvas.vline(left + column, upper, lower - upper + 1, theme.FAULT if clipped else self.colour)
         canvas.frame(seen.wave, theme.LINE)
