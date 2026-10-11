@@ -1,9 +1,14 @@
 """Tests for the right panel of the GUI: the numbers of the picked thing in words, and the findings of the checks."""
 from __future__ import annotations
 
+import copy
+import json
 import math
 import os
+import tempfile
+import threading
 import unittest
+from pathlib import Path
 from unittest import mock
 
 # No test opens a window that can be seen, or a sound device. This is said before pygame is first imported.
@@ -15,10 +20,14 @@ from rowsynth.checks import Finding, songs, sounds
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
+from rowsynth.gui.fixes import Fix
 from rowsynth.gui.font import Font
-from rowsynth.gui.inspector import (AIR, ICON, LABELS, PAD, RULE_AIR, Block, Inspector, arrange, belongs, faulty,
-                                    lay, where, worded)
+from rowsynth.gui.inspector import (AIR, FIX_ALL_W, FIX_H, FIX_W, ICON, LABELS, PAD, RULE_AIR, Block, Inspector,
+                                    arrange, belongs, faulty, lay, where, worded)
+from rowsynth.gui.model import Model
+from rowsynth.gui.session import Session
 from rowsynth.gui.ui import Event, Ui
+from rowsynth.project import Project
 
 try:
     import pygame
@@ -38,6 +47,18 @@ SHORT = Finding("rows", "songs.tune.patterns.a",
                 "channel 'bass' has 28 rows, and the longest channel of the pattern has 32")
 #: A colour the theme does not have, for a ground on which everything that is drawn shows.
 GROUND = (1, 2, 3)
+#: A project with three faults: two channels of a pattern that are short of it, which each have a safe repair,
+#: and a sound that is longer than its limit, which has none.
+TUNE = {"row_ticks": 6, "gain": 0.2, "channels": {name: {"inst": "tone"} for name in ("lead", "bass", "pad")},
+        "patterns": {"a": {"lead": "o4 l4 r c e", "bass": "o2 l4 r c", "pad": "l1 r"}}, "order": ["a"]}
+FAULTY = {"instruments": {"tone": {"wave": "tri"}},
+          "sounds": {"zap": {"def": {"voices": [{"inst": "tone", "notes": [[2, "c4", 10]]}]}, "max_seconds": 0.1}},
+          "songs": {"tune": TUNE}}
+#: What the two repairs are called, and the text each leaves its channel with.
+LEAD, BASS = "tune: lead of pattern a filled to 16 rows", "tune: bass of pattern a filled to 16 rows"
+FILLED = {"lead": "o4 l4 r c e r4", "bass": "o2 l4 r c r2"}
+#: The rate that project is rendered at on the threads of its model: a low one, to be quick.
+RATE = 8000
 
 
 class Held:
@@ -46,6 +67,9 @@ class Held:
     def __init__(self) -> None:
         self.picked: tuple[str, str] | None = ("sound", "coin")
         self.found: list[Finding] | None = None
+        # The repairs of the findings are asked of a project, and this one has nothing that could be repaired.
+        self.project = Project()
+        self.rate = RATE
 
     def findings(self) -> list[Finding]:
         """The findings, in a list made anew each time."""
@@ -92,6 +116,18 @@ def click(ui: Ui, pos: tuple[int, int]) -> None:
     """Press the left button at a position and let it go there."""
     ui.handle(Event("down", pos, button=1))
     ui.handle(Event("up", pos, button=1))
+
+
+def middle(rect: layout.Rect) -> tuple[int, int]:
+    """The pixel in the middle of a rectangle."""
+    return rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
+
+
+def settle() -> None:
+    """Wait for every render, every run of the checks and every working out of repairs that is still on a thread."""
+    for thread in threading.enumerate():
+        if thread.name.startswith("rowsynth-"):
+            thread.join()
 
 
 def lies_in(rect: layout.Rect, bounds: layout.Rect) -> bool:
@@ -203,6 +239,16 @@ class Laying(unittest.TestCase):
                          [("tick", ("nothing found",), None), ("warn", ("coin",), ("sound", "coin"))])
         self.assertEqual(rule, blocks[0].bottom + AIR + RULE_AIR)
 
+    def test_a_finding_with_a_repair_has_it_in_its_block_and_its_place_leaves_room_for_the_button(self) -> None:
+        mend = Fix("tune: bass of pattern a filled to 32 rows", (("songs.tune.patterns.a.bass", "o2 l1 c r"),))
+        plain = lay([SHORT, CLICK], ("song", "tune"), 120)
+        self.assertEqual([(block.head, block.fix) for block in plain.blocks],
+                         [(("tune, pattern a",), None), (("coin",), None)])
+        blocks = lay([SHORT, CLICK], ("song", "tune"), 120, {SHORT: mend}).blocks
+        self.assertEqual([(block.head, block.fix) for block in blocks],
+                         [(("tune, pattern", "a"), mend), (("coin",), None)])
+        self.assertLessEqual(Font.width(blocks[0].head[0]), 120 - ICON - FIX_W - 2 * theme.GAP)
+
 
 class Shown(unittest.TestCase):
     def test_the_values_are_dim_dots_until_the_render_is_ready_and_then_the_numbers_in_words(self) -> None:
@@ -297,13 +343,124 @@ class Shown(unittest.TestCase):
         tall, low = arrange(RIGHT), arrange(LOW)
         self.assertEqual(tall, {"measured": (792, 26, 162, 11), "table": (792, 40, 162, 99),
                                 "rule": (786, 147, 174, 1), "found": (792, 151, 162, 11),
-                                "list": (786, 165, 174, 361)})
+                                "all": (954 - FIX_ALL_W, 150, FIX_ALL_W, FIX_H), "list": (786, 165, 174, 361)})
         self.assertEqual(low, dict(tall, list=(786, 165, 174, 157)))
         for rect in (RIGHT, LOW, (5, 5, 40, 30), (0, 0, 3, 2)):
             panel.place(rect)
-            self.assertEqual((panel.rect, ui.widgets), (rect, [panel.list]))
-            self.assertEqual(panel.list.rect, arrange(rect)["list"])
+            self.assertEqual((panel.rect, ui.widgets), (rect, [panel.list, panel.all]))
+            self.assertEqual((panel.list.rect, panel.all.rect), (arrange(rect)["list"], arrange(rect)["all"]))
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
+
+
+class Mended(unittest.TestCase):
+    """A project file of the test's own with faults in it, a real session on it, and the panel."""
+
+    def setUp(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        # No thread is left to run into the next test, or into a folder that is gone.
+        self.addCleanup(settle)
+        self.path = Path(folder.name) / "project.json"
+        self.path.write_text(json.dumps(FAULTY), encoding="utf-8")
+        self.session = Session(Model(self.path, RATE), None, lambda: 100.0)
+        self.ui = Ui()
+        self.panel = Inspector(self.session, self.ui)
+        self.panel.place(RIGHT)
+        self.shown()
+
+    def shown(self) -> None:
+        """Have the checks run and then the repairs be worked out, each waited for, and the panel show them."""
+        self.session.tick()
+        settle()
+        self.session.tick()
+        self.panel.update()
+        settle()
+        self.panel.update()
+
+    def texts(self) -> dict:
+        """What the file holds now for the pattern of the song."""
+        return json.loads(self.path.read_text(encoding="utf-8"))["songs"]["tune"]["patterns"]["a"]
+
+    def repairs(self) -> list[str | None]:
+        """What the repair of each finding that is shown is called, from the top down, and None for one with none."""
+        return [block.fix and block.fix.label for block in self.panel.list.blocks]
+
+    def test_a_finding_with_a_safe_repair_has_a_button_and_one_with_none_has_none(self) -> None:
+        found, blocks = self.panel.list, self.panel.list.blocks
+        self.assertEqual([block.head for block in blocks], [("tune, pattern a",)] * 2 + [("zap",)])
+        self.assertEqual(self.repairs(), [LEAD, BASS, None])
+        x, y, w, _ = found.rect
+        self.assertEqual([found.button(block) for block in blocks],
+                         [(x + w - PAD - FIX_W, y + block.top - 1, FIX_W, FIX_H) for block in blocks[:2]] + [None])
+        # Two findings have a repair, so there is the button that makes them all.
+        self.assertTrue(self.panel.all.visible)
+        # Over a button the help line says what its repair does, and beside it what a click on the finding does.
+        self.ui.handle(Event("move", middle(found.button(blocks[1]))))
+        self.assertEqual(self.ui.help, f"fix: {BASS}")
+        self.ui.handle(Event("move", spot(self.panel, blocks[1])))
+        self.assertEqual(self.ui.help, "click a finding to go to the thing it is in")
+
+    def test_a_press_of_the_button_makes_the_repair_as_one_step_and_undo_brings_the_fault_back(self) -> None:
+        # With the sound picked its finding comes first, and the two of the song after it.
+        self.session.pick("sound", "zap")
+        self.panel.update()
+        at = middle(self.panel.list.button(self.panel.list.blocks[1]))
+        # A press that is let go beside the button makes nothing.
+        self.ui.handle(Event("down", at, button=1))
+        self.ui.handle(Event("up", (at[0], at[1] + 3 * FIX_H), button=1))
+        self.assertEqual((self.texts(), self.session.can_undo), (TUNE["patterns"]["a"], False))
+        click(self.ui, at)
+        self.assertEqual(self.texts(), {**TUNE["patterns"]["a"], "lead": FILLED["lead"]})
+        # What was done is said, the step is called by it, and the thing of the finding is not picked by the press.
+        self.assertEqual((self.session.message, self.session.undo_label, self.session.model.picked),
+                         (LEAD, LEAD, ("sound", "zap")))
+        # The checks run again on the repaired project, and the finding is gone. One repair is left: no button for all.
+        self.shown()
+        self.assertEqual((self.repairs(), self.panel.all.visible), ([None, BASS], False))
+        self.assertTrue(self.session.undo())
+        self.assertFalse(self.session.can_undo)
+        self.shown()
+        self.assertEqual((self.texts(), self.repairs()), (TUNE["patterns"]["a"], [None, LEAD, BASS]))
+
+    def test_the_button_for_all_makes_every_repair_each_as_a_step_of_its_own(self) -> None:
+        click(self.ui, middle(self.panel.all.rect))
+        self.assertEqual(self.texts(), {**TUNE["patterns"]["a"], **FILLED})
+        self.assertEqual((self.session.message, self.session.undo_label), ("2 fixes made", BASS))
+        self.shown()
+        self.assertEqual((self.repairs(), self.panel.all.visible), ([None, None], False))
+        # Each of the two is taken back alone, the last one first.
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.texts(), self.session.undo_label),
+                         ({**TUNE["patterns"]["a"], "lead": FILLED["lead"]}, LEAD))
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.texts(), self.session.can_undo), (TUNE["patterns"]["a"], False))
+
+    def test_a_repair_that_is_refused_is_said_and_changes_nothing_and_no_repair_after_it_is_tried(self) -> None:
+        # Another program takes the first of the short channels out of the song, and the file is not looked at
+        # again before the press: the repair would put text there for a channel the song no longer has.
+        other = copy.deepcopy(FAULTY)
+        del other["songs"]["tune"]["channels"]["lead"], other["songs"]["tune"]["patterns"]["a"]["lead"]
+        self.path.write_text(json.dumps(other), encoding="utf-8")
+        click(self.ui, middle(self.panel.all.rect))
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), other)
+        self.assertEqual((self.session.message, self.session.can_undo),
+                         ("songs.tune.patterns.a: no channel named 'lead'", False))
+
+    @unittest.skipUnless(pygame, NEEDS)
+    def test_a_button_is_drawn_whole_at_the_right_of_the_place_of_its_finding_and_none_where_there_is_no_repair(
+            self) -> None:
+        surface = pygame.Surface(theme.DESIGN)
+        surface.fill(GROUND)
+        canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
+        self.panel.draw(canvas)
+        self.ui.draw(canvas)
+        found, blocks = self.panel.list, self.panel.list.blocks
+        for rect in (found.button(blocks[0]), found.button(blocks[1]), self.panel.all.rect):
+            # The outline is whole: nothing of a finding is drawn over it, and the word stands inside.
+            self.assertEqual(ink(surface, rect, theme.LINE), 2 * (rect[2] + rect[3]) - 4, rect)
+            self.assertGreater(ink(surface, rect, theme.TEXT), 0)
+        x, y, w, _ = found.rect
+        self.assertEqual(ink(surface, (x + w - PAD - FIX_W, y + blocks[2].top - 1, FIX_W, FIX_H), theme.LINE), 0)
 
 
 @unittest.skipUnless(pygame, NEEDS)

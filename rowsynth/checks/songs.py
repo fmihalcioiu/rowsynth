@@ -169,6 +169,23 @@ def _versions(target: str, song: dict, rate: int) -> list[Finding]:
     return found
 
 
+def _loudest(song: dict, rate: int) -> float:
+    """The loudest sample of the mixes that the "level" rule holds a song to, for whoever asks how far over it is.
+
+    They are the two sides of the mix of its stems, and in a song with layers the two sides of every version in
+    every key. `check` finds nothing by this.
+    """
+    if "layers" in song:
+        rendered = render_groups(song, rate)
+        mixes = [mix_version(rendered, song, version, key)
+                 for version in song["layers"]["versions"] for key in rendered["keys"]]
+    else:
+        played = render_stems(song, rate)
+        mixes = [_mix_stems(played["stems"], played["loop_samples"])]
+    return max((float(np.abs(side.astype(np.float64)).max(initial=0.0)) for sides in mixes for side in sides),
+               default=0.0)
+
+
 def _findings(target: str, song: dict, rate: int) -> list[Finding]:
     """The findings on one song, in the order `check` gives them in."""
     found = _rows(target, song)

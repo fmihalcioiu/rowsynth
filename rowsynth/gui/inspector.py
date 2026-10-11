@@ -2,20 +2,22 @@
 from __future__ import annotations
 
 import math
+import threading
 from collections.abc import Callable, Mapping, Sequence
 from typing import TYPE_CHECKING, NamedTuple
 
 from ..checks import Finding, songs, sounds
 from ..edit import steps
 from ..errors import RowSynthError
-from . import theme
+from . import fixes, theme
+from .fixes import Fix
 from .font import Font, wrap
 from .layout import Rect
 from .lists import Scroll
 from .model import KINDS
 from .panels import Panel, within
 from .theme import Colour
-from .ui import NOWHERE, Event, Pos, Ui, Widget, inside
+from .ui import NOWHERE, Button, Event, Pos, Ui, Widget, draw_button, inside
 
 if TYPE_CHECKING:
     from .canvas import Canvas
@@ -41,6 +43,16 @@ ICON = 9
 #: The two headings.
 MEASURED = "MEASURED"
 FOUND = "FOUND"
+#: What stands on the button of a finding that has a safe repair, and on the button that makes every such repair.
+FIX = "FIX"
+FIX_ALL = "FIX ALL"
+#: How wide the two buttons are, and how high. That of a finding stands at the right of the first line of its
+#: place and begins a pixel above it. The other stands at the right of the lower heading.
+FIX_W = Font.width(FIX) + 2 * theme.PAD
+FIX_ALL_W = Font.width(FIX_ALL) + 2 * theme.PAD
+FIX_H = Font.LINE + 2
+#: What the thread is called on which the repairs are worked out.
+WORKER = "rowsynth-fixes"
 #: What stands for a value that is not ready yet, and for findings the checks have not come to.
 DOTS = "..."
 #: A level with no sound in it, an offset or a step of no size, and no clipped sample.
@@ -169,7 +181,8 @@ class Block(NamedTuple):
 
     `top` is how far its first line is below the top of all there is to show. `icon` stands before it. `head` is
     the lines beside the icon, the place of a finding in words, and `body` the lines under those, its message.
-    `thing` is what a click on it picks, as (kind, name), or None for a block that picks nothing.
+    `thing` is what a click on it picks, as (kind, name), or None for a block that picks nothing. `fix` is the
+    safe repair of its finding, which its button makes, or None for a block that has no button.
     """
 
     top: int
@@ -177,6 +190,7 @@ class Block(NamedTuple):
     head: tuple[str, ...]
     body: tuple[str, ...]
     thing: tuple[str, str] | None
+    fix: Fix | None = None
 
     @property
     def bottom(self) -> int:
@@ -196,28 +210,31 @@ class Laid(NamedTuple):
     height: int
 
 
-def lay(found: Sequence[Finding], picked: tuple[str, str] | None, width: int) -> Laid:
+def lay(found: Sequence[Finding], picked: tuple[str, str] | None, width: int,
+        mends: Mapping[Finding, Fix] | None = None) -> Laid:
     """Where findings go in a column `width` pixels wide, their words broken into lines that fit it.
 
     The findings of the picked thing come first, in the order the checks give them. Where it has none, a line
     that says so stands in their place. The rest of the project's come after, under a line. Every block has
-    `AIR` above its first line and below its last, and the line has `RULE_AIR` on each side of it.
+    `AIR` above its first line and below its last, and the line has `RULE_AIR` on each side of it. `mends` has
+    the safe repair of each finding that has one: the place of such a finding leaves room for its button.
     """
     own = [finding for finding in found if picked is not None and belongs(finding.target) == picked]
     rest = [finding for finding in found if finding not in own]
 
-    def told(findings: list[Finding]) -> list[tuple[str, str, str, tuple[str, str] | None]]:
-        return [("warn", where(finding.target), finding.message, belongs(finding.target)) for finding in findings]
+    def told(findings: list[Finding]) -> list[tuple[str, str, str, tuple[str, str] | None, Fix | None]]:
+        return [("warn", where(finding.target), finding.message, belongs(finding.target), (mends or {}).get(finding))
+                for finding in findings]
 
-    first, after = told(own) or [("tick", NOTHING, "", None)], told(rest)
+    first, after = told(own) or [("tick", NOTHING, "", None, None)], told(rest)
     blocks: list[Block] = []
     rule, top = None, 0
-    for index, (icon, place, message, thing) in enumerate(first + after):
+    for index, (icon, place, message, thing, fix) in enumerate(first + after):
         if after and index == len(first):
             rule = top + RULE_AIR
             top = rule + 1 + RULE_AIR
-        block = Block(top + AIR, icon, tuple(wrap(place, width - ICON - theme.GAP)), tuple(wrap(message, width)),
-                      thing)
+        room = width - ICON - theme.GAP - (FIX_W + theme.GAP if fix else 0)
+        block = Block(top + AIR, icon, tuple(wrap(place, room)), tuple(wrap(message, width)), thing, fix)
         blocks.append(block)
         top = block.bottom + AIR
     return Laid(tuple(blocks), rule, top)
@@ -228,7 +245,8 @@ def arrange(rect: Rect) -> dict[str, Rect]:
 
     From the top: "measured" is the line of the upper heading, and "table" the lines of the numbers, which take
     what they need. "rule" is the line that parts the two halves, "found" the line of the lower heading, and
-    "list" all that is left under it, for the findings.
+    "list" all that is left under it, for the findings. "all" is the button at the right of the lower heading,
+    which makes every safe repair.
     """
     x, y, w, h = rect
     left, wide = x + PAD, w - 2 * PAD
@@ -239,6 +257,7 @@ def arrange(rect: Rect) -> dict[str, Rect]:
               "table": (left, table_top, wide, len(LABELS) * Font.LINE),
               "rule": (x, rule, w, 1),
               "found": (left, rule + HEAD_TOP, wide, Font.LINE),
+              "all": (left + wide - FIX_ALL_W, rule + HEAD_TOP - 1, FIX_ALL_W, FIX_H),
               "list": (x, list_top, w, y + h - list_top)}
     return {part: within(place, rect) for part, place in placed.items()}
 
@@ -247,23 +266,41 @@ class Findings(Widget):
     """What the checks found, as blocks of text one under the other. The wheel scrolls them when they do not fit.
 
     `found` is the findings to show, or None while the checks run: dim dots stand for them then. `picked` is the
-    thing whose findings come first. Both are for the owner to set. A press of the left button on a finding
-    calls `changed` with the thing the finding is in, as (kind, name). The rectangle is as wide as the panel.
+    thing whose findings come first. `mends` has the safe repair of each finding that has one, and such a
+    finding has a button. All three are for the owner to set. A press of the left button on a finding calls
+    `changed` with the thing the finding is in, as (kind, name). A press of a button, let go on it, calls `mend`
+    with the repair. The rectangle is as wide as the panel.
+
+    The help line is the one it was made with, and over a button what the repair of that button does.
     """
 
     def __init__(self, rect: Rect, changed: Callable[[tuple[str, str]], object] | None = None,
-                 help: str = "") -> None:
+                 help: str = "", mend: Callable[[Fix], object] | None = None) -> None:
         super().__init__(rect, help)
         self.found: tuple[Finding, ...] | None = None
         #: Whether there are no findings because the checks could not read the project, and not because they run.
         self.refused = False
         self.picked: tuple[str, str] | None = None
+        self.mends: Mapping[Finding, Fix] = {}
         self.changed = changed
+        self.mend = mend
         self.scroll = Scroll(row=Font.LINE)
         self._laid = Laid((), None, 0)
-        #: What the blocks were last laid out of: the findings, the picked thing and the width.
+        #: What the blocks were last laid out of: the findings, the picked thing, the width and the repairs.
         self._made_of: tuple | None = None
         self._mouse: Pos = NOWHERE
+        #: The repair whose button is pressed and not let go of yet.
+        self._pressed: Fix | None = None
+
+    @property
+    def help(self) -> str:
+        """The one line of help: over the button of a repair, what the repair does."""
+        fix = self.over(self._mouse)
+        return self._help if fix is None else f"fix: {fix.label}"
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
 
     @property
     def blocks(self) -> tuple[Block, ...]:
@@ -281,11 +318,11 @@ class Findings(Widget):
 
         The offset is kept inside what there is to show.
         """
-        made_of = (self.found, self.picked, self.rect[2])
+        made_of = (self.found, self.picked, self.rect[2], self.mends)
         if made_of != self._made_of:
             self._made_of = made_of
             none = self.found is None
-            self._laid = Laid((), None, 0) if none else lay(self.found, self.picked, self._column()[1])
+            self._laid = Laid((), None, 0) if none else lay(self.found, self.picked, self._column()[1], self.mends)
             self.scroll.offset = 0
         self.scroll.content = self._laid.height
         self.scroll.view = self.rect[3]
@@ -300,8 +337,23 @@ class Findings(Widget):
         return next((block for block in self._laid.blocks
                      if block.thing is not None and block.top - AIR <= down < block.bottom + AIR), None)
 
+    def button(self, block: Block) -> Rect | None:
+        """Where the button of a finding stands as the findings are scrolled now. None for one that has no repair."""
+        if block.fix is None:
+            return None
+        left, room = self._column()
+        return left + room - FIX_W, self.rect[1] + block.top - self.scroll.offset - 1, FIX_W, FIX_H
+
+    def over(self, pos: Pos) -> Fix | None:
+        """The repair whose button a position is on as the findings are scrolled now, or None when it is on none."""
+        self._settle()
+        if not inside(self.rect, pos):
+            return None
+        return next((block.fix for block in self._laid.blocks
+                     if block.fix is not None and inside(self.button(block), pos)), None)
+
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use the wheel, and a press of the left button on a finding."""
+        """Use the wheel, a press of the left button on a finding, and one on a button that is let go there."""
         if event.kind == "key":
             return False
         self._settle()
@@ -309,8 +361,18 @@ class Findings(Widget):
         if event.kind == "wheel":
             self.scroll.by(-theme.LIST_WHEEL * event.wheel)
             return True
+        if event.kind == "up" and event.button == 1:
+            pressed, self._pressed = self._pressed, None
+            if pressed is not None and self.over(event.pos) == pressed and self.mend is not None:
+                self.mend(pressed)
+            return False
+        if event.kind != "down" or event.button != 1:
+            return False
+        self._pressed = self.over(event.pos)
+        if self._pressed is not None:
+            return True
         block = self.at(event.pos)
-        if event.kind != "down" or event.button != 1 or block is None:
+        if block is None:
             return False
         if self.changed is not None:
             self.changed(block.thing)
@@ -319,7 +381,8 @@ class Findings(Widget):
     def draw(self, canvas: Canvas) -> None:
         """Draw the dots, or the blocks in view and the line between them: nothing outside the rectangle.
 
-        The finding under the mouse is on a lit ground, which stays clear of the panel's line.
+        The finding under the mouse is on a lit ground, which stays clear of the panel's line. The button of a
+        finding is lit under the mouse, and sunk while it is pressed there.
         """
         self._settle()
         x, y, w, h = self.rect
@@ -354,6 +417,10 @@ class Findings(Widget):
         for line in block.body:
             canvas.text_in(line, (left, top, room, Font.LINE), theme.TEXT)
             top += Font.LINE
+        button = self.button(block)
+        if button is not None:
+            hot = self.hot and inside(button, self._mouse)
+            draw_button(canvas, button, FIX, hot=hot, pressed=hot and self.held and block.fix == self._pressed)
 
 
 class Inspector(Panel):
@@ -361,20 +428,91 @@ class Inspector(Panel):
 
     `values` is the table as it is shown now, as `table` gives it. `list` shows the findings: a click on one
     picks the thing it is in, in the session.
+
+    A finding that has a safe repair has a button that makes it, and `all` is the button that makes every one
+    of them: it is there while two findings or more have a repair. The repairs are worked out once for the
+    findings of a project, on a thread of their own, since one may take a song played again: the buttons are
+    there when that is through.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
         self.values = table("", None)
         self.list = self.add(Findings(self.rect, changed=lambda thing: session.pick(*thing),
-                                      help="click a finding to go to the thing it is in"))
+                                      help="click a finding to go to the thing it is in", mend=self.mend))
+        self.all = self.add(Button(self.rect, FIX_ALL, action=self.mend_all,
+                                   help="make every repair that is safe, each a step of its own"))
+        self.all.visible = False
         self._places = arrange(self.rect)
+        # Held where the two below are read and changed: what the repairs were last asked for, the project and
+        # its findings, and the repairs that were worked out, with what they were asked for.
+        self._lock = threading.Lock()
+        self._asked: tuple | None = None
+        self._worked: tuple[tuple, dict[Finding, Fix]] | None = None
 
     def place(self, rect: Rect) -> None:
         """Take the panel's rectangle: the numbers take what they need of it, and the findings the rest."""
         super().place(rect)
         self._places = arrange(rect)
         self.list.rect = self._places["list"]
+        self.all.rect = self._places["all"]
+
+    def mend(self, fix: Fix) -> bool:
+        """Make a repair, as one step that can be taken back, and say what was done. False where it is refused.
+
+        A refusal is the session's to say, and nothing is changed then.
+        """
+        if not self.session.change_many(fix.changes, fix.label):
+            return False
+        # What the session says of the change itself stands: that it took the place of one made outside.
+        if not self.session.message:
+            self.session.say(fix.label)
+        return True
+
+    def mend_all(self) -> None:
+        """Make every repair the findings have, in the order they are shown, each as a step of its own.
+
+        A repair that several findings share is made once. The first that is refused is the last that is tried.
+        """
+        made: list[Fix] = []
+        for fix in [block.fix for block in self.list.blocks if block.fix is not None]:
+            if fix in made:
+                continue
+            if not self.mend(fix):
+                return
+            made.append(fix)
+        if len(made) > 1:
+            self.session.say(f"{len(made)} fixes made")
+
+    def _mends(self, found: tuple[Finding, ...] | None) -> Mapping[Finding, Fix]:
+        """The repairs of the findings that are shown, as far as they are worked out: none until they all are.
+
+        They are asked for once, when findings arrive that are not those of the project they were last asked for.
+        """
+        if not found:
+            return {}
+        model = self.session.model
+        with self._lock:
+            asked = self._asked
+            if asked is None or asked[0] is not model.project or asked[1] != found:
+                asked = self._asked = (model.project, found)
+                threading.Thread(target=self._work, args=(asked, model.rate), name=WORKER, daemon=True).start()
+            worked = self._worked
+        return worked[1] if worked is not None and worked[0] is asked else {}
+
+    def _work(self, asked: tuple, rate: int) -> None:
+        """Work out the repairs of the findings of a project, and keep them if they are still the ones asked for."""
+        project, found = asked
+        data, shared, worked = project.to_dict(), {}, {}
+        for finding in found:
+            if self._asked is not asked:
+                return
+            fix = fixes.fix(data, finding, rate, shared)
+            if fix is not None:
+                worked[finding] = fix
+        with self._lock:
+            if self._asked is asked:
+                self._worked = (asked, worked)
 
     def update(self, passed: float = 0.0) -> None:
         """Show the numbers of the picked thing and the findings as the session has them now."""
@@ -388,6 +526,8 @@ class Inspector(Panel):
         self.list.found = tuple(session.model.findings()) if ready else None
         self.list.refused = refused
         self.list.picked = picked
+        self.list.mends = self._mends(self.list.found)
+        self.all.visible = self.shown and len(self.list.mends) > 1
 
     def draw(self, canvas: Canvas) -> None:
         """Draw the two headings, the table of the numbers, and the line between the two halves."""
