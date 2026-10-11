@@ -36,10 +36,15 @@ def drum(row: float, rows: float, letter: str, level: int = 15) -> Note:
     return Note(float(row), float(rows), midi(DRUMS[letter]["note"]), level, DRUMS[letter]["inst"], letter)
 
 
-def saved(test: unittest.TestCase, notes: tuple[Note, ...], rows: int = 16, channel: str = "tune") -> tuple[Note, ...]:
-    """Notes, once they are seen to keep the rule, to be written as text, and to be read from that text the same."""
+def saved(test: unittest.TestCase, notes: tuple[Note, ...], rows: int = 16, channel: str = "tune",
+          rows_per_beat: int = 4) -> tuple[Note, ...]:
+    """Notes, once they are seen to keep the rule, to be written as text, and to be read from that text the same.
+
+    The text is that of a song of `rows_per_beat` rows to a beat.
+    """
     test.assertTrue(fitted(notes, rows))
-    song = {**SONG, "patterns": {"a": {channel: text(notes, rows, channel, SONG)}}}
+    song = {**SONG, "rows_per_beat": rows_per_beat}
+    song["patterns"] = {"a": {channel: text(notes, rows, channel, song)}}
     test.assertEqual(next(held.notes for held in pattern(song, "a").channels if held.name == channel), notes)
     return notes
 
@@ -237,9 +242,9 @@ class Grid(unittest.TestCase):
 
 
 class Hits(unittest.TestCase):
-    def beat(self, notes: tuple[Note, ...], rows: int = 16) -> tuple[Note, ...]:
-        """The notes of a drum channel, once they are seen to save."""
-        return saved(self, notes, rows, "beat")
+    def beat(self, notes: tuple[Note, ...], rows: int = 16, rows_per_beat: int = 4) -> tuple[Note, ...]:
+        """The notes of a drum channel, once they are seen to save in a song of so many rows to a beat."""
+        return saved(self, notes, rows, "beat", rows_per_beat)
 
     def test_a_hit_plays_what_its_letter_plays_and_lasts_as_long_as_one_length_says_in_its_room(self) -> None:
         self.assertEqual(self.beat(hit((), 0, "k", 15, DRUMS, 16)), (Note(0, 16, 36, 15, "thud", "k"),))
@@ -299,6 +304,41 @@ class Hits(unittest.TestCase):
                                  f"row {row}: a hit is put on one of the 16 rows of the pattern")
         self.assertEqual(refusal(self, hit, (), 0, "k", 16, DRUMS, 16),
                          "a level is a whole number from 0 to 15, not 16")
+        self.assertEqual(refusal(self, hit, (), 0, "k", 15, DRUMS, 16, 0), "a beat has more than 0 rows, not 0")
+
+    def test_a_hit_is_as_long_as_one_length_says_at_the_rows_to_a_beat_of_its_song(self) -> None:
+        # Eight rows are one length where a beat is four rows. Where it is three they are not, and six are.
+        self.assertEqual(self.beat(hit((), 4, "k", 15, DRUMS, 12, 4), 12), (drum(4, 8, "k"),))
+        self.assertEqual(self.beat(hit((), 4, "k", 15, DRUMS, 12, 3), 12, 3), (drum(4, 6, "k"),))
+        # In five rows the longest is four of them at four rows to a beat. At three it is a dotted quarter.
+        self.assertEqual(self.beat(hit((), 7, "k", 15, DRUMS, 12, 4), 12), (drum(7, 4, "k"),))
+        self.assertEqual(self.beat(hit((), 7, "k", 15, DRUMS, 12, 3), 12, 3), (drum(7, 4.5, "k"),))
+        # The rows a letter has of its own are those of its hit at either.
+        for rows_per_beat in (4, 3):
+            self.assertEqual(self.beat(hit((), 4, "s", 15, DRUMS, 12, rows_per_beat), 12, rows_per_beat),
+                             (drum(4, 2, "s"),))
+
+    def test_the_hit_before_is_fitted_again_at_the_rows_to_a_beat_of_its_song(self) -> None:
+        # With a hit put after it the first has eight rows, which three rows to a beat cannot say in one length.
+        for rows_per_beat, cut in ((4, 8), (3, 6)):
+            with self.subTest(rows_per_beat=rows_per_beat):
+                notes = self.beat(hit((drum(0, 12, "k"),), 8, "h", 15, DRUMS, 12, rows_per_beat), 12, rows_per_beat)
+                self.assertEqual(notes, (drum(0, cut, "k"), drum(8, 4, "h")))
+                self.assertEqual(self.beat(unhit(notes, 8, "h", DRUMS, 12, rows_per_beat), 12, rows_per_beat),
+                                 (drum(0, 12, "k"),))
+
+    def test_a_hundred_runs_of_random_hits_at_3_rows_to_a_beat_leave_a_channel_that_saves(self) -> None:
+        for seed in range(100):
+            dice = random.Random(seed)
+            notes: tuple[Note, ...] = ()
+            for _ in range(12):
+                if notes and dice.random() < 0.3:
+                    taken = dice.choice(notes)
+                    notes = unhit(notes, taken.row, taken.drum, DRUMS, 24, 3)
+                else:
+                    notes = hit(notes, dice.randrange(24), dice.choice("khs"), dice.randrange(16), DRUMS, 24, 3)
+            with self.subTest(seed=seed):
+                self.beat(notes, 24, 3)
 
 
 def tuned(dice: random.Random, rows: int) -> tuple[Note, ...]:

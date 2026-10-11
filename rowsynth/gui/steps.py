@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Iterable, Sequence
-from dataclasses import dataclass, replace
+import time
+from collections.abc import Callable, Container, Iterable, Sequence
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING
 
 from ..checks import _whole_rows
 from ..errors import RowSynthError
-from . import theme
+from . import noteedit, songview, theme
 from .font import Font
 from .layout import Rect
 from .theme import Colour
@@ -16,7 +17,8 @@ from .ui import NOWHERE, Event, Pos, Ui, Widget
 
 if TYPE_CHECKING:
     from .canvas import Canvas
-    from .songview import DrumRow, Pattern
+    from .noteedit import Notes
+    from .songview import DrumRow, Note, Pattern
 
 #: A square: how wide it is, and how high, which is the height of a drum's lane.
 SQUARE_W = 6
@@ -48,6 +50,13 @@ TOP_LEVEL = 15
 #: How much of the colour of text is in the outline of a hit, and in a square that the playhead is in.
 EDGE = 0.3
 GLOW = 0.4
+
+#: The lowest level the wheel brings a hit to: at 0 it would not be heard.
+WHEEL_LEAST = 1
+#: How many seconds after the last step of the wheel on a hit its run of steps ends, and is one edit.
+WHEEL_WAIT = 0.5
+#: What the help line has after what is at a square, where the pattern is not changed: why it is not.
+OFF_GRID = "; the pattern has notes off the grid, so it is not changed here"
 
 # From the left of one square to the left of the next in its beat.
 _PITCH = SQUARE_W + GAP
@@ -205,6 +214,16 @@ class Grid:
             stop += 1
         return range(self.first_drum, stop)
 
+    def passed(self, one: int, other: int) -> range:
+        """The rows in view whose squares are on the way from an x to another, the squares at the two ends with them.
+
+        It is every such row, however far apart the two are, and the same rows either way round. An x in a gap
+        is on no square, and one past the squares in view is past the last of them.
+        """
+        low, high = sorted((one, other))
+        on = [row for row in self.rows_in_view() if self.x(row) <= high and low < self.x(row) + SQUARE_W]
+        return range(on[0], on[-1] + 1) if on else range(0)
+
     def colour(self, row: int) -> Colour:
         """The colour a row's squares take: the first of the four in the first beat of a bar, and so on round."""
         return theme.STEPS[row % self.bar_rows // self.beat_rows % len(theme.STEPS)]
@@ -223,34 +242,142 @@ class Grid:
                        first_drum=min(max(0, self.first_drum + drums), last_drum))
 
 
+@dataclass
+class Gesture:
+    """What the mouse is in the middle of doing to the hits of one lane, and what it comes to.
+
+    kind is "put" for a drag that puts a hit in each empty square it passes, "take" for a drag that takes away
+    each hit it passes, and "level" for a run of steps of the wheel on one hit. drum is the place of the lane,
+    and rows the rows of the squares the gesture has passed. level is the level a put hit gets, and the one the
+    wheel has brought its hit to. button is the mouse button of a drag, and x where the mouse was last in it.
+    until is the time on the clock at which a run of the wheel ends.
+    """
+
+    kind: str
+    drum: int
+    level: int
+    rows: list[int] = field(default_factory=list)
+    button: int = 0
+    x: int = 0
+    until: float = 0.0
+
+    def along(self, grid: Grid, x: int) -> list[int]:
+        """Take a drag on to an x. Given are the rows of the squares on the way that it had not passed before."""
+        fresh = [row for row in grid.passed(self.x, x) if row not in self.rows]
+        self.x = x
+        self.rows += fresh
+        return fresh
+
+    def gives(self, notes: Sequence[Note], letter: str, drums: dict | None, rows: float,
+              rows_per_beat: int = 4) -> Notes:
+        """The notes of the lane's channel as the gesture leaves them, by the rules of `noteedit`.
+
+        `notes` are those of the channel before the gesture, and `letter` is the lane's. The drum table of the
+        song, the rows of the pattern and the song's rows to a beat are as `noteedit.hit` takes them. A put
+        fills the squares it passed that had no hit of the letter, and so replaces a hit of another letter at
+        such a row. A take empties those that had one, and the wheel sets the level of its one hit.
+        """
+        notes = tuple(notes)
+        held = {_whole_rows(note.row): note for note in notes}
+        for row in sorted(self.rows):
+            there = held.get(row)
+            mine = there is not None and there.drum == letter
+            # A note that is a hair off its row is replaced, and taken away, at the place it has.
+            at = float(row) if there is None else there.row
+            if self.kind == "put" and not mine:
+                notes = noteedit.hit(notes, at, letter, self.level, drums, rows, rows_per_beat)
+            elif self.kind == "take" and mine:
+                notes = noteedit.unhit(notes, at, letter, drums, rows, rows_per_beat)
+            elif self.kind == "level" and mine:
+                notes, _ = noteedit.with_level(notes, [notes.index(there)], self.level)
+        return notes
+
+    def label(self, count: int) -> str:
+        """A few plain words for the undo list, for a gesture that put or took away so many hits."""
+        if self.kind == "level":
+            return "level changed"
+        done = "placed" if self.kind == "put" else "removed"
+        return f"hit {done}" if count == 1 else f"{count} hits {done}"
+
+
+def begun(grid: Grid, hits: Container[tuple[int, int]], pos: Pos, button: int,
+          level: int = TOP_LEVEL) -> Gesture | None:
+    """The drag that a press of a mouse button begins at a position, and None where it begins none.
+
+    `hits` has the squares with a hit in them, each as the place of its lane and its row. The left button puts
+    hits when it is pressed on an empty square, at `level`, and takes them away when it is pressed on a hit. The
+    right button takes them away wherever it is pressed. A press on no square begins nothing, and neither does
+    any other button. The drag has passed no square yet: `along` takes it to where the press is.
+    """
+    row, drum = grid.row_at(pos[0]), grid.drum_at(pos[1])
+    if row is None or drum is None or button not in (1, 3):
+        return None
+    return Gesture("take" if button == 3 or (drum, row) in hits else "put", drum, level, button=button, x=pos[0])
+
+
 class Steps(Widget):
     """The drums of one pattern, from all its drum channels together: a lane of squares for each `Lane`, a square a row.
 
     The lanes of one channel stand together, with more air and a faint line before those of the next. `picked` is
     the name of a channel, or None: the labels of its lanes are lit. `playhead` is the row that is playing, which
     may be between two rows, or None. Their owner sets both. The wheel scrolls the lanes, and with shift the rows.
-    `help` is the widget's own line, and while the mouse is on a square it says what is there.
+
+    The hits are switched on and off with the mouse, where `show` was given the drum table and the pattern is on
+    the grid. The left button on an empty square puts a hit at `level`, and dragged it puts one in every empty
+    square it passes. On a hit it takes the hit away, and dragged every hit it passes. The right button always
+    takes away. A drag stays in the lane it began in. On a hit, with no key held, the wheel does not scroll: it
+    changes the level of the hit by one a step, and `level` is the one it set last.
+
+    Nothing is saved here. While a gesture is under way the steps show what it would give. When it ends, and a
+    channel's notes are other than `show` gave them, `edited` is called with the name of the channel, its new
+    notes and a few words for the undo list, and the steps show what `show` gave again: their owner saves, and
+    shows the result. A drag ends at the release. A run of the wheel ends when the mouse leaves its square, or
+    `WHEEL_WAIT` seconds after its last step by `clock`: for that their owner calls `update` every frame.
+    `sounded` is called with the channel and the letter of each hit as it is put, for it to be heard.
+
+    `help` is the widget's own line. While the mouse is on a square it says what a press there would do, or what
+    is there where nothing can be changed.
     """
 
-    def __init__(self, rect: Rect, help: str = "") -> None:
+    def __init__(self, rect: Rect, help: str = "", edited: Callable[[str, Notes, str], object] | None = None,
+                 sounded: Callable[[str, str], object] | None = None,
+                 clock: Callable[[], float] = time.perf_counter) -> None:
         super().__init__(rect, help)
         self.playhead: float | None = None
         self.picked: str | None = None
+        self.edited = edited
+        self.sounded = sounded
+        self.clock = clock
+        self.level = TOP_LEVEL
         self._grid = Grid(rect, 0, 0, 1, 1)
         self._lanes: tuple[Lane, ...] = ()
         #: Whether the lanes are of more than one channel: a lane is then told by its channel as well.
         self._several = False
+        #: The notes of each channel that has a lane, as `show` gave them, and the rows of the pattern.
+        self._notes: dict[str, Notes] = {}
+        self._rows = 0.0
+        #: The drum table of the song, whether the hits can be changed, and what the help line says where not.
+        self._drums: dict | None = None
+        self._open = False
+        self._why = ""
+        #: The gesture under way, and the notes it would give, by the name of their channel.
+        self._gesture: Gesture | None = None
+        self._given: dict[str, Notes] = {}
         #: The level of each hit that starts on a whole row, by the place of its lane and its row.
         self._hits: dict[tuple[int, int], int] = {}
         #: The place of the lane, the row and the level of each hit that starts between two rows.
         self._marks: list[tuple[int, float, int]] = []
         self._mouse: Pos = NOWHERE
 
-    def show(self, pattern: Pattern, lanes: Sequence[Lane], bar_rows: int, beat_rows: int) -> None:
+    def show(self, pattern: Pattern, lanes: Sequence[Lane], bar_rows: int, beat_rows: int,
+             drums: dict | None = None) -> None:
         """Show the drums of a pattern. Each lane is one letter of one of its drum channels, as `lanes` makes them.
 
-        The view stays where it is, as far as the pattern reaches. A lane of a channel the pattern does not have
-        is refused, and so is one of a channel that is not a drum channel.
+        `beat_rows` is the song's rows to a beat. `drums` is the drum table of the song, as `noteedit.hit` takes
+        it: with it the hits can be changed, where every note of the pattern is on the grid. Without it they are
+        shown and no more. The view stays where it is, as far as the pattern reaches. A gesture under way is
+        dropped, and nothing is called for it. A lane of a channel the pattern does not have is refused, and so
+        are one of a channel that is not a drum channel and one of a letter the drum table does not have.
         """
         lanes = tuple(lanes)
         held = {channel.name: channel for channel in pattern.channels}
@@ -259,16 +386,36 @@ class Steps(Widget):
                 raise RowSynthError(f"pattern {pattern.name!r} has no channel called {lane.channel!r}")
             if not held[lane.channel].drums:
                 raise RowSynthError(f"channel {lane.channel!r} is not a drum channel")
+            if drums is not None and lane.letter not in drums:
+                raise RowSynthError(f"no drum letter {lane.letter!r}")
         breaks = tuple(place for place in range(1, len(lanes)) if lanes[place].channel != lanes[place - 1].channel)
         self._grid = Grid(self.rect, math.ceil(_whole_rows(pattern.rows)), len(lanes), bar_rows, beat_rows,
                           self._grid.first_row, self._grid.first_drum, breaks)
         self._lanes = lanes
-        places = {(lane.channel, lane.letter): place for place, lane in enumerate(lanes)}
-        channels = dict.fromkeys(lane.channel for lane in lanes)
-        self._several = len(channels) > 1
+        self._notes = {channel: held[channel].notes for channel in dict.fromkeys(lane.channel for lane in lanes)}
+        self._rows = pattern.rows
+        self._several = len(self._notes) > 1
+        on_grid = songview.on_grid(pattern)
+        self._drums, self._open = drums, drums is not None and on_grid
+        self._why = OFF_GRID if drums is not None and not on_grid else ""
+        self._gesture, self._given = None, {}
+        self._look()
+
+    def notes(self, channel: str) -> Notes:
+        """The notes of a drum channel as the steps show them: with a gesture under way, as it would leave them.
+
+        A channel that has no lane is refused.
+        """
+        if channel not in self._notes:
+            raise RowSynthError(f"the steps show no channel called {channel!r}")
+        return self._given.get(channel, self._notes[channel])
+
+    def _look(self) -> None:
+        """Work out which squares have a hit, and the hits between two rows, from the notes as they are shown."""
+        places = {(lane.channel, lane.letter): place for place, lane in enumerate(self._lanes)}
         self._hits, self._marks = {}, []
-        for channel in channels:
-            for note in held[channel].notes:
+        for channel in self._notes:
+            for note in self.notes(channel):
                 place = places.get((channel, note.drum))
                 # A row that is a hair off a whole one, as adding up triplets leaves it, is that whole row.
                 row = _whole_rows(note.row)
@@ -284,15 +431,21 @@ class Steps(Widget):
 
     @property
     def help(self) -> str:
-        """What is at the square the mouse is on, in plain words. Off the squares, the widget's own line.
+        """What a press on the square under the mouse would do, in plain words. Off the squares, the widget's own line.
 
-        The drum is told by its letter, and where the lanes are of more than one channel by its channel as well.
+        Where the hits cannot be changed it is what is at the square, and for a pattern off the grid why it is not
+        changed. The drum is told by its letter, and where the lanes are of more than one channel by its channel
+        as well.
         """
         found = self._at(self._mouse)
         if found is None:
             return self._help
         lane, row = self._lanes[found[0]], found[1]
         bar, step = divmod(row, self._grid.bar_rows)
+        drum = f"{lane.letter} in {lane.channel}" if self._several else lane.letter
+        where = f"{drum}, bar {bar + 1}, step {step + 1}"
+        if self._open:
+            return f"{'take the hit away' if found in self._hits else 'put a hit'}: {where}"
         between = [level for place, at, level in self._marks if (place, math.floor(at)) == found]
         if found in self._hits:
             what = f"hit, level {self._hits[found]}"
@@ -300,8 +453,7 @@ class Steps(Widget):
             what = f"hit off the grid, level {between[0]}"
         else:
             what = "empty"
-        drum = f"{lane.letter} in {lane.channel}" if self._several else lane.letter
-        return f"{drum}, bar {bar + 1}, step {step + 1}: {what}"
+        return f"{where}: {what}{self._why}"
 
     @help.setter
     def help(self, text: str) -> None:
@@ -322,21 +474,100 @@ class Steps(Widget):
         return lane.channel, lane.letter, found[1]
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Follow the mouse, and scroll at the wheel: the lanes by one, and with shift the rows by a beat.
+        """Follow the mouse. Begin a drag at a press on a square, take it along, and end it at the release.
 
-        A step of the wheel is used when it moved the view.
+        The wheel changes the level of the hit it is on, when no key is held. Anywhere else it scrolls: the lanes
+        by one, and with shift the rows by a beat. A press is used when it began a drag, and so is all that the
+        mouse does up to the release. A step of the wheel is used on a hit, and when it moved the view.
         """
         if event.kind == "key":
             return False
+        self.update()
         self._mouse = event.pos
-        if event.kind != "wheel":
+        doing = self._gesture
+        if doing is not None and doing.kind != "level":
+            if event.kind == "move":
+                self._drag(event.pos[0])
+            elif event.kind == "up" and event.button == doing.button:
+                self._end()
+            return True
+        if doing is not None and self._at(event.pos) != (doing.drum, doing.rows[0]):
+            self._end()
+        if event.kind == "wheel":
+            return self._turn(event)
+        return event.kind == "down" and self._press(event)
+
+    def update(self) -> None:
+        """End a run of the wheel whose time is up. The owner calls this every frame."""
+        doing = self._gesture
+        if doing is not None and doing.kind == "level" and self.clock() >= doing.until:
+            self._end()
+
+    def _press(self, event: Event) -> bool:
+        """Begin the drag that a press begins, and say whether it began one. A run of the wheel ends first."""
+        self._end()
+        if not self._open:
             return False
-        grid = self.grid
-        if "shift" in event.mods:
-            self._grid = grid.scrolled(rows=-event.wheel * grid.beat_rows)
-        else:
-            self._grid = grid.scrolled(drums=-event.wheel)
-        return self._grid != grid
+        self._gesture = begun(self.grid, self._hits, event.pos, event.button, self.level)
+        if self._gesture is None:
+            return False
+        self._drag(event.pos[0])
+        return True
+
+    def _drag(self, x: int) -> None:
+        """Take the drag under way on to an x, and show what it would give. Each hit it newly puts is sounded."""
+        doing = self._gesture
+        lane = self._lanes[doing.drum]
+        put = [row for row in doing.along(self.grid, x) if doing.kind == "put" and (doing.drum, row) not in self._hits]
+        self._try()
+        if self.sounded is not None:
+            for _ in put:
+                self.sounded(lane.channel, lane.letter)
+
+    def _turn(self, event: Event) -> bool:
+        """Take a step of the wheel: to the level of the hit under it when no key is held, and else to the view."""
+        found = self._at(event.pos)
+        level = self._hits.get(found) if self._open and not event.mods else None
+        if level is None:
+            self._end()
+            grid = self.grid
+            if "shift" in event.mods:
+                self._grid = grid.scrolled(rows=-event.wheel * grid.beat_rows)
+            else:
+                self._grid = grid.scrolled(drums=-event.wheel)
+            return self._grid != grid
+        if self._gesture is None:
+            self._gesture = Gesture("level", found[0], level, [found[1]])
+        # A hit that was written at a level under the least is not brought up to it by a step down.
+        self.level = self._gesture.level = min(max(level + event.wheel, min(level, WHEEL_LEAST)), TOP_LEVEL)
+        self._gesture.until = self.clock() + WHEEL_WAIT
+        self._try()
+        return True
+
+    def _try(self) -> None:
+        """Work out what the gesture under way would give, and show that."""
+        doing = self._gesture
+        lane = self._lanes[doing.drum]
+        self._given = {lane.channel: doing.gives(self._notes[lane.channel], lane.letter, self._drums, self._rows,
+                                                 self._grid.beat_rows)}
+        self._look()
+
+    def _end(self) -> None:
+        """End the gesture under way, where there is one, and show what `show` gave again.
+
+        `edited` is called for each channel whose notes the gesture has made other than they were.
+        """
+        doing, given, before = self._gesture, self._given, self._notes
+        if doing is None:
+            return
+        self._gesture, self._given = None, {}
+        self._look()
+        letter = self._lanes[doing.drum].letter
+        for channel, notes in given.items():
+            if notes != before[channel] and self.edited is not None:
+                # The hits of the lane's letter are more, or fewer, by as many as the drag put or took away.
+                now, then = (sum(note.drum == letter for note in held) for held in (notes, before[channel]))
+                self.edited(channel, notes, doing.label(abs(now - then)))
 
     def draw(self, canvas: Canvas) -> None:
         """Draw the labels, the lines between channels, the bar numbers, the squares, the hits between rows and

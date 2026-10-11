@@ -4,6 +4,7 @@ from __future__ import annotations
 import math
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import replace
+from functools import lru_cache
 
 from .. import songtext
 from ..errors import RowSynthError
@@ -23,8 +24,16 @@ from .songview import Note
 Notes = tuple[Note, ...]
 Picked = tuple[Notes, frozenset[int]]
 
-# The rows that one length of the text says where a beat is four rows. A drum hit is written as one length.
-_ONE = tuple(rows for rows, _, _ in songtext._sizes(4))
+
+@lru_cache(maxsize=None)
+def _one(rows_per_beat: int) -> tuple[float, ...]:
+    """The rows that one length of the text says in a song of so many rows to a beat. A hit is written as one length.
+
+    A beat of no rows is refused.
+    """
+    if not rows_per_beat > 0:
+        raise RowSynthError(f"a beat has more than 0 rows, not {rows_per_beat!r}")
+    return tuple(rows for rows, _, _ in songtext._sizes(rows_per_beat))
 
 
 def _chosen(notes: Sequence[Note], picked: Iterable[int]) -> frozenset[int]:
@@ -216,20 +225,21 @@ def _letter(drums: dict | None, letter: str) -> dict:
     return drums[letter]
 
 
-def _held(room: float, own: float | None) -> float:
+def _held(room: float, own: float | None, rows_per_beat: int) -> float:
     """How long a hit is that has `room` rows to the next note or to the end, and whose letter has `own` rows.
 
-    It is what one length of the text makes it. A letter with rows of its own holds the hit that long, where a
-    length says as much without leaving the room. Any other hit is the longest that one length says in its room,
-    and that is no longer than its letter's rows.
+    It is what one length of the text makes it, in a song of `rows_per_beat` rows to a beat. A letter with rows
+    of its own holds the hit that long, where a length says as much without leaving the room. Any other hit is
+    the longest that one length says in its room, and that is no longer than its letter's rows.
     """
-    if own is not None and any(own <= rows <= room for rows in _ONE):
+    one = _one(rows_per_beat)
+    if own is not None and any(own <= rows <= room for rows in one):
         return float(own)
     most = room if own is None else min(room, own)
-    return max((rows for rows in _ONE if rows <= most), default=float(most))
+    return max((rows for rows in one if rows <= most), default=float(most))
 
 
-def _refit(notes: Notes, index: int, drums: dict | None, rows: float) -> Notes:
+def _refit(notes: Notes, index: int, drums: dict | None, rows: float, rows_per_beat: int) -> Notes:
     """The notes with the hit at an index as long as `_held` makes it, up to the note after it or to the end.
 
     Nothing changes where the index is before the first note, or the note there is no hit.
@@ -238,38 +248,42 @@ def _refit(notes: Notes, index: int, drums: dict | None, rows: float) -> Notes:
         return notes
     note = notes[index]
     end = notes[index + 1].row if index + 1 < len(notes) else rows
-    held = _held(end - note.row, _letter(drums, note.drum).get("rows"))
+    held = _held(end - note.row, _letter(drums, note.drum).get("rows"), rows_per_beat)
     return (*notes[:index], replace(note, rows=held), *notes[index + 1:])
 
 
-def hit(notes: Sequence[Note], row: float, letter: str, level: int, drums: dict | None, rows: float) -> Notes:
+def hit(notes: Sequence[Note], row: float, letter: str, level: int, drums: dict | None, rows: float,
+        rows_per_beat: int = 4) -> Notes:
     """The notes of a drum channel with a hit of a letter put at a row, in a pattern of `rows` rows.
 
     `drums` is the drum table of the song: the hit plays the instrument and the note its letter has there. A hit
     of any letter that begins at that row is replaced, and so is a note that does. The hit is as long as its text
     will make it: up to the next note or the end of the pattern, no longer than the rows its letter has of its
-    own, and no longer than one length says. The hit before it is made that long again by the same rule, and a
-    note before it that is no hit is cut short where it begins. Refused are a letter the table does not have, a
-    row outside the pattern, and a level that is no whole number from 0 to 15.
+    own, and no longer than one length says in a song of `rows_per_beat` rows to a beat. The hit before it is
+    made that long again by the same rule, and a note before it that is no hit is cut short where it begins.
+    Refused are a letter the table does not have, a row outside the pattern, a level that is no whole number from
+    0 to 15, and a beat of no rows.
     """
     own = _letter(drums, letter)
     if not 0 <= row < rows:
         raise RowSynthError(f"row {row:g}: a hit is put on one of the {rows:g} rows of the pattern")
     kept = [note for note in notes if note.row != row]
     room = min((note.row for note in kept if note.row > row), default=rows) - row
-    new = Note(float(row), _held(room, own.get("rows")), midi(own["note"]), _level(level), own["inst"], letter)
+    held = _held(room, own.get("rows"), rows_per_beat)
+    new = Note(float(row), held, midi(own["note"]), _level(level), own["inst"], letter)
     laid, (at,) = _lay(kept, [new])
-    return _refit(laid, at - 1, drums, rows)
+    return _refit(laid, at - 1, drums, rows, rows_per_beat)
 
 
-def unhit(notes: Sequence[Note], row: float, letter: str, drums: dict | None, rows: float) -> Notes:
+def unhit(notes: Sequence[Note], row: float, letter: str, drums: dict | None, rows: float,
+          rows_per_beat: int = 4) -> Notes:
     """The notes of a drum channel without the hit of a letter at a row. With no such hit they stay as they are.
 
     The hit before it is made as long again as `hit` makes one, now that it has the room. For that the drum
-    table of the song and the rows of the pattern are given, as they are to `hit`.
+    table of the song, the rows of the pattern and the song's rows to a beat are given, as they are to `hit`.
     """
     found = [index for index, note in enumerate(notes) if note.row == row and note.drum == letter]
     if not found:
         return tuple(notes)
     kept = tuple(note for index, note in enumerate(notes) if index != found[0])
-    return _refit(kept, found[0] - 1, drums, rows)
+    return _refit(kept, found[0] - 1, drums, rows, rows_per_beat)
