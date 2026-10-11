@@ -9,8 +9,9 @@ from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
 from ..note import TICK_HZ
-from . import channelbar, songedit, songview, theme
+from . import channelbar, chordview, songedit, songview, theme
 from .channelbar import ChannelBar
+from .chordview import ChordBox
 from .dials import Stepper, plain
 from .font import Font
 from .layout import Rect
@@ -65,6 +66,10 @@ SONG_H = 2 * channelbar.BUTTON_H + 2
 #: What is said, after the name of the song, where its order or its channels were changed outside while a block
 #: was carried here, or a menu or a box was open.
 ELSEWHERE = "was changed outside meanwhile, so nothing was done here"
+#: What the two things at the end of the menu of a bar's chord read: the one that clears the bar, and the one
+#: that opens the box a new chord is made in.
+NO_CHORD = "none"
+NEW_CHORD = "New chord..."
 #: What a number of bars is typed with, and how many of them it can have.
 DIGITS = "0123456789"
 MOST_DIGITS = 3
@@ -293,6 +298,14 @@ class SongPanel(Panel):
     reason can be read and the text mended. A new block, and a new channel, is the picked one. Anything else
     leaves picked what was, where the song still has it: a pattern and a channel also under a new name.
 
+    The roll is shown the chords the song has written for the bars of its pattern, read as the chord check
+    reads them: a song with none has an empty strip there. A press on a bar of that strip opens a menu at the
+    mouse with the chords of the project by name, `none` and `New chord...`. A chord that is chosen is saved as
+    the chord of the bar, and `none` leaves the bar with no chord: either is the song's chords for the pattern
+    saved, one change to the file and one step that can be taken back. `New chord...` opens the box of
+    `chordview.ChordBox`, where a chord is made of a root and a kind and named. It is added to the chords of the
+    project and then set on the bar: two changes to the file, and two steps.
+
     `tempo` and the two buttons `lower` and `higher` are the song's own settings. They stand under the choice,
     and beside it while the mixer is shown. The tempo is one of those `tempo_steps` gives, shown in beats a
     minute. The buttons move every tuned note of the song a semitone down or up, and `shifted` between them
@@ -315,7 +328,7 @@ class SongPanel(Panel):
         self.list = self.add(List(nowhere, changed=self._pick, asked=self._ask_channel))
         self.bar = ChannelBar(self)
         self.roll = self.add(Roll(nowhere, edited=lambda notes, label: self._save(self.roll.channel, notes, label),
-                                  sounded=self._sound, typed=self._key))
+                                  sounded=self._sound, typed=self._key, chord_asked=self._ask_chord))
         self.steps = self.add(Steps(nowhere, edited=self._save, sounded=self._drum))
         self.fault = self.add(Label(nowhere, "", theme.FAULT, "centre"))
         self.tempo = self.add(Stepper(nowhere, ("",), changed=self._tempo,
@@ -638,6 +651,65 @@ class SongPanel(Panel):
                 lambda song: songedit.channel_dropped(song, channel), f"channel {channel} removed")),
         ), pos)
 
+    def _ask_chord(self, bar: int, pos: Pos) -> None:
+        """Open the menu of a bar of the pattern that is shown, at the mouse: the chord the bar is to be in.
+
+        It has the chords of the project by name, then what clears the bar, and what opens the box a new chord
+        is made in. The pattern is the one that was shown when the menu opened, with the bars it had then.
+        """
+        at = self._blocks[self.strip.picked].name, len(self.roll.chords.bars), bar
+        chords = [Item(name, lambda name=name: self._chord(*at, name)) for name in self.session.model.project.chords]
+        self._menu((*chords, *([None] if chords else []), Item(NO_CHORD, lambda: self._chord(*at, None)),
+                    Item(NEW_CHORD, lambda: self._new_chord(*at, pos))), pos)
+
+    def _chord(self, pattern: str, bars: int, bar: int, name: str | None) -> bool:
+        """Save a chord of the project as the chord of a bar of a pattern of so many bars, or with None no chord.
+
+        It is the song's chords for the pattern that are saved, as `chordview.with_chord` leaves them: one
+        change to the file, and one step that can be taken back. The answer is whether the bar is so now. What
+        `chordview` or the project refuses changes nothing, and the session says why. A bar that is so already
+        is left alone, and is no step. The song is read again whatever came of it.
+        """
+        song_name = self._picked[1]
+        project = self.session.model.project
+        song = project.songs.get(song_name, {})
+        written = song.get("chords", {}).get(pattern, [])
+        try:
+            made = chordview.with_chord(project.chords, written, bars, bar, name)
+        except RowSynthError as error:
+            self.session.say(str(error))
+            return False
+        saved = made == list(written)
+        if not saved:
+            what = "no chord" if name is None else f"chord {name}"
+            saved = self.session.change(*chordview.saving(song_name, song, pattern, made),
+                                        f"bar {bar + 1} of pattern {pattern}: {what}")
+        self._look()
+        return saved
+
+    def _new_chord(self, pattern: str, bars: int, bar: int, pos: Pos) -> None:
+        """Open the box a new chord is made in, at a place: OK adds the chord and sets it on a bar of a pattern."""
+        self._popup = self.ui.open(ChordBox(pos, lambda name, made: self._add_chord(pattern, bars, bar, name, made)))
+
+    def _add_chord(self, pattern: str, bars: int, bar: int, name: str, made: dict) -> bool:
+        """Add a chord to the chords of the project under a name, and set it on a bar of a pattern.
+
+        The two are two changes to the file, made one after the other, and each is a step that can be taken
+        back. The answer is whether the chord was added: a name `chordview.named` refuses, or a chord the
+        project refuses, is not, and the session says why.
+        """
+        # Only a table the file has can be given one more chord: a file with no chords gets the table whole.
+        table = self.session.model.project.to_dict().get("chords")
+        try:
+            where, value = chordview.adding(table, name, made)
+        except RowSynthError as error:
+            self.session.say(str(error))
+            return False
+        if not self.session.change(where, value, f"new chord {name}"):
+            return False
+        self._chord(pattern, bars, bar, name)
+        return True
+
     def _menu(self, items: Sequence[Item | None], at: Pos) -> None:
         """Open a menu at a place, over everything else. Each item stands for what is done when it is chosen."""
         self._popup = self.ui.open(Menu(items, at, chosen=lambda act: act()))
@@ -744,7 +816,8 @@ class SongPanel(Panel):
                                 self._song.get("drums") or {})
                 self.steps.picked = self.channel
             else:
-                self.roll.show(pattern, self.channel, self._bar_rows, colour_of(place))
+                self.roll.show(pattern, self.channel, self._bar_rows, colour_of(place),
+                               chordview.read(self._project.chords, self._song, pattern.name, pattern.rows))
         self._seen()
 
     def _play(self) -> None:

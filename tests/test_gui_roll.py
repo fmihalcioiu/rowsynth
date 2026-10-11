@@ -7,12 +7,13 @@ import unittest
 from pathlib import Path
 
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import layout, songview, sprites, theme
+from rowsynth.gui import chordview, layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
+from rowsynth.gui.chordview import Chords
 from rowsynth.gui.font import Font
-from rowsynth.gui.roll import (BOX, DARKER, END_W, GHOST, HIGHEST, KEY_H, LEVEL, LEVELS, LIGHTER, LOWEST, MOVE,
-                               OFF_GRID, PICK, PLACE, REMOVE, ROW_W_MAX, ROW_W_MIN, SLACK, STRETCH, Map, Roll, begins,
-                               black, mix, name, path)
+from rowsynth.gui.roll import (BOX, CHORD_LIT, CHORDS_H, DARKER, END_W, GHOST, HIGHEST, KEY_H, LEVEL, LEVELS, LIGHTER,
+                               LOWEST, MOVE, OFF_GRID, PICK, PLACE, REMOVE, ROW_W_MAX, ROW_W_MIN, SLACK, STRETCH, Map,
+                               Roll, begins, black, mix, name, path)
 from rowsynth.gui.songview import Channel, Note, Pattern
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -59,6 +60,12 @@ def pattern(lead: tuple[Note, ...] = LEAD, called: str = "p", rows: float = 32.0
         Channel("arp", "pluck", False, (note(0, 8, 64), note(8, 8, 76)), rows, True),
         Channel("kit", "kick", True, (Note(2.0, 1.0, 62.0, 15, "hat", "h"),), rows, True),
         Channel("pad", "pad", False, (), 0.0, False)))
+
+
+def chords(*written: str) -> Chords:
+    """The chords of a pattern of two bars called p, read from the strings a song has for its bars."""
+    table = {"Am": {"root": 9, "tones": [9, 0, 4]}, "F": {"root": 5, "tones": [5, 9, 0]}}
+    return chordview.read(table, {"chords": {"p": list(written)}}, "p", 32.0)
 
 
 def strength(colour: tuple[int, ...], ground: tuple[int, ...]) -> int:
@@ -1047,6 +1054,151 @@ class Drawn(unittest.TestCase):
         y = seen.y(72) + 4
         self.assertEqual([self.at(seen.x(row) + 2, y) for row in (1, 3, 4, 5)], [ghost, ghost, theme.RAISED, ghost])
         self.assertEqual(self.at(seen.x(64), y), theme.DIM)
+
+
+class Strip(unittest.TestCase):
+    def test_the_strip_of_the_chords_lies_under_the_ruler_and_a_roll_with_no_chords_is_as_it_was(self) -> None:
+        seen = Map(RECT, strip=CHORDS_H)
+        self.assertEqual((seen.ruler, seen.chords, seen.keys, seen.grid, seen.lane),
+                         ((50, 20, 260, 10), (50, 30, 260, 13), (10, 43, 40, 179), (50, 43, 260, 179),
+                          (50, 226, 260, 34)))
+        self.assertEqual((Map(RECT).chords, Map(RECT).grid), ((50, 30, 260, 0), (50, 30, 260, 192)))
+        roll = Roll(RECT)
+        roll.show(pattern(TUNE), "lead", 16, theme.SONG)
+        bare = roll.map
+        roll.show(pattern(TUNE), "lead", 16, theme.SONG, chords("Am"))
+        self.assertEqual((roll.map.strip, roll.map.grid), (CHORDS_H, (50, 43, 260, 179)))
+        roll.show(pattern(TUNE), "lead", 16, theme.SONG)
+        self.assertEqual((roll.chords, roll.map, bare.strip), (None, bare, 0))
+
+    def test_a_press_on_a_bar_of_the_strip_tells_the_owner_of_the_bar_and_begins_nothing(self) -> None:
+        ui = Ui()
+        asked: list[tuple[int, tuple[int, int]]] = []
+        roll = ui.add(Roll(RECT, "the notes of a channel", chord_asked=lambda bar, pos: asked.append((bar, pos))))
+        roll.show(pattern(TUNE), "lead", 16, theme.SONG, chords("Am"))
+        # The second bar starts at x 194. The ruler over the strip is nobody's, and the right button asks nothing.
+        used = []
+        for pos, button in (((60, 35), 1), ((200, 42), 1), ((200, 29), 1), ((200, 35), 3)):
+            used.append(ui.handle(Event("down", pos, button=button)))
+            ui.handle(Event("up", pos, button=button))
+        self.assertEqual((used, asked), ([True, True, False, False], [(0, (60, 35)), (1, (200, 42))]))
+        self.assertEqual((roll.busy, roll.picked, roll.notes), (False, frozenset(), TUNE))
+        ui.handle(Event("move", (200, 35)))
+        self.assertEqual(ui.help, "pick the chord of bar 2")
+        # Past the last bar of the pattern the strip has no bar, and a roll with no chords has no strip.
+        roll.row = 20.0
+        self.assertFalse(ui.handle(Event("down", (200, 35), button=1)))
+        roll.row = 0.0
+        roll.show(pattern(TUNE), "lead", 16, theme.SONG)
+        ui.handle(Event("down", (60, 35), button=1))
+        self.assertEqual(len(asked), 2)
+
+
+@unittest.skipUnless(pygame, NEEDS)
+class Chorded(unittest.TestCase):
+    def setUp(self) -> None:
+        self.surface = pygame.Surface(SIZE)
+        self.canvas = Canvas(self.surface, Font(sprites.load("font")))
+        self.ui = Ui()
+        self.edits: list[str] = []
+        self.roll = self.ui.add(Roll(RECT, "the notes of a channel", lambda notes, label: self.edits.append(label)))
+        self.roll.ghosts = False
+
+    def at(self, *pos: int) -> tuple[int, ...]:
+        """The colour of one pixel."""
+        return tuple(self.surface.get_at(pos))[:3]
+
+    def where(self, colour: tuple[int, ...], rect: layout.Rect) -> set[tuple[int, int]]:
+        """The pixels of a rectangle that are in a colour."""
+        x, y, w, h = rect
+        return {(x + column, y + row) for column in range(w) for row in range(h)
+                if self.at(x + column, y + row) == colour}
+
+    def draw(self) -> Map:
+        """Draw the roll on a surface with nothing on it, and give its sums."""
+        self.surface.fill(OUTSIDE)
+        self.ui.draw(self.canvas)
+        return self.roll.map
+
+    def red(self) -> set[tuple[int, int]]:
+        """Every pixel that is in the colour of a fault."""
+        return self.where(theme.FAULT, RECT)
+
+    def ring(self, found: Note) -> set[tuple[int, int]]:
+        """The pixels of the outline round the bar of a note: on the lines of the grid on its four sides."""
+        x, y, w, h = self.roll.map.note(found.row, found.rows, found.pitch)
+        return {(x - 1 + column, y - 1 + row) for column in range(w + 2) for row in range(h + 2)
+                if column in (0, w + 1) or row in (0, h + 1)}
+
+    def test_a_bar_has_its_chord_named_in_the_strip_and_the_rows_of_its_notes_lit_as_far_as_it_goes(self) -> None:
+        self.roll.show(pattern(()), "lead", 16, theme.SONG, chords("Am"))
+        seen = self.draw()
+        # Each bar has a box from its line to a pixel before the next, and a line of air under it. The first has
+        # its name 4 pixels in, and the second, which has no chord, is empty.
+        named = self.where(theme.ACTIVE, RECT)
+        self.assertTrue(named and named <= {(x, y) for x in range(54, 65) for y in range(32, 41)})
+        self.assertEqual([self.at(*pos) for pos in ((50, 30), (192, 41), (193, 36), (194, 30), (120, 36), (250, 36),
+                                                    (120, 42))],
+                         [theme.LINE, theme.LINE, theme.PANEL, theme.LINE, theme.RAISED, theme.RAISED, theme.PANEL])
+        self.assertTrue(self.where(theme.DIM, (10, 30, 40, 12)))
+        # In the first bar the rows of a, c and e are a shade lighter, in every octave, up to the line of the bar.
+        lit = mix(theme.RAISED, theme.TEXT, CHORD_LIT)
+        whole = seen.pitches()[1:-1]
+        self.assertEqual([pitch for pitch in whole if self.at(seen.x(2) + 3, seen.y(pitch) + 3) == lit],
+                         [52, 57, 60, 64])
+        self.assertEqual({self.at(seen.x(18) + 3, seen.y(pitch) + 3) for pitch in whole if not black(pitch)},
+                         {theme.RAISED})
+        y = seen.y(64)
+        self.assertEqual([self.at(seen.x(16) + by, y + 3) for by in (-1, 0, 1)], [lit, theme.DIM, theme.RAISED])
+        self.assertEqual((self.at(seen.x(2) + 3, y + 10), self.at(seen.x(4), y + 3)), (theme.PANEL, theme.LINE))
+
+    def test_a_note_the_check_would_find_has_a_red_outline_and_the_help_line_says_why(self) -> None:
+        self.roll.show(pattern(TUNE), "lead", 16, theme.SONG, chords("Am"))
+        seen = self.draw()
+        # Under a minor e4 is right, f4 and g4 start beats and are not, and c4 starts between two beats.
+        self.assertEqual(self.red(), self.ring(TUNE[1]) | self.ring(TUNE[2]))
+        lines = []
+        for found in TUNE[:2]:
+            self.ui.handle(Event("move", (seen.x(found.row) + 4, seen.y(found.pitch) + 4)))
+            lines.append(self.ui.help)
+        self.assertEqual(lines, ["move e4", "f4 is not in Am"])
+        # Nothing is red under a string that names no chord, nor in a channel that ends before its pattern does,
+        # which the check does not look at, nor in a roll that is shown no chords: that one is as it was.
+        short = Pattern("p", 32.0, (Channel("lead", "lead", False, TUNE, 16.0, True),
+                                    Channel("arp", "pluck", False, (note(0, 32, 50),), 32.0, True)))
+        for shown, written in ((pattern(TUNE), chords("", "Am")), (short, chords("Am")), (pattern(TUNE), None)):
+            self.roll.show(shown, "lead", 16, theme.SONG, written)
+            self.draw()
+            self.assertEqual(self.red(), set())
+        self.assertEqual((self.roll.map.grid, self.where(theme.ACTIVE, RECT)), ((50, 30, 260, 192), set()))
+
+    def test_a_note_dragged_off_its_chord_is_red_before_it_is_let_go_and_so_is_one_that_is_being_placed(self) -> None:
+        # The lead ends before its pattern, so none of it is red until a gesture would save it, and fill its rows.
+        short = Pattern("p", 32.0, (Channel("lead", "lead", False, TUNE, 16.0, True),
+                                    Channel("arp", "pluck", False, (note(0, 32, 50),), 32.0, True)))
+        self.roll.show(short, "lead", 16, theme.SONG, chords("Am"))
+        seen = self.draw()
+        x, y = seen.x(1) + 4, seen.y(64) + 4
+        self.ui.handle(Event("down", (x, y), button=1))
+        self.draw()
+        self.assertEqual(self.red(), set())
+        # e4 goes up a key to f4, which is not in the chord, and back.
+        self.ui.handle(Event("move", (x, y - KEY_H)))
+        self.draw()
+        self.assertEqual(self.red(), self.ring(note(0, 4, 65)) | self.ring(TUNE[1]) | self.ring(TUNE[2]))
+        self.ui.handle(Event("move", (x, y)))
+        self.draw()
+        self.ui.handle(Event("up", (x, y), button=1))
+        self.assertEqual((self.red(), self.edits), (set(), []))
+        # A note that a press would place on the fourth beat at d4 is red while the button is held.
+        self.roll.show(pattern(TUNE[:1]), "lead", 16, theme.SONG, chords("Am"))
+        seen = self.draw()
+        self.ui.handle(Event("down", (seen.x(12) + 4, seen.y(62) + 4), button=1))
+        self.draw()
+        self.assertEqual((self.roll.drawn[-1], self.red()), (note(12, 4, 62), self.ring(note(12, 4, 62))))
+        self.ui.handle(Event("key", key="escape"))
+        self.draw()
+        self.assertEqual((self.red(), self.edits), (set(), []))
 
 
 if __name__ == "__main__":

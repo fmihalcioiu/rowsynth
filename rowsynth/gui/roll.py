@@ -8,7 +8,8 @@ from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
 from ..song import _NAMES
-from . import noteedit, songview, theme
+from . import chordview, noteedit, songview, theme
+from .chordview import Chords
 from .font import Font
 from .layout import Rect
 from .noteedit import Picked
@@ -32,6 +33,10 @@ KEYS_W = 40
 BLACK_W = 24
 #: How high the strip along the top is in which the bars are numbered.
 RULER_H = 10
+#: How high the strip is in which the chords of the bars are named, between the ruler and the grid, a line of air
+#: under the names counted. And how far a name stands from the start of its bar.
+CHORDS_H = 13
+CHORD_PAD = 4
 #: How high the lane of the levels is, and how far under the grid it starts.
 LANE_H = 34
 GAP = 4
@@ -53,6 +58,8 @@ WHEEL_PX = 36
 LIGHTER = 0.45
 DARKER = 0.4
 GHOST = 0.6
+#: How far the row of a key goes towards the colour of the text across a bar whose chord has the note of the key.
+CHORD_LIT = 0.1
 #: How many pixels at the right end of the bar of a note are for stretching it. A press further left moves it.
 END_W = 3
 #: How many pixels the mouse may stray from where it was pressed, to any side, and not have dragged: a click wobbles.
@@ -121,31 +128,40 @@ class Map:
 
     rect is the roll's rectangle. row is the row at the left edge of its grid, top the pitch of the key at the
     upper edge of it, and row_w how wide a row is. row and top can be fractions: then part of a row, or of a key,
-    is cut off at that edge.
+    is cut off at that edge. strip is how high the strip of the chords is, between the ruler and the grid: 0 for
+    a roll that shows no chords, which has no such strip.
     """
 
     rect: Rect
     row: float = 0.0
     top: float = 72.0
     row_w: int = ROW_W
+    strip: int = 0
 
     @property
     def grid(self) -> Rect:
-        """Where the notes are: what the keys, the ruler and the lane leave of the rectangle."""
+        """Where the notes are: what the keys, the ruler, the strip of the chords and the lane leave of it."""
         x, y, w, h = self.rect
-        return x + KEYS_W, y + RULER_H, max(0, w - KEYS_W), max(0, h - RULER_H - GAP - LANE_H)
+        head = RULER_H + self.strip
+        return x + KEYS_W, y + head, max(0, w - KEYS_W), max(0, h - head - GAP - LANE_H)
 
     @property
     def keys(self) -> Rect:
         """The strip of keys, down the left of the grid."""
-        x, y, _, _ = self.rect
-        return x, y + RULER_H, KEYS_W, self.grid[3]
+        _, y, _, h = self.grid
+        return self.rect[0], y, KEYS_W, h
 
     @property
     def ruler(self) -> Rect:
-        """The strip over the grid in which the bars are numbered."""
+        """The strip along the top in which the bars are numbered, as wide as the grid."""
         x, _, w, _ = self.grid
         return x, self.rect[1], w, RULER_H
+
+    @property
+    def chords(self) -> Rect:
+        """The strip in which the chords of the bars are named, under the ruler and as wide. It is `strip` high."""
+        x, y, w, _ = self.ruler
+        return x, y + RULER_H, w, self.strip
 
     @property
     def lane(self) -> Rect:
@@ -389,6 +405,13 @@ class Roll(Widget):
     roll has the focus, goes to `key`. One that is not the roll's is handed on to `typed`, which says whether
     the owner used it.
 
+    `chords` is the chords of the pattern as `chordview.read` gives them, or None for a roll that shows none. With
+    them a strip under the ruler names the chord of each bar, and across a bar the rows of the notes of its
+    chord are lit, in every octave. A note that the chord check would find is outlined in the colour of a fault,
+    and so is one that a gesture under way would leave so: the help line on such a note says why. A press on a
+    bar of the strip calls `chord_asked` with the bar, counted from 0, and the position, for the owner to open
+    a menu at: the roll changes no chord.
+
     `ghosts` is whether the notes of the other channels that are not drums are drawn dim behind. `playhead` is the
     row that is playing, which can be a fraction, or None: the owner sets it each frame. `row`, `top` and `row_w`
     are the view, as a `Map` has them. `help`, while the mouse is where a press does something, says what; anywhere
@@ -397,11 +420,14 @@ class Roll(Widget):
 
     def __init__(self, rect: Rect, help: str = "", edited: Callable[[tuple[Note, ...], str], object] | None = None,
                  sounded: Callable[[float, str], object] | None = None,
-                 typed: Callable[[Event], object] | None = None) -> None:
+                 typed: Callable[[Event], object] | None = None,
+                 chord_asked: Callable[[int, Pos], object] | None = None) -> None:
         super().__init__(rect, help)
         self.edited = edited
         self.sounded = sounded
         self.typed = typed
+        self.chord_asked = chord_asked
+        self.chords: Chords | None = None
         self.grid = 1.0
         self.pattern: Pattern | None = None
         self.channel = ""
@@ -428,10 +454,12 @@ class Roll(Widget):
     def help(self) -> str:
         """What a press where the mouse is would do, in plain words, or the line the roll was made with.
 
-        While a gesture is under way it is what the press did that began it.
+        While a gesture is under way it is what the press did that began it. On a note that is outlined as a
+        wrong one it is why the note is wrong.
         """
-        told = self._gesture.help if self._gesture is not None else self._tell(self._mouse, self._mods)
-        return told or self._help
+        if self._gesture is not None:
+            return self._gesture.help or self._help
+        return self._why(self._mouse) or self._tell(self._mouse, self._mods) or self._help
 
     @help.setter
     def help(self, line: str) -> None:
@@ -440,7 +468,7 @@ class Roll(Widget):
     @property
     def map(self) -> Map:
         """The sums of the roll as it is now."""
-        return Map(self.rect, self.row, self.top, self.row_w)
+        return Map(self.rect, self.row, self.top, self.row_w, 0 if self.chords is None else CHORDS_H)
 
     @property
     def notes(self) -> tuple[Note, ...]:
@@ -475,8 +503,12 @@ class Roll(Widget):
         seen = seen.within(self._rows(), self.bar_rows)
         self.row, self.top, self.row_w = seen.row, seen.top, seen.row_w
 
-    def show(self, pattern: Pattern, channel: str, bar_rows: int, colour: Colour) -> None:
+    def show(self, pattern: Pattern, channel: str, bar_rows: int, colour: Colour,
+             chords: Chords | None = None) -> None:
         """Show one channel of a pattern, with `bar_rows` rows to the bar, its notes in `colour`.
+
+        `chords` is the chords of the pattern, for the strip that names them. With none given the roll has no
+        such strip, lights no rows and outlines no note as a wrong one.
 
         The view is fitted when the pattern or the channel is another than before, by their names. When the same
         ones are shown again, with other notes, the view stays. A channel the pattern does not have is refused,
@@ -500,6 +532,7 @@ class Roll(Widget):
             self._picked = gave[1] if gave is not None and gave[0] == own.notes else frozenset()
             self._gave = None
         self.pattern, self.channel, self.bar_rows, self.colour, self._own = pattern, channel, bar_rows, colour, own
+        self.chords = chords
         self._open = songview.on_grid(pattern)
         if another:
             self.fit()
@@ -516,6 +549,37 @@ class Roll(Widget):
         """Which of the channel's notes has its bar under a position: its index among them, or None for none."""
         return self.map.note_at(self.notes, pos)
 
+    def _faults(self, notes: Sequence[Note]) -> list[tuple[int, str, float] | None]:
+        """What the chord check would find on each of some notes of the channel, as `chordview.wrong` gives it.
+
+        None for a note it passes. The notes that are shown are held to the chords where the check looks at
+        their channel. Other notes, which a gesture under way would leave, are held to them whatever the channel
+        was: saved, its text fills the pattern, and the check looks at it then. With no chords shown nothing is
+        found.
+        """
+        chords = self.chords
+        if chords is None or self._own is None:
+            return [None] * len(notes)
+        saved = self._gesture is not None and tuple(notes) != self.notes
+        looked = not self._own.drums if saved else chordview.looked(self.pattern, self._own)
+        return [chordview.wrong(chords, note) if looked else None for note in notes]
+
+    def _why(self, pos: Pos) -> str:
+        """Why the note under a position is outlined as a wrong one, in plain words. No words where it is not."""
+        index = self.note_at(pos)
+        if index is None:
+            return ""
+        found = self._faults([self.notes[index]])[0]
+        return "" if found is None else f"{name(round(self.notes[index].pitch))} is not in {found[1]}"
+
+    def _bar_at(self, pos: Pos) -> int | None:
+        """The bar whose place in the strip of the chords a position is on, counted from 0, or None for none."""
+        seen = self.map
+        if self.chords is None or not inside(seen.chords, pos):
+            return None
+        bar = math.floor(seen.row_at(pos[0]) / self.bar_rows)
+        return bar if 0 <= bar < len(self.chords.bars) else None
+
     def _tell(self, pos: Pos, mods: frozenset[str] = _NO_MODS, button: int = 1) -> str:
         """What a press at a position would do, in plain words. No words where it would do nothing."""
         if self.pattern is None:
@@ -524,6 +588,9 @@ class Roll(Widget):
         key = self._key_at(pos) if button == 1 else None
         if key is not None:
             return f"hear {name(key)}"
+        bar = self._bar_at(pos) if button == 1 else None
+        if bar is not None:
+            return f"pick the chord of bar {bar + 1}"
         kind, index = begins(seen, self.notes, self._rows(), pos, button, mods)
         if not kind or not self._open:
             return OFF_GRID if kind else ""
@@ -545,15 +612,16 @@ class Roll(Widget):
 
         The wheel scrolls the keys, with shift the rows, and with ctrl it zooms: not while a gesture is under way.
         A press is used when it begins a gesture, and the owner is told of no edit before its release. A press of
-        the left button on a key of the strip is used as well: it begins no gesture, and its key is heard. A key
-        of the computer goes to `key`, and one that is not the roll's to `typed`: it is used when either used it.
+        the left button on a key of the strip is used as well: it begins no gesture, and its key is heard. So is
+        one on a bar of the strip of the chords, of which the owner is told. A key of the computer goes to
+        `key`, and one that is not the roll's to `typed`: it is used when either used it.
         """
         if event.kind == "key":
             return self.key(event) or (self.typed is not None and bool(self.typed(event)))
         self._mouse, self._mods = event.pos, event.mods
         if event.kind == "down":
             # A press while another button is held begins nothing.
-            return ui.held is None and (self._press(event) or self._strike(event))
+            return ui.held is None and (self._press(event) or self._strike(event) or self._ask(event))
         gesture = self._gesture
         if event.kind == "wheel":
             return gesture is None and self._wheel(event)
@@ -579,6 +647,16 @@ class Roll(Widget):
         if key is not None and self.sounded is not None:
             self.sounded(key, self._own.inst)
         return key is not None
+
+    def _ask(self, event: Event) -> bool:
+        """Tell the owner of the bar of the strip of the chords that the left button is pressed on.
+
+        The answer is whether it was on one. Nothing is changed and nothing is picked: the owner sets the chord.
+        """
+        bar = self._bar_at(event.pos) if event.button == 1 else None
+        if bar is not None and self.chord_asked is not None:
+            self.chord_asked(bar, event.pos)
+        return bar is not None
 
     def _wheel(self, event: Event) -> bool:
         """Scroll the keys by a step of the wheel, with shift the rows, and with ctrl zoom. It is always used."""
@@ -715,7 +793,8 @@ class Roll(Widget):
     def draw(self, canvas: Canvas) -> None:
         """Draw the keys, the grid, the notes, the lane of the levels and the playhead: all of it in the rectangle.
 
-        While a gesture is under way, the notes are drawn as its release would leave them.
+        While a gesture is under way, the notes are drawn as its release would leave them. With chords shown,
+        the strip that names them is drawn as well.
         """
         seen = self.map
         notes, picked = self._now()
@@ -723,6 +802,7 @@ class Roll(Widget):
             canvas.box(self.rect, theme.PANEL)
             self._draw_keys(canvas, seen)
             self._draw_grid(canvas, seen)
+            self._draw_chords(canvas, seen)
             self._draw_notes(canvas, seen, notes, picked)
             self._draw_lane(canvas, seen, notes)
             if self.playhead is not None:
@@ -744,14 +824,24 @@ class Roll(Widget):
                     canvas.text_in(name(pitch), (x, key[1], w - 5, KEY_H), theme.BACKGROUND, "right")
 
     def _draw_grid(self, canvas: Canvas, seen: Map) -> None:
-        """The rows of the keys as far as the pattern goes, the lines of its rows, and the numbers of its bars."""
+        """The rows of the keys as far as the pattern goes, the lines of its rows, and the numbers of its bars.
+
+        Where a chord lies, the rows of its notes are a shade lighter, as far as the chord goes.
+        """
         _, y, _, h = seen.grid
         rows = self._rows()
         left, right = seen.x(0), seen.x(rows)
+        spans = [span for bar in (self.chords.bars if self.chords else ()) for span in bar.spans]
         with canvas.clip(seen.grid):
             for pitch in seen.pitches():
                 top = seen.y(pitch)
-                canvas.box((left, top, right - left, KEY_H), theme.BACKGROUND if black(pitch) else theme.RAISED)
+                ground = theme.BACKGROUND if black(pitch) else theme.RAISED
+                lit = mix(ground, theme.TEXT, CHORD_LIT)
+                canvas.box((left, top, right - left, KEY_H), ground)
+                for span in spans:
+                    if pitch % 12 in span.tones:
+                        start, end = seen.x(span.row), seen.x(min(span.row + span.rows, rows))
+                        canvas.box((start, top, end - start, KEY_H), lit)
                 canvas.hline(left, top + KEY_H - 1, right - left, theme.PANEL)
             for row in seen.rows():
                 if not 0 <= row <= rows:
@@ -767,10 +857,31 @@ class Roll(Widget):
                 number = (seen.x(bar * self.bar_rows) + 2, seen.ruler[1], self.bar_rows * seen.row_w - 3, RULER_H)
                 canvas.text_in(str(bar + 1), number, theme.DIM)
 
+    def _draw_chords(self, canvas: Canvas, seen: Map) -> None:
+        """The strip of the chords, with its name beside it: a box for each bar of the pattern, and its chord in it.
+
+        The box of a bar with no chord is empty. With no chords shown there is no strip, and nothing is drawn.
+        """
+        if self.chords is None:
+            return
+        _, y, _, h = seen.chords
+        canvas.text_in("CHORDS", (self.rect[0], y, KEYS_W - 5, h - 1), theme.DIM, "right")
+        rows = self._rows()
+        with canvas.clip(seen.chords):
+            for index, bar in enumerate(self.chords.bars):
+                left, right = seen.x(index * self.bar_rows), seen.x(min((index + 1) * self.bar_rows, rows))
+                box = (left, y, right - left - 1, h - 1)
+                canvas.box(box, theme.RAISED)
+                canvas.frame(box, theme.LINE)
+                room = max(0, right - left - 2 * CHORD_PAD)
+                canvas.text_in(bar.text, (left + CHORD_PAD, y, room, h - 1), theme.ACTIVE)
+
     def _draw_notes(self, canvas: Canvas, seen: Map, notes: Sequence[Note], picked: frozenset[int]) -> None:
         """The ghosts, each in the colour its channel takes by its place in the song, and over them the notes.
 
-        A picked note has a bright outline, and so has the box that a gesture is drawing.
+        A picked note has a bright outline, and so has the box that a gesture is drawing. A note the chord
+        check would find has an outline in the colour of a fault round its bar, on the lines of the grid, so
+        that it is seen on a picked note as well.
         """
         with canvas.clip(seen.grid):
             for index, channel in enumerate(self.pattern.channels if self.pattern and self.ghosts else ()):
@@ -797,6 +908,10 @@ class Roll(Widget):
                 label = name(round(note.pitch))
                 if w >= Font.width(label) + 5:
                     canvas.text_in(label, (x + 3, y, w - 5, h), theme.BACKGROUND)
+            for note, found in zip(notes, self._faults(notes)):
+                if found is not None:
+                    x, y, w, h = seen.note(note.row, note.rows, note.pitch)
+                    canvas.frame((x - 1, y - 1, w + 2, h + 2), theme.FAULT)
             box = self._gesture.box if self._gesture is not None else None
             if box is not None:
                 canvas.frame(box, theme.TEXT)

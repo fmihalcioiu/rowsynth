@@ -14,12 +14,14 @@ from pathlib import Path
 from unittest import mock
 
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import channelbar, dials, layout, songview, sprites, theme
+from rowsynth.gui import channelbar, chordview, dials, layout, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
+from rowsynth.gui.chordview import ChordBox
 from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.mixer import Strip
 from rowsynth.gui.model import Model
+from rowsynth.gui.popups import Menu
 from rowsynth.gui.session import POLL_EVERY, Session
 from rowsynth.gui.songpanel import (MIXER, NOTES, SongPanel, arrange, channel_rows, colour_of, first_channel,
                                     lowest_c, place_at, song_parts)
@@ -84,6 +86,17 @@ EDITED = {
     "instruments": {**INSTRUMENTS, "buzz": {"wave": "saw"}},
     "songs": {"walk": {**WALK, "channels": {**WALK["channels"], "low": {"inst": "buzz"}}}, "pair": PAIR},
 }
+#: A song of two bars for one channel, and a project with two chords in which it has one written for each bar.
+#: Under the second, the e that starts the second beat of its bar is wrong.
+PAIRED = {"row_ticks": 6, "channels": {"air": {"inst": "tone"}},
+          "patterns": {"a": {"air": "o4 l4 c e g e | d e g b"}}, "order": ["a"]}
+CHORDED = {
+    "instruments": INSTRUMENTS,
+    "chords": {"C": {"root": 0, "tones": [0, 4, 7]}, "G": {"root": 7, "tones": [7, 11, 2]}},
+    "songs": {"tune": {**PAIRED, "chords": {"a": ["C", "G"]}}},
+}
+#: The same song with no chords written, in a project that has no chords.
+UNCHORDED = {"instruments": INSTRUMENTS, "songs": {"tune": PAIRED}}
 #: The rate a project that is changed is rendered at on the threads of its model: a low one, to be quick.
 RATE = 8000
 #: The time the first write from outside is stamped with, in nanoseconds: none the file gets by being saved.
@@ -1124,6 +1137,112 @@ class Piece(Opened):
         # The file read again gives the notes the roll shows, which are the ones there were but for that note.
         self.assertEqual(self.roll.notes, (dataclasses.replace(notes[0], pitch=63), *notes[1:]))
         self.assertEqual(self.read("cold", "lead", "piece"), self.roll.notes)
+
+
+class Chorded(Opened):
+    def setUp(self) -> None:
+        self.opened(lambda path: path.write_text(json.dumps(CHORDED), encoding="utf-8"))
+
+    def ask(self, bar: int) -> list[str | None]:
+        """Press on the place of a bar in the strip of the roll, and give what the menu that opens reads."""
+        seen = self.roll.map
+        click(self.ui, (seen.x(bar * 16) + 3, seen.chords[1] + 3))
+        self.assertIsInstance(self.ui.modal, Menu)
+        return [item and item.text for item in self.ui.modal.items]
+
+    def choose(self, bar: int, text: str) -> None:
+        """Press on the place of a bar in the strip, and choose the item of its menu that reads a text."""
+        at = self.ask(bar).index(text)
+        click(self.ui, middle(self.ui.modal.rows[at]))
+
+    def chords(self) -> object:
+        """The chords the file has for the song."""
+        return self.data()["songs"]["tune"].get("chords")
+
+    def shown(self) -> list[str]:
+        """What the strip of the roll reads for each bar."""
+        return [bar.text for bar in self.roll.chords.bars]
+
+    def wrong(self) -> list[float]:
+        """The rows of the notes of the roll that the chords it is shown have for wrong ones."""
+        return [note.row for note in self.roll.notes if chordview.wrong(self.roll.chords, note)]
+
+    def test_a_press_on_the_strip_opens_the_menu_and_a_chord_that_is_chosen_is_saved_as_one_step(self) -> None:
+        before = self.data()
+        self.assertEqual((self.shown(), self.wrong()), (["C", "G"], [20.0]))
+        self.assertEqual(self.ask(1), ["C", "G", None, "none", "New chord..."])
+        self.choose(1, "C")
+        self.assertEqual((self.ui.modal, self.chords(), self.session.undo_label, self.session.message),
+                         (None, {"a": ["C", "C"]}, "bar 2 of pattern a: chord C", ""))
+        self.assertEqual(differing(before, self.data()), ["songs.tune.chords.a"])
+        # The roll shows what the file holds: under C it is the d and the b of the second bar that are wrong.
+        self.assertEqual((self.shown(), self.wrong()), (["C", "C"], [16.0, 28.0]))
+        # The chord the bar has already is no step, and the one step is taken back.
+        self.choose(1, "C")
+        self.assertTrue(self.session.undo())
+        self.panel.update()
+        self.assertEqual((self.data(), self.shown(), self.wrong(), self.session.can_undo),
+                         (before, ["C", "G"], [20.0], False))
+
+    def test_none_clears_a_bar_and_the_last_bar_cleared_takes_the_pattern_out_of_the_chords(self) -> None:
+        self.choose(1, "none")
+        self.assertEqual((self.chords(), self.shown(), self.wrong(), self.session.undo_label),
+                         ({"a": ["C"]}, ["C", ""], [], "bar 2 of pattern a: no chord"))
+        self.choose(0, "none")
+        self.assertEqual((self.chords(), self.shown(), self.session.undo_label, self.session.message),
+                         ({}, ["", ""], "bar 1 of pattern a: no chord", ""))
+        # A bar with no chord that is cleared is as it was, which is no step.
+        self.choose(1, "none")
+        self.assertEqual((self.chords(), self.session.undo_label), ({}, "bar 1 of pattern a: no chord"))
+        # A bar that is cleared before one that has a chord keeps an empty string.
+        self.assertTrue(self.session.undo() and self.session.undo())
+        self.panel.update()
+        self.choose(0, "none")
+        self.assertEqual((self.chords(), self.shown(), self.wrong()), ({"a": ["", "G"]}, ["", "G"], [20.0]))
+
+    def test_a_new_chord_is_added_to_the_chords_of_the_project_and_set_on_the_bar(self) -> None:
+        self.choose(1, "New chord...")
+        box = self.ui.modal
+        self.assertIsInstance(box, ChordBox)
+        # The name of a chord the project has is refused, and the box stays open for the name to be mended.
+        self.key("return")
+        self.assertEqual((self.ui.modal, self.session.message, self.session.can_undo),
+                         (box, "the project has a chord called 'C' already", False))
+        left, top, _, high = chordview.keys(chordview.box_parts(box.at, self.ui.size)["keys"])[2]
+        click(self.ui, (left + 2, top + high - 2))
+        click(self.ui, (box.kinds.cells()[1][0] + 2, box.kinds.rect[1] + 2))
+        self.assertEqual(box.name.text, "Dm")
+        self.key("return")
+        self.assertEqual((self.ui.modal, self.data()["chords"]["Dm"], self.chords(), self.shown(), self.wrong()),
+                         (None, {"root": 2, "tones": [2, 5, 9]}, {"a": ["C", "Dm"]}, ["C", "Dm"], [20.0, 24.0, 28.0]))
+        # They are two changes and two steps: the chord of the bar is taken back first, and then the new chord.
+        self.assertEqual(self.session.undo_label, "bar 2 of pattern a: chord Dm")
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.chords(), "Dm" in self.data()["chords"], self.session.undo_label),
+                         ({"a": ["C", "G"]}, True, "new chord Dm"))
+        self.assertTrue(self.session.undo())
+        self.assertEqual(self.data(), CHORDED)
+
+    def test_a_song_with_no_chords_has_an_empty_strip_and_nothing_red_and_its_first_chord_is_made_in_the_box(
+            self) -> None:
+        self.opened(lambda path: path.write_text(json.dumps(UNCHORDED), encoding="utf-8"))
+        self.assertEqual((self.shown(), self.wrong(), self.roll.map.chords[3] > 0), (["", ""], [], True))
+        if pygame:
+            surface = pygame.Surface((RECT[0] + RECT[2], RECT[1] + RECT[3]))
+            canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
+            self.panel.draw(canvas)
+            self.ui.draw(canvas)
+            x, y, w, h = self.roll.map.chords
+            # Each of the two bars has its box, 16 rows less a pixel wide, and there is no name in either.
+            self.assertEqual((ink(surface, self.roll.rect, theme.FAULT), ink(surface, (x, y, w, h), theme.ACTIVE),
+                              ink(surface, (x, y, w, 1), theme.LINE)), (0, 0, 2 * (16 * self.roll.row_w - 1)))
+        # The project has no chord to choose yet. The box makes the first, and the file gets both its tables.
+        self.assertEqual(self.ask(0), ["none", "New chord..."])
+        self.choose(0, "New chord...")
+        self.key("return")
+        self.assertEqual((self.ui.modal, self.data()["chords"], self.chords(), self.shown(), self.wrong()),
+                         (None, {"C": {"root": 0, "tones": [0, 4, 7]}}, {"a": ["C"]}, ["C", ""], []))
+        self.assertEqual(differing(UNCHORDED, self.data()), ["songs.tune.chords", "chords"])
 
 
 @unittest.skipUnless(pygame, NEEDS)
