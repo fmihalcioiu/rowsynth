@@ -17,7 +17,7 @@ POLL_EVERY = 0.25
 GLOW_TIME = 1.5
 # How many of the things that changed outside a message names before it counts the rest.
 NAMED = 3
-# What is said when something is to play and there is no player.
+# What is said where there is no player: at the first tick, and each time something is to play.
 NO_SOUND = "no sound output"
 
 
@@ -26,6 +26,11 @@ def _told(changed: set[tuple[str, str]]) -> str:
     names = [name for name, _ in sorted((name, kind) for kind, name in changed)]
     more = len(names) - NAMED
     return "changed outside: " + ", ".join(names[:NAMED]) + (f" and {more} more" if more > 0 else "")
+
+
+def _words(error: Exception) -> str:
+    """What is said of an error: a refusal in its own words, anything else with the name of its class in front."""
+    return str(error) if isinstance(error, RowSynthError) else f"{type(error).__name__}: {error}"
 
 
 class Session:
@@ -53,6 +58,8 @@ class Session:
         # The render of the picked thing that was taken up last, and whether it is the one the model has now.
         self._render: dict | None = None
         self._taken = False
+        # Whether the findings the model has now were taken up.
+        self._checked = False
         # Whether the picked thing is to play as soon as its render is ready.
         self._waiting = False
 
@@ -60,8 +67,10 @@ class Session:
     def message(self) -> str:
         """The one line there is to say, "" for nothing.
 
-        It is what keeps the file from being read, for as long as that lasts. Else it is the last of these: the
-        things that changed outside, what the engine refused, that there is no sound output. A pick clears it.
+        It is what keeps the file from being read, for as long as that lasts. Else it is the last of these: that
+        there is no sound output, said at the first tick and each time something is to play; the things that
+        changed outside; what went wrong with the render of the picked thing; what went wrong with the checks.
+        A pick clears it.
         """
         return self.model.problem or self._said
 
@@ -69,7 +78,8 @@ class Session:
     def loop(self) -> bool:
         """Whether a song goes round until it is stopped. A sound or an instrument plays once whatever this is.
 
-        A song that plays takes a change at once, and begins again from its start to do so.
+        A song that plays takes a change at once and goes on from the place it is at: switched off, it plays to
+        its end and stops there.
         """
         return self._loop
 
@@ -79,8 +89,7 @@ class Session:
             return
         self._loop = bool(on)
         if self._render is not None and self._render["loop"] and self._sounding():
-            # The player cannot change a sound it is playing, so it is handed the song again.
-            self.player.play(self._render["sides"], self._loop)
+            self.player.loop(self._loop)
 
     @property
     def playing(self) -> bool:
@@ -92,14 +101,24 @@ class Session:
         """How long the picked thing is, by the render of it taken up last. 0 while there is none."""
         return 0.0 if self._render is None else self._render["seconds"]
 
+    @property
+    def findings_refused(self) -> bool:
+        """Whether the checks are through with no findings to give: they refused the project, or broke on it."""
+        return self.model.findings_ready() and self.model.count() is None
+
     def tick(self) -> None:
-        """A frame's share of the waiting work: a look at the file when one is due, and a render that has come."""
+        """A frame's share of the waiting work: a look at the file when one is due, and what the workers made."""
         now = self._clock()
         if self._looked is None or now - self._looked >= POLL_EVERY:
-            self._looked = now
-            self._look(now)
-        if not self._taken and self.model.picked is not None and self.model.render_ready():
+            first, self._looked = self._looked is None, now
+            self._look(now, first)
+        picked = self.model.picked is not None
+        if not self._taken and picked and self.model.render_ready():
             self._take()
+        # The findings wait for the render to be taken up: where both went wrong, it is always the words of the
+        # checks that stand, whichever worker was through first.
+        if not self._checked and (self._taken or not picked) and self.model.findings_ready():
+            self._check()
         self._lit = {thing: lit for thing, lit in self._lit.items() if now - lit < GLOW_TIME}
 
     def pick(self, kind: str, name: str) -> None:
@@ -162,18 +181,23 @@ class Session:
     def numbers(self) -> dict | None:
         """The numbers of the picked thing as the model gives them, or None while its render is not ready.
 
-        None as well for a render the engine refused.
+        None as well for a render that went wrong, refused or broken.
         """
         if not self.model.render_ready():
             return None
         try:
             return self.model.numbers()
-        except RowSynthError:
+        except Exception:
+            # Whatever the render went wrong with, which the model raises again each time it is asked.
             return None
 
     def finding_count(self) -> int | None:
-        """How many findings the checks have for the project, or None while they run or when they refuse it."""
-        return self.model.count()
+        """How many findings the checks have for the project, or None while the checks run.
+
+        0 as well where the checks refused the project or broke on it, which `findings_refused` tells from a
+        project with nothing found.
+        """
+        return 0 if self.findings_refused else self.model.count()
 
     def close(self) -> None:
         """Stops the sound and closes the player."""
@@ -191,13 +215,21 @@ class Session:
         self._render = None
         self._taken = False
 
-    def _look(self, now: float) -> None:
-        """Looks at the file, takes up what changed in it, and has what the model no longer keeps made again."""
+    def _look(self, now: float, first: bool) -> None:
+        """Looks at the file and takes up what changed in it. `first` is for the first look there is.
+
+        The render of the picked thing and the checks are started at the first look, and again after each change:
+        the model keeps both for as long as nothing in the project differs.
+        """
+        if first and self.player is None:
+            self._said = NO_SOUND
         before = self.model.picked
         changed = self.model.poll()
         if changed:
             self._lit.update((thing, now) for thing in changed)
             self._said = _told(changed)
+            # The model has let go of what it kept of the project as it was.
+            self._taken = self._checked = False
         if before is not None and self.model.picked is None:
             # The picked thing was removed outside: the first thing of the listing takes its place.
             self._drop()
@@ -205,30 +237,45 @@ class Session:
                 if things:
                     self.model.pick(KINDS[section], things[0][0])
                     break
-        # A file that was loaded again has no render kept and no findings, whether or not a thing in it differs.
-        # Both starts do nothing while what they would make is kept or on its way, a refusal as much as a result.
-        if self.model.picked is not None:
-            self._taken = self._taken and self.model.render_ready()
-            self.model.start_render()
-        self.model.start_findings()
+        if changed or first:
+            if self.model.picked is not None:
+                self.model.start_render()
+            self.model.start_findings()
 
     def _take(self) -> None:
         """Takes up the render the model has ready.
 
-        It is played if that was waited for, and else put in place of a loop that plays, which goes on. What the
-        engine or the player refuses is said, and stops what plays.
+        It is played if that was waited for, and else put in place of a loop that plays, which goes on. A render
+        that went wrong is said, and so is what the player refuses, and either stops what plays.
         """
         play, self._waiting = self._waiting, False
         self._taken = True
         try:
             made = self.model.render()
+        except Exception as error:
+            # What the engine refused, or what it broke with on its worker, where the traceback was written.
+            self._fail(error)
+            return
+        try:
             if play:
                 self.player.play(made["sides"], self._loop and made["loop"])
             elif self._loop and made["loop"] and self._sounding():
                 self.player.swap(made["sides"])
         except RowSynthError as error:
-            self.stop()
-            self._render = None
-            self._said = str(error)
+            self._fail(error)
             return
         self._render = made
+
+    def _fail(self, error: Exception) -> None:
+        """Says what kept the picked thing from being heard, and stops what plays."""
+        self.stop()
+        self._render = None
+        self._said = _words(error)
+
+    def _check(self) -> None:
+        """Takes up the findings the model has ready: where the checks refused the project or broke, that is said."""
+        self._checked = True
+        try:
+            self.model.findings()
+        except Exception as error:
+            self._said = _words(error)

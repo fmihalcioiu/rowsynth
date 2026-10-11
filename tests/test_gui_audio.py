@@ -204,6 +204,53 @@ class PlayerTest(unittest.TestCase):
         self.player.swap([ramp()])
         self.assertEqual(sounding(), [])
 
+    def test_loop_switched_on_has_a_sound_played_once_go_round_from_the_place_it_is_at(self) -> None:
+        sides = [ramp(), ramp(1.0, 0.5)]
+        self.player.play(sides)
+        self.at(0.25)
+        self.player.loop(True)
+        self.assertEqual(self.player.position(), 0.25)
+        self.assertEqual(sounding(), [turned(sides, RATE // 4)])
+        for seconds, place in ((0.5, 0.5), (1.0, 0.0), (3.75, 0.75)):
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertTrue(self.player.playing)
+                self.assertEqual(self.player.position(), place)
+
+    def test_loop_switched_off_has_a_loop_play_on_from_the_place_it_is_at_and_end_at_its_end(self) -> None:
+        # Silence but for one sample three quarters of the way in, to read the level by.
+        side = np.zeros(RATE, dtype=np.float32)
+        side[RATE * 3 // 4] = 1.0
+        self.player.play([side], loop=True)
+        self.at(2.25)
+        self.player.loop(False)
+        self.assertEqual(self.player.position(), 0.25)
+        self.assertEqual(sounding(), [audio.to_pcm([side])[RATE // 4:].tobytes()])
+        for seconds, playing, place, level in ((2.5, True, 0.5, 0.0), (2.76, True, 0.76, 1.0),
+                                               (3.0, False, 1.0, 0.0), (4.5, False, 1.0, 0.0)):
+            with self.subTest(seconds=seconds):
+                self.at(seconds)
+                self.assertEqual(self.player.playing, playing)
+                self.assertAlmostEqual(self.player.position(), place)
+                self.assertEqual(self.player.level(), (level, level))
+
+    def test_loop_does_nothing_with_nothing_playing_or_with_nothing_to_change(self) -> None:
+        once = [ramp(0.5)]
+        self.player.loop(True)
+        self.assertEqual((self.player.playing, sounding()), (False, []))
+        self.player.play(once)
+        self.at(0.25)
+        self.player.loop(False)
+        self.assertEqual((self.player.position(), sounding()), (0.25, [audio.to_pcm(once).tobytes()]))
+        # By the clock the sound has ended, so there is nothing to have go round.
+        self.at(0.5)
+        self.player.loop(True)
+        self.assertEqual((self.player.playing, sounding()), (False, [audio.to_pcm(once).tobytes()]))
+        self.player.play(once, loop=True)
+        self.at(0.75)
+        self.player.loop(True)
+        self.assertEqual((self.player.position(), sounding()), (0.25, [audio.to_pcm(once).tobytes()]))
+
     def test_level_reads_the_stretch_behind_the_position_on_each_side(self) -> None:
         left = np.zeros(RATE, dtype=np.float32)
         right = np.zeros(RATE, dtype=np.float32)

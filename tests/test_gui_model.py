@@ -6,6 +6,7 @@ import json
 import os
 import tempfile
 import threading
+import traceback
 import unittest
 from collections.abc import Callable
 from pathlib import Path
@@ -311,6 +312,34 @@ class PollTest(ModelCase):
         ])
         self.assertEqual(model.poll(), set())
 
+    def test_a_change_to_the_chords_alone_is_given_as_each_chord_added_removed_or_changed(self):
+        chord = {"root": 0, "tones": [0, 4, 7]}
+        model = self.opened({**PROJECT, "chords": {"C": chord, "F": {"root": 5, "tones": [5, 9, 0]}, "Am": chord}})
+        listing = model.listing()
+        model.render()
+        model.findings()
+        self.write({**PROJECT, "chords": {"C": {"root": 0, "tones": [0, 4, 7, 11]}, "G": chord, "Am": chord}})
+        self.assertEqual(model.poll(), {("chord", "C"), ("chord", "F"), ("chord", "G")})
+        self.assertEqual([model.listing(), model.picked], [listing, ("song", "tune")])
+        # The chords are part of what the checks go by, so what was kept is of a project that is no more.
+        self.assertEqual([model.render_ready(), model.findings_ready()], [False, False])
+
+    def test_a_file_written_again_with_nothing_in_it_changed_gives_nothing_and_keeps_what_was_kept(self):
+        model = self.opened()
+        made, found = model.render(), model.findings()
+        # The same things, each table with its names the other way round.
+        self.write({table: dict(reversed(things.items())) for table, things in PROJECT.items()})
+        self.assertEqual(model.poll(), set())
+        self.assertEqual([model.problem, model.picked], [None, ("song", "tune")])
+        self.assertIs(model.render(), made)
+        self.assertIs(model.findings(), found)
+        self.assertEqual(model.listing(), [
+            ("songs", [("air", ""), ("tune", "")]),
+            ("sounds", [("drone", "held"), ("crash", "parts"), ("blip", "3"), ("ping", "")]),
+            ("instruments", [("beep", ""), ("hum", "")]),
+        ])
+        self.assertEqual(model.poll(), set())
+
     def test_after_a_load_the_picked_thing_is_still_picked_and_what_was_kept_of_it_is_made_again(self):
         model = self.opened()
         model.render()
@@ -452,19 +481,48 @@ class WorkerTest(ModelCase):
         self.assertEqual(self.engine.call_count, 1)
         self.assert_loop(made, PROJECT, "tune")
 
-    def test_a_render_that_breaks_on_the_thread_is_not_kept_and_breaks_again_where_it_is_asked_for(self):
+    def test_a_render_that_breaks_on_the_thread_is_told_once_and_kept_as_a_refusal_is(self):
         model = self.opened()
         go = self.held(ZeroDivisionError("broken"))
         with mock.patch.object(threading, "excepthook") as told:
             worker = self.started(model)
             go.set()
             worker.join()
-        self.assertEqual(told.call_count, 1)
-        self.assertFalse(model.render_ready())
+        # The thread ended in the error, which is how its traceback comes to be written, the once.
+        self.assertEqual([told.call_count, told.call_args[0][0].exc_type], [1, ZeroDivisionError])
+        self.assertTrue(model.render_ready())
         self.assertEqual(model._rendered._workers, {})
-        with self.assertRaises(ZeroDivisionError):
-            model.render()
-        self.assertEqual(self.engine.call_count, 2)
+        depths = set()
+        for ask in (model.render, model.numbers, model.render):
+            with self.assertRaises(ZeroDivisionError) as broke:
+                ask()
+            self.assertEqual(str(broke.exception), "broken")
+            depths.add(len(traceback.extract_tb(broke.exception.__traceback__)))
+        # Raised again and again, the error carries no more traceback than it did.
+        self.assertEqual(len(depths), 1)
+        model.start_render()
+        self.assertEqual([model._rendered._workers, self.engine.call_count], [{}, 1])
+        # It is what one thing of one load broke with, and is not taken for what another would do.
+        model.pick("song", "air")
+        self.assertFalse(model.render_ready())
+
+    def test_checks_that_break_on_the_thread_are_told_once_and_kept_as_a_refusal_is(self):
+        model = self.opened()
+        go = self.held(ZeroDivisionError("broken"))
+        with mock.patch.object(threading, "excepthook") as told:
+            worker = self.checking(model)
+            go.set()
+            worker.join()
+        self.assertEqual(told.call_count, 1)
+        self.assertEqual([model.findings_ready(), model.count(), model.findings_for("song", "air")],
+                         [True, None, []])
+        for _ in range(2):
+            with self.assertRaises(ZeroDivisionError):
+                model.findings()
+        self.assertEqual(self.checker.call_count, 1)
+        self.write(changed(songs={"air": None}))
+        model.poll()
+        self.assertFalse(model.findings_ready())
 
     def test_findings_begun_on_their_own_thread_are_ready_when_the_thread_is_through(self):
         model = self.opened()

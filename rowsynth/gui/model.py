@@ -56,9 +56,13 @@ def _first(project: Project) -> tuple[str, str] | None:
 
 
 def _differ(old: Project, new: Project) -> set[tuple[str, str]]:
-    """The things two projects do not share, each as (kind, name): what only one of them has, and what changed."""
+    """The things two projects do not share, each as (kind, name): what only one of them has, and what changed.
+
+    A chord is a thing here, of the kind "chord", though no section of the listing holds it. With the chords
+    every table of a project is looked at, so two projects that differ in nothing here are the same project.
+    """
     found = set()
-    for section, kind in KINDS.items():
+    for section, kind in {**KINDS, "chords": "chord"}.items():
         before, after = getattr(old, section), getattr(new, section)
         found |= {(kind, name) for name in before.keys() | after.keys() if before.get(name) != after.get(name)}
     return found
@@ -103,12 +107,13 @@ def _within(target: str, place: str) -> bool:
 
 
 class _Kept:
-    """One thing a model makes and keeps: the result, what it was made for, the thread it is made on, its refusal.
+    """One thing a model makes and keeps: the result, what it was made for, the thread it is made on.
 
     `job` gives what a result made now would be for, its key, and what `make` is to make it from. It is called
     with `lock` held, and what is kept is read and changed with that lock held and at no other time. A result
     is kept only while its key is still the key of now. One that comes too late is dropped, so it is never taken
-    for the result of another key.
+    for the result of another key. Where the making went wrong, what went wrong is kept in the result's place:
+    it is tried once for a key, and not again.
     """
 
     def __init__(self, name: str, lock: threading.Lock, make: Callable[..., object],
@@ -118,7 +123,8 @@ class _Kept:
         self._lock = lock
         self._make = make
         self._job = job
-        # The last result that was made: (its key, the result, the refusal). One of the last two is None.
+        # The last result that was made: (its key, the result, what went wrong). One of the last two is None.
+        # What went wrong is the error with the traceback it had as it was caught.
         self._kept: tuple | None = None
         self._workers: dict[tuple, threading.Thread] = {}
 
@@ -133,19 +139,20 @@ class _Kept:
             self._workers[key] = worker
 
     def ready(self) -> bool:
-        """Whether `take` would now answer at once, with the result or with its refusal."""
+        """Whether `take` would now answer at once, with the result or with what went wrong."""
         with self._lock:
             return self._has(self._job()[0])
 
     def peek(self) -> object | None:
-        """The result if it is kept. None while it is not, and for one that was refused. Never waits."""
+        """The result if it is kept. None while it is not, and where the making went wrong. Never waits."""
         with self._lock:
             return self._kept[1] if self._has(self._job()[0]) else None
 
     def take(self) -> object:
         """The result. Unless it is kept, it is waited for when it is on its way, and made now when it is not.
 
-        What was refused with a RowSynthError is refused again, each time it is asked for.
+        Where the making went wrong, the error it went wrong with is raised again each time this is asked: a
+        RowSynthError for what was refused, and whatever else it was for what broke.
         """
         with self._lock:
             key, parts = self._job()
@@ -154,9 +161,11 @@ class _Kept:
             worker.join()
         if not self.ready():
             self._work(key, parts)
-        _, made, refusal = self._kept
-        if refusal is not None:
-            raise RowSynthError(refusal)
+        _, made, wrong = self._kept
+        if wrong is not None:
+            # Raised as it is, the error would carry one more stretch of traceback each time.
+            error, trace = wrong
+            raise error.with_traceback(trace)
         return made
 
     def drop(self) -> None:
@@ -170,14 +179,17 @@ class _Kept:
     def _work(self, key: tuple, parts: tuple) -> None:
         """Makes the result of `key`, and keeps it if that is still the key of now.
 
-        A RowSynthError is kept as the refusal it is. Anything else that goes wrong is kept nowhere, and is left
-        to whoever asks for the result next.
+        An error the making ends in is kept in the result's place. A RowSynthError is a refusal, and that is all
+        that is done with it. Anything else is something broken, and is raised here as well, this once: on a
+        thread of its own that writes its traceback to standard error.
         """
         kept = None
         try:
             kept = (key, self._make(*parts), None)
-        except RowSynthError as error:
-            kept = (key, None, str(error))
+        except Exception as error:
+            kept = (key, None, (error, error.__traceback__))
+            if not isinstance(error, RowSynthError):
+                raise
         finally:
             with self._lock:
                 self._workers.pop(key, None)
@@ -204,7 +216,7 @@ class Model:
         self._seen = _look(self.path)
         self._project = Project.load(self.path)
         self._picked = _first(self._project)
-        # How many times the file has been loaded again.
+        # How many times the file has been loaded again with something in it changed.
         self._loads = 0
         # Held wherever the picked thing, the project or anything kept of them is read or changed.
         self._lock = threading.Lock()
@@ -239,9 +251,11 @@ class Model:
 
         A song is its seamless loop, in two sides, and "loop" is true. A sound is the first buffer of its entry.
         An instrument is one note of it, c4 held for 12 ticks, at the level the bank gives a sound. Those two
-        have one side, and "loop" is false. The render is kept for as long as its thing stays picked and the file
-        is not loaded again, so asking twice costs one render. One that is on its way is waited for. With nothing
-        picked there is nothing to render, which is refused.
+        have one side, and "loop" is false. The render is kept for as long as its thing stays picked and the
+        project stays as it is, so asking twice costs one render. One that is on its way is waited for. With
+        nothing picked there is nothing to render, which is refused. A render that went wrong is tried once and
+        no more: what the engine refused is refused again each time it is asked for, and an error the engine
+        broke with is raised again as the error it was.
         """
         return self._rendered.take()["render"]
 
@@ -258,14 +272,15 @@ class Model:
         self._rendered.start()
 
     def render_ready(self) -> bool:
-        """Whether `render` and `numbers` would now answer at once, with the render or with its refusal."""
+        """Whether `render` and `numbers` would now answer at once, with the render or with what went wrong."""
         return self._rendered.ready()
 
     def findings(self) -> list[checks.Finding]:
         """What the checks find in the project, rendered at the model's rate, in the order the checks give it.
 
-        The findings are kept until the file is loaded again, whatever is picked. Those that are on their way are
-        waited for. A project the checks refuse is refused again each time its findings are asked for.
+        The findings are kept until the project changes, whatever is picked. Those that are on their way are
+        waited for. Checks that went wrong are run once and no more: a project they refuse is refused again each
+        time its findings are asked for, and an error they broke with is raised again as the error it was.
         """
         return self._found.take()
 
@@ -274,14 +289,14 @@ class Model:
         self._found.start()
 
     def findings_ready(self) -> bool:
-        """Whether `findings` would now answer at once, with the findings or with the refusal of the checks."""
+        """Whether `findings` would now answer at once, with the findings or with what went wrong."""
         return self._found.ready()
 
     def count(self) -> int | None:
         """How many findings there are, or None while they are not ready. Never waits.
 
         The checks give their findings no levels: each is a breach of a rule, so there is the one count. A
-        project the checks refuse has none.
+        project the checks refuse or break on has none: it is None with the findings ready.
         """
         found = self._found.peek()
         return None if found is None else len(found)
@@ -291,7 +306,7 @@ class Model:
 
         A finding says where it is with its target: "sounds.coin" is in the sound coin, and so are
         "sounds.coin[1]" and "sounds.coin.parts[0]". While the findings are not ready the list is empty, as it is
-        for a project the checks refuse.
+        for a project the checks refuse or break on.
         """
         place = f"{_section(kind)}.{name}"
         return [finding for finding in self._found.peek() or [] if _within(finding.target, place)]
@@ -299,12 +314,13 @@ class Model:
     def poll(self) -> set[tuple[str, str]]:
         """Looks at the file, loads it again when its time or its size has changed, and gives what differs.
 
-        Each thing that differs is (kind, name): a song, a sound or an instrument that was added, removed or
-        changed. With no change the set is empty. A file that cannot be read just now, as when another program
-        is part-way through saving it, is no error: the model keeps what it had, the set is empty, and `problem`
-        holds the message until a later look goes well. After a load the picked thing stays picked if the
-        project still has it, and nothing is picked if it does not. The kept render, numbers and findings are
-        dropped.
+        Each thing that differs is (kind, name): a song, a sound, an instrument or a chord that was added,
+        removed or changed, the kind of a chord being "chord". With no change the set is empty. A file that
+        cannot be read just now, as when another program is part-way through saving it, is no error: the model
+        keeps what it had, the set is empty, and `problem` holds the message until a later look goes well.
+        After a load in which something differs, the picked thing stays picked if the project still has it, and
+        nothing is picked if it does not, and the kept render, numbers and findings are dropped. A file written
+        again with nothing in it changed drops none of them: only the order of its names is taken from it.
         """
         seen = _look(self.path)
         if seen is not None and seen == self._seen:
@@ -318,11 +334,12 @@ class Model:
         found = _differ(self._project, project)
         with self._lock:
             self._project = project
-            self._loads += 1
-            if self._picked is not None and self._picked[1] not in _table(project, self._picked[0]):
-                self._picked = None
-            self._rendered.drop()
-            self._found.drop()
+            if found:
+                self._loads += 1
+                if self._picked is not None and self._picked[1] not in _table(project, self._picked[0]):
+                    self._picked = None
+                self._rendered.drop()
+                self._found.drop()
         self._seen = seen
         self.problem = None
         return found

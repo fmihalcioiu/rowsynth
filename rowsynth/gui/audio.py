@@ -135,6 +135,38 @@ class Player:
         self._send(np.roll(frames, -at, axis=0), True)
         self._frames, self._length = frames, length
 
+    def loop(self, on: bool) -> None:
+        """Has the sound that is playing go round from now on, or not, going on from the place it has reached.
+
+        Switched on, a sound played once becomes a loop. Switched off, a loop plays to its end and stops there.
+        With nothing playing, or with nothing to change, it does nothing.
+        """
+        if self._frames is None or bool(on) == self._loop:
+            return
+        now = self._clock()
+        elapsed = now - self._origin
+        if not self._loop and elapsed >= self._length:
+            # A sound played once that has ended: there is nothing left of it to go round.
+            return
+        # The place reached in this round, in seconds and as a frame.
+        place = elapsed % self._length
+        at = int(place / self._length * len(self._frames)) % len(self._frames)
+        # The mixer is told how often a Sound is played as it is started, and a Sound that is playing cannot
+        # be told anything else. So the sound is started again from the place reached, in the form that does
+        # what is asked: to go round, turned to begin at that place and looped, as `swap` does it. To end,
+        # only the frames from that place on, played once.
+        # What it costs: one more copy of the frames, all of them or the rest. As in `swap`, the old sound is
+        # cut off and the new one starts with the mixer's next block, at a place that is the clock's and not
+        # the sound card's, so the two meet a little out of step, with a click if the wave is not the same
+        # there.
+        if on:
+            self._send(np.roll(self._frames, -at, axis=0), True)
+        else:
+            self._send(self._frames[at:], False)
+            # What is left plays as the end of a sound that began a place ago.
+            self._origin = now - place
+        self._loop = bool(on)
+
     def level(self) -> tuple[float, float]:
         """The loudest sample of the left side and of the right, 0 to 1, over the stretch just played.
 

@@ -14,7 +14,7 @@ from unittest import mock
 from rowsynth import checks
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.model import Model
+from rowsynth.gui.model import KINDS, Model
 from rowsynth.gui.session import GLOW_TIME, POLL_EVERY, Session
 from rowsynth.project import Project
 
@@ -93,6 +93,9 @@ class Speaker:
 
     def swap(self, sides: Sequence) -> None:
         self.asked.append(("swap", sides))
+
+    def loop(self, on: bool) -> None:
+        self.asked.append(("loop", on))
 
     def position(self) -> float:
         return 0.125 if self.playing else 0.0
@@ -248,7 +251,7 @@ class PlayTest(SessionCase):
         self.assertEqual([loop for _, loop in played], [True, False, False, False, False, False])
         self.assert_played(*played)
 
-    def test_a_change_of_loop_is_taken_at_once_by_a_song_that_plays_and_by_nothing_else(self):
+    def test_a_change_of_loop_is_taken_where_it_is_by_a_song_that_plays_and_by_nothing_else(self):
         session = self.opened()
         tune = session.model.render()
         session.loop = False
@@ -256,12 +259,16 @@ class PlayTest(SessionCase):
         session.play()
         session.loop = True
         session.loop = True
-        self.assert_played((tune, False), (tune, True))
+        session.loop = False
+        # The player is asked to change the song it plays, and never to play it again.
+        self.assertEqual(self.speaker.did("loop"), [(True,), (False,)])
+        self.assert_played((tune, False))
         session.pick("sound", "zap")
         zap = session.model.render()
         session.tick()
-        session.loop = False
-        self.assert_played((tune, False), (tune, True), (zap, False))
+        session.loop = True
+        self.assertEqual(self.speaker.did("loop"), [(True,), (False,)])
+        self.assert_played((tune, False), (zap, False))
 
 
 class PickTest(SessionCase):
@@ -388,18 +395,41 @@ class OutsideTest(SessionCase):
         self.assertEqual(session.glows(), {("sound", "pop"): 1.0})
         self.assertEqual([session.message, session.model.picked], ["changed outside: pop", ("song", "tune")])
 
-    def test_a_file_written_again_with_no_thing_changed_still_has_the_picked_thing_rendered_again(self):
+    def test_a_change_to_the_chords_alone_is_named_glows_no_thing_of_the_listing_and_has_the_checks_run_again(self):
+        chord = {"root": 0, "tones": [0, 4, 7]}
+        session = self.opened({**PROJECT, "chords": {"C": chord}})
+        with mock.patch.object(checks, "run", wraps=checks.run) as run:
+            session.tick()
+            settle()
+            session.tick()
+            self.assertEqual([run.call_count, session.finding_count()], [1, 1])
+            self.write({**PROJECT, "chords": {"C": chord, "G": {"root": 7, "tones": [7, 11, 2]}}})
+            self.looked(session)
+            settle()
+            session.tick()
+            self.assertEqual([run.call_count, session.finding_count()], [2, 1])
+        self.assertEqual([session.message, session.glows()], ["changed outside: G", {("chord", "G"): 1.0}])
+        listed = [(KINDS[section], name) for section, things in session.model.listing() for name, _ in things]
+        self.assertEqual([session.glow(*thing) for thing in listed], [0.0] * 5)
+
+    def test_a_file_written_again_with_nothing_in_it_changed_starts_no_render_and_no_checks(self):
         session = self.opened()
-        made = session.model.render()
-        session.play()
-        self.write(PROJECT)
-        self.looked(session)
-        again = session.model.render()
-        session.tick()
-        self.assertIsNot(again, made)
+        with mock.patch.object(gui_model, "render_loop", wraps=gui_model.render_loop) as engine, \
+                mock.patch.object(checks, "run", wraps=checks.run) as run:
+            session.tick()
+            made = session.model.render()
+            session.play()
+            self.write(PROJECT)
+            for _ in range(2):
+                self.looked(session)
+            settle()
+            session.tick()
+            self.assertEqual([engine.call_count, run.call_count], [1, 1])
+        self.assertIs(session.model.render(), made)
         self.assertEqual([session.glows(), session.message], [{}, ""])
-        self.assertEqual(session.numbers(), session.model.numbers())
-        self.assert_swapped(again)
+        self.assertEqual([session.numbers(), session.finding_count()], [session.model.numbers(), 1])
+        self.assert_swapped()
+        self.assert_played((made, True))
 
     def test_when_the_picked_thing_is_removed_outside_the_first_thing_of_the_listing_takes_its_place(self):
         session = self.opened()
@@ -439,12 +469,15 @@ class OutsideTest(SessionCase):
         with mock.patch.object(gui_model, "render_loop", wraps=gui_model.render_loop) as engine:
             self.write(changed(songs={"tune": STILL}))
             self.looked(session)
-            with self.assertRaises(RowSynthError):
-                session.model.render()
+            # The song is refused by the engine, and the project with it by the checks.
+            for ask in (session.model.render, session.model.findings):
+                with self.assertRaises(RowSynthError):
+                    ask()
             for _ in range(4):
                 self.looked(session)
             self.assertEqual(engine.call_count, 1)
-            self.assertEqual([session.message, session.playing], [STILL_SAID, False])
+            # The checks were taken up after the render, so theirs are the words that stand.
+            self.assertEqual([session.message, session.playing], [f"songs.tune: {STILL_SAID}", False])
             self.assertEqual([session.seconds, session.numbers()], [0.0, None])
             self.assertEqual(self.speaker.did("stop"), [()])
             # Asked to play, it is refused again as it was, with no new try.
@@ -458,6 +491,29 @@ class OutsideTest(SessionCase):
             self.assertEqual([session.message, engine.call_count], ["changed outside: tune", 2])
             self.assertEqual(session.seconds, again["seconds"])
         self.assert_played((tune, True))
+
+    def test_a_render_that_breaks_is_tried_once_said_with_the_name_of_its_error_and_tried_again_after_a_change(self):
+        session = self.opened()
+        with mock.patch.object(gui_model, "render_loop", side_effect=ZeroDivisionError("broken")) as engine, \
+                mock.patch.object(threading, "excepthook") as told:
+            session.tick()
+            settle()
+            for _ in range(4):
+                self.looked(session)
+            # One try and one traceback, however many looks there were.
+            self.assertEqual([engine.call_count, told.call_count], [1, 1])
+            self.assertEqual(session.message, "ZeroDivisionError: broken")
+            self.assertEqual([session.playing, session.seconds, session.numbers()], [False, 0.0, None])
+            session.play()
+            self.assertEqual([session.playing, engine.call_count, told.call_count], [False, 1, 1])
+            self.write(changed(songs={"tune": song("l2 c e")}))
+            self.looked(session)
+            self.assertEqual(session.glows(), {("song", "tune"): 1.0})
+            settle()
+            session.tick()
+            self.assertEqual([engine.call_count, told.call_count], [2, 2])
+            self.assertEqual(session.message, "ZeroDivisionError: broken")
+        self.assertEqual(self.speaker.did("play"), [])
 
     def test_a_file_that_cannot_be_read_just_now_is_the_message_for_as_long_as_that_lasts(self):
         session = self.opened()
@@ -480,7 +536,7 @@ class StateTest(SessionCase):
         tune = session.model.render()
         session.tick()
         session.play()
-        self.assertEqual([session.message, session.playing], ["no sound output", False])
+        self.assertFalse(session.playing)
         session.toggle()
         session.stop()
         session.loop = False
@@ -491,6 +547,43 @@ class StateTest(SessionCase):
         session.tick()
         self.assertEqual([session.playing, session.seconds], [False, zap["seconds"]])
         session.close()
+
+    def test_with_no_player_the_message_says_so_from_the_first_tick_until_something_else_is_said(self):
+        session = self.opened(player=False)
+        for _ in range(2):
+            session.tick()
+            self.assertEqual(session.message, "no sound output")
+        self.write(changed(sounds={"pop": None}))
+        self.looked(session)
+        self.assertEqual(session.message, "changed outside: pop")
+        # It is said again each time something is to play.
+        session.play()
+        self.assertEqual(session.message, "no sound output")
+        # A session that has a player says nothing of the kind.
+        heard = self.opened()
+        heard.tick()
+        self.assertEqual(heard.message, "")
+
+    def test_checks_that_refused_the_project_are_told_from_checks_that_still_run(self):
+        session = self.opened(changed(songs={"air": STILL}))
+        go = self.held()
+        session.tick()
+        self.assertEqual([session.finding_count(), session.findings_refused], [None, False])
+        go.set()
+        session.model.render()
+        with self.assertRaises(RowSynthError) as refused:
+            session.model.findings()
+        self.assertEqual(str(refused.exception), f"songs.air: {STILL_SAID}")
+        session.tick()
+        self.assertEqual([session.finding_count(), session.findings_refused], [0, True])
+        self.assertEqual(session.message, f"songs.air: {STILL_SAID}")
+        # Put right outside, the project has its findings counted again.
+        self.write(PROJECT)
+        self.looked(session)
+        self.assertEqual(session.message, "changed outside: air")
+        session.model.findings()
+        session.tick()
+        self.assertEqual([session.finding_count(), session.findings_refused], [1, False])
 
     def test_with_nothing_picked_there_is_nothing_to_play(self):
         session = self.opened({})
