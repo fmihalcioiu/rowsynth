@@ -9,7 +9,7 @@ import numpy as np
 from ._jit import kernel
 from .errors import RowSynthError
 from .fm import _k_fm, _k_gate_off, fm_voice
-from .notes import hz
+from .notes import HIGHEST, LOWEST, hz, in_range, nearest
 from .osc import DUTY, FM, NOISE, PULSE, SAW, TRI, WAVES, _k_noise, _k_pulse, _k_saw, _k_tri, new_state
 
 # A tick is a sixtieth of a second at any sample rate. An instrument's step tables move on once a tick.
@@ -123,6 +123,13 @@ def _number(value: object, where: str) -> None:
     """Refuses what is not a number."""
     if not _is_number(value):
         raise RowSynthError(f"{where}: must be a number, not {value!r}")
+
+
+def _pitch(value: object, where: str) -> None:
+    """Refuses a note that is not a number, or is lower or higher than a note can be played."""
+    _number(value, where)
+    if not in_range(value):
+        raise RowSynthError(f"{where}: must be a note from {LOWEST} to {HIGHEST}, not {value!r}")
 
 
 def _length(value: object, where: str) -> None:
@@ -257,12 +264,14 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
     """Adds one note of an instrument to out, starting at sample `at`, and returns the sample after its release.
 
     out is a float32 array. What is in it stays, and whatever of the note falls past its end is dropped.
-    note is a number (69 is a4), ticks is how long it is held, and velocity scales its level.
+    note is a number (69 is a4) from `notes.LOWEST` to `notes.HIGHEST`, ticks is how long it is held, and
+    velocity scales its level. Where the instrument carries the note past an end of that range while it
+    sounds, it sounds at that end.
     """
     _buffer(out, "out")
     _count(at, "at", 0)
     _instrument(inst)
-    _number(note, "note")
+    _pitch(note, "note")
     _length(ticks, "ticks")
     _number(velocity, "velocity")
     _count(rate, "rate", 1)
@@ -299,6 +308,9 @@ def render_note(out: np.ndarray, at: int, inst: dict, note: float, ticks: int,
             angle = (2 * math.pi * (vib.get("rate") or 6) * (tick - vib.get("delay", 0))) / TICK_HZ
             wobble = vib["depth"] * math.sin(angle)
         semis = note + step(inst.get("arp"), tick, 0) + sweep + wobble + inst.get("slide", 0) * (tick / TICK_HZ)
+        # A sweep, a slide or a vibrato has no end of its own. Held to the range, the frequency stays a number
+        # that the oscillators can count with, and the noise's register is never clocked more often than there.
+        semis = nearest(semis)
         freq[tick] = _noise_rate(semis) if wave == "noise" else hz(semis)
         duty[tick] = DUTY[int(step(inst.get("duty"), tick, 2))]
         cutoff = step(inst.get("lp"), tick, 0)

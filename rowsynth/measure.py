@@ -112,24 +112,28 @@ def brightness(samples, size: int = 2048, rate: int = 44100) -> dict:
     return {"centroid_hz": math.floor(centre / energy + 0.5), "above_4k": _fixed(high / energy, 2)}
 
 
+# How like itself, one period on, the first half of a stretch has to be for a note to be read there, from 0 to 1.
+# A note that holds is all but 1 and white noise is under 0.2. The line lies between two that come close: a note
+# with the echo of other notes under it, which is to be read, and a wave with nine tenths of its energy an
+# octave up, which half a period on is 0.8 like itself and is not to be read an octave high.
+_ALIKE = 0.8
+
+
 @kernel
-def _k_period(corr, low, high) -> float:
-    """One period as a lag from `low` to `high`, with a fraction, or 0.0 when no lag stands out."""
+def _k_period(corr, alike, low, high) -> float:
+    """One period as a lag from `low` to `high`, with a fraction, or 0.0 when the wave repeats at none of them.
+
+    corr is the match of the whole stretch with itself at each lag. alike is how like itself the first half of
+    the stretch is at each lag, from -1 to 1.
+    """
     # At small lags a wave still overlaps itself, so the search waits until the match has fallen to zero or below.
     lag = 1
     while lag <= high and corr[lag] > 0.0:
         lag += 1
-    first = max(lag, low)
-    best = 0.0
-    for i in range(first, high + 1):
-        if corr[i] > best:
-            best = corr[i]
-    if best <= 0.0:
-        return 0.0
-    # Two or three periods along, the match can come out a shade better than at one. So a peak within 7% of the
-    # best counts, and the earliest of those is the period.
-    for i in range(first, high):
-        if corr[i] >= best * 0.93 and corr[i] >= corr[i - 1] and corr[i] >= corr[i + 1]:
+    # The wave is itself again two or three periods along as well, and where other notes sound under it, it is
+    # most itself at the lag that fits them all. So the earliest peak that is alike enough is the period.
+    for i in range(max(lag, low), high):
+        if alike[i] >= _ALIKE and corr[i] >= corr[i - 1] and corr[i] >= corr[i + 1]:
             # A parabola through the peak and the lag on each side puts the top between whole lags.
             a = corr[i - 1]
             b = corr[i]
@@ -142,10 +146,13 @@ def _k_period(corr, low, high) -> float:
 
 
 def pitch_at(samples, t: float, lo: float = 50.0, hi: float = 4000.0, window: float = 0.04, rate: int = 44100) -> float:
-    """The note sounding at time `t`, in Hz to one decimal place, or 0.0 when none can be read.
+    """The note sounding at time `t`, in Hz to one decimal place, or 0.0 when there is none to read.
 
-    A stretch of `window` seconds from `t` is set against itself moved along, and the shortest move
-    that lines it up again is one period. Only notes from `lo` to `hi` Hz are looked for. A stretch
+    A stretch of `window` seconds from `t` is set against itself moved along, and the shortest move that
+    lines it up again is one period. The move counts when the first half of the stretch is like what lies
+    that far on. So a wave that does not repeat reads as no note, as noise does, and a note is still read
+    when the next one starts in the second half of the stretch. Noise so slow that the stretch holds only a
+    few of its steps can still line up by chance. Only notes from `lo` to `hi` Hz are looked for. A stretch
     of fewer than 64 samples, or one with next to no sound in it, reads as no note.
     """
     row = _row(samples)
@@ -160,6 +167,14 @@ def pitch_at(samples, t: float, lo: float = 50.0, hi: float = 4000.0, window: fl
         return 0.0
     # Lag by lag, the mean product of the stretch and itself moved along. Zeros stand in past its end.
     padded = np.concatenate((part, np.zeros(high)))
-    corr = np.correlate(padded, part, "valid") / (count - np.arange(high + 1))
-    period = float(_k_period(corr, low, high))
+    lags = np.arange(high + 1)
+    corr = np.correlate(padded, part, "valid") / (count - lags)
+    # Lag by lag, the product of the first half and what lies that far on, over the size of the two: 1 when
+    # they are one shape, whatever the level of each. Past the end of the stretch there is less of both.
+    head = count // 2
+    energy = np.concatenate(((0.0,), np.cumsum(part * part)))
+    size = np.sqrt(energy[np.minimum(head, count - lags)] * (energy[np.minimum(lags + head, count)] - energy[lags]))
+    alike = np.zeros(high + 1)
+    np.divide(np.correlate(padded, part[:head], "valid")[:high + 1], size, out=alike, where=size > 0)
+    period = float(_k_period(corr, alike, low, high))
     return _fixed(rate / period, 1) if period else 0.0

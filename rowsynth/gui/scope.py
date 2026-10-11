@@ -29,11 +29,6 @@ CYCLES = 3
 INTO = 0.1
 #: How many seconds a scope shows of a sound that has no note to count cycles by.
 STRETCH = 0.01
-#: How many seconds of a sound a note is read from. The note counts when over that stretch the wave is this like
-#: itself one period on, from 0 to 1: a held note is all but 1 there and noise under a half, and
-#: `measure.pitch_at` reads a low note out of noise as well.
-HEARD = 0.04
-ALIKE = 0.75
 #: How far a wave at full scale keeps from the outline of a scope.
 AIR = 2
 
@@ -80,21 +75,11 @@ def _checked(samples: np.ndarray, rate: int) -> np.ndarray:
 def heard(samples: np.ndarray, rate: int) -> float | None:
     """The note of a sound that came with none, read `INTO` of the way into it: a note number, not always whole.
 
-    None when `measure.pitch_at` reads no note there, and when the wave is less than `ALIKE` like itself one
-    period on, as noise is.
+    None when `measure.pitch_at` reads no note there, as in noise, and when there are no samples.
     """
-    row = np.asarray(_checked(samples, rate), dtype=np.float64)
-    place = int(INTO * len(row))
-    found = pitch_at(row, place / rate, window=HEARD, rate=rate) if len(row) else 0.0
-    if not found:
-        return None
-    lag = _px(rate / found)
-    count = min(int(HEARD * rate), len(row) - place - lag)
-    here, there = row[place:place + count], row[place + lag:place + lag + count]
-    size = math.sqrt(float(np.dot(here, here)) * float(np.dot(there, there)))
-    if not size or float(np.dot(here, there)) / size < ALIKE:
-        return None
-    return _note(found)
+    row = _checked(samples, rate)
+    found = pitch_at(row, int(INTO * len(row)) / rate, rate=rate) if len(row) else 0.0
+    return _note(found) if found else None
 
 
 def _cut(row: np.ndarray, rate: int, pitch: float | None) -> tuple[int, int]:

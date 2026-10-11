@@ -426,6 +426,18 @@ class RefusedSounds(ProjectCase):
                     {"def": sound_of(notes=[[0, note, 4]])},
                     f".def.voices[0].notes[0][1]: must be a number or a note name such as 'c#4', not {note!r}")
 
+    def test_a_note_lower_or_higher_than_a_note_can_be_is_refused_wherever_one_is_written(self) -> None:
+        said = "must be a note from -97 to 136, not "
+        for note in (20000, 137, 136.5, -98, float("inf")):
+            with self.subTest(note=note):
+                self.sound_refused({"def": sound_of(notes=[[0, note, 4]])},
+                                   f".def.voices[0].notes[0][1]: {said}{note!r}")
+        self.sound_refused({"def": sound_of(), "check": [{"at": 0, "note": 500}]}, f".check[0].note: {said}500")
+        self.song_refused(song_of(drums={"k": {"inst": "hiss", "note": -200}}), f".drums.k.note: {said}-200")
+        # The two ends are notes, as numbers and as the names that say them.
+        Project.from_dict({"instruments": INSTRUMENTS, "sounds": {
+            "coin": {"def": sound_of(notes=[[0, -97, 4], [4, 136, 4], [8, "cb-9", 4], [12, "b#9", 4]])}}})
+
     def test_a_name_the_note_reader_takes_is_a_note_here_too(self) -> None:
         for note in ("c-1", "A4", "eb3", "g#9", 60.5):
             with self.subTest(note=note):

@@ -21,7 +21,7 @@ from rowsynth.gui.scope import (CYCLES, FLOOR_DB, FRAME, HARSH, HARSH_HZ, INTO, 
                                 Spectrum, column, cycles_told, heard, heights, hz_at, levels, place_told, span,
                                 summed)
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.measure import brightness
+from rowsynth.measure import brightness, pitch_at
 from rowsynth.notes import midi
 from rowsynth.project import Project
 from rowsynth.sound import render_sound
@@ -108,6 +108,8 @@ class Stretch(unittest.TestCase):
         for freq in (55.0, 440.0, 1760.0):
             self.assertAlmostEqual(heard(sine(freq), RATE), 69 + 12 * math.log2(freq / 440), delta=0.1)
         wave = sine(440.0)
+        # It is what `measure.pitch_at` reads a tenth of the way in, as a note number.
+        self.assertEqual(heard(wave, RATE), 69 + 12 * math.log2(pitch_at(wave, int(INTO * len(wave)) / RATE) / 440))
         first, last = span(wave, RATE)
         self.assertEqual(first, 1103)
         self.assertAlmostEqual(last - first, CYCLES * RATE / 440, delta=1.5)
@@ -119,6 +121,7 @@ class Stretch(unittest.TestCase):
         # The noise of the engine holds each value for a while, the longer the lower its note: it has none either.
         for pitch in ("c4", "c6", "c8"):
             self.assertIsNone(heard(played("noise", pitch), RATE))
+        self.assertIsNone(heard(np.zeros(0, dtype=np.float32), RATE))
         # With the pitch of its note given, noise is cut as a note is: from where it rises through zero.
         first, last = span(noise, RATE, 69)
         self.assertEqual(last - first, 300)

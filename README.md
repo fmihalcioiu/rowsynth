@@ -123,7 +123,7 @@ A channel's text is made of the following, and anything else in it is refused.
 | `r` `r4` `r8.` | A rest, timed as a note is |
 | `l8` | The length of whatever is written without one, from here on. It starts at 16 |
 | `o4` | The octave, 0 to 9. It starts at 4, where `c` is middle C |
-| `>` `<` | An octave up, an octave down |
+| `>` `<` | An octave up, an octave down. They go past what `o` can write, as far as a note can be: -97 to 136 as a number, where middle C is 60 |
 | `&` | A tie: `c4 & c8` is one note as long as the two |
 | `v12` | The volume from here on, 0 to 15. It starts at 15 |
 | `@name` | The instrument from here on, in place of the channel's |
@@ -171,6 +171,8 @@ An instrument is a wave and what is done to it over the ticks of a note. Every k
 A step table is read once a tick, counted from the start of the note. A number holds for the whole note. A list gives one value a tick, and its last value holds from there on. `{"v": [0, -1], "loop": 1}` is a list that goes round again from index `loop` when it runs out.
 
 `pulse` and `saw` have their edges smoothed. `tri` is a triangle in 16 levels. `noise` is the low bit of a 15-bit shift register, and its note sets how often the register is clocked: 4000 times a second at `a4`, doubling every six semitones.
+
+Where `arp`, `pitch`, `vib` or `slide` carry a note lower or higher than a note can be, which is -97 and 136, it sounds at that end.
 
 An `fm` instrument has four operators, numbered from 0. Each is a sine under an envelope of its own, and `alg` says which operators bend the phase of which, and which are heard:
 
@@ -232,7 +234,7 @@ A sound is voices playing notes. A voice has `inst`, an instrument by name or wr
 }
 ```
 
-A note is `[tick, note, ticks]` or `[tick, note, ticks, velocity]`: the tick it starts at, what it is, the ticks it is held for, and a factor on its level. The note is a name such as `c#4` or `eb3`, with middle C at `c4`, or a number, with 69 for `a4`. A flat is `b` here and `-` in song text.
+A note is `[tick, note, ticks]` or `[tick, note, ticks, velocity]`: the tick it starts at, what it is, the ticks it is held for, and a factor on its level. The note is a name such as `c#4` or `eb3`, with middle C at `c4`, or a number, with 69 for `a4`. A flat is `b` here and `-` in song text. A number is from -97 to 136: -97 is `cb-9`, the lowest note a name can say, and 136 is the last note under half of 44100 samples a second. A note lower or higher is refused wherever it is written: in a sound, in a `check`, as the `note` of a drum, and in a song's text.
 
 `echo` brings the sound back `time` seconds after itself, and again that much later at `feedback` of the level before, each return darker through a low-pass at `lp` Hz. `mix` is the level of the first return. Only `time` is needed. A list of times gives a delay line for each, and the lines share the `mix`. Left out, `feedback` and `mix` are 0.3 and `lp` is 3000.
 
@@ -474,7 +476,7 @@ python -m rowsynth measure examples/arcade.json coin --at 0.15
 }
 ```
 
-The cut holds the seven numbers that `render` printed above. `brightness` says where the energy sits: its centre in Hz, and the share of it above 4 kHz. `pitch` is there when `--at` asks for it: the note sounding at that time in Hz, or 0.0 when none can be read. The second note of the coin is `e6`, which is 1318.5 Hz.
+The cut holds the seven numbers that `render` printed above. `brightness` says where the energy sits: its centre in Hz, and the share of it above 4 kHz. `pitch` is there when `--at` asks for it: the note sounding at that time in Hz. It is 0.0 when there is no note to read: in silence, in noise, and wherever else the wave does not repeat. The note is read from the 0.04 seconds that follow, and is still read when the next note begins in the second half of them. The second note of the coin is `e6`, which is 1318.5 Hz.
 
 ### check
 

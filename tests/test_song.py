@@ -10,7 +10,7 @@ import numpy as np
 
 from rowsynth.errors import RowSynthError
 from rowsynth.note import render_note
-from rowsynth.song import lay, mix_stems, pan_gains, render_loop, render_song, render_stems
+from rowsynth.song import lay, mix_stems, pan_gains, render_loop, render_song, render_stems, up
 from rowsynth.sound import finish
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz, and the two sides run on for 4000 after the last.
@@ -988,6 +988,24 @@ class ErrorTest(unittest.TestCase):
         song = copy.deepcopy(SONG)
         song["drums"]["h"]["note"] = "x9"
         self.assertEqual(self.refused(song), "pattern 'a', channel 'beat': not a note: 'x9'")
+
+    def test_refuses_a_note_that_octave_marks_put_lower_or_higher_than_a_note_can_be_played(self):
+        self.assertEqual(self.refused(self.changed("b", "tune", "o9 c4 > e8 f8")),
+                         "pattern 'b', channel 'tune': the note at row 6 is 137, and a note is from -97 to 136")
+        self.assertEqual(self.refused(self.changed("a", "low", "o0 < < < < < < < < < < c2")),
+                         "pattern 'a', channel 'low': the note at row 0 is -108, and a note is from -97 to 136")
+
+    def test_refuses_a_drum_whose_note_is_lower_or_higher_than_a_note_can_be_played(self):
+        song = copy.deepcopy(SONG)
+        song["drums"]["h"]["note"] = 300
+        self.assertEqual(self.refused(song),
+                         "pattern 'a', channel 'beat': the note at row 4 is 300, and a note is from -97 to 136")
+
+    def test_refuses_a_song_moved_to_a_key_that_takes_a_note_out_of_the_range(self):
+        song = self.changed("b", "tune", "o9 c4 > e4")
+        self.assertEqual(lay(song)[0]["tune"][5]["note"], 136)
+        self.assertEqual(self.refused(up(song, 1)),
+                         "pattern 'b', channel 'tune': the note at row 4 is 137, and a note is from -97 to 136")
 
     def test_refuses_a_note_that_names_an_instrument_the_song_lacks(self):
         self.assertEqual(self.refused(self.changed("b", "tune", "c @organ d")),

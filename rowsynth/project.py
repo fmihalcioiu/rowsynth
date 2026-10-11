@@ -12,7 +12,7 @@ from typing import NoReturn
 
 from .errors import RowSynthError
 from .layout import dumps
-from .notes import midi
+from .notes import HIGHEST, LOWEST, in_range, midi
 
 _TABLES = ("instruments", "chords", "sounds", "songs")
 _WAVES = ("pulse", "saw", "tri", "noise", "fm")
@@ -275,11 +275,13 @@ def _inst(value: object, where: str, instruments: dict) -> None:
 
 
 def _note(value: object, where: str) -> None:
-    """A note: a number, or a name. What counts as a name is settled in one place, by the note reader."""
+    """A note: a number, or a name. The note reader settles what a name is, and how low and how high a note can be."""
     try:
-        midi(value)
+        note = midi(value)
     except RowSynthError:
         _fail(where, f"must be a number or a note name such as 'c#4', not {value!r}")
+    if not in_range(note):
+        _fail(where, f"must be a note from {LOWEST} to {HIGHEST}, not {value!r}")
 
 
 def _sound(defn: object, where: str, instruments: dict) -> None:

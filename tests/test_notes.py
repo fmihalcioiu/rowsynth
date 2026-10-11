@@ -4,7 +4,7 @@ from __future__ import annotations
 import unittest
 
 from rowsynth.errors import RowSynthError
-from rowsynth.notes import hz, midi
+from rowsynth.notes import HIGHEST, LOWEST, hz, in_range, midi, nearest
 
 
 class MidiTest(unittest.TestCase):
@@ -57,6 +57,19 @@ class MidiTest(unittest.TestCase):
         with self.assertRaises(RowSynthError) as caught:
             midi(None)
         self.assertIn("None", str(caught.exception))
+
+
+class RangeTest(unittest.TestCase):
+    def test_the_range_holds_every_name_and_ends_under_half_the_usual_rate(self):
+        self.assertEqual((LOWEST, midi("cb-9")), (-97, -97.0))
+        self.assertLessEqual(midi("b#9"), HIGHEST)
+        self.assertLess(hz(HIGHEST), 44100 / 2)
+        self.assertGreater(hz(HIGHEST + 1), 44100 / 2)
+        self.assertEqual([in_range(note) for note in (LOWEST - 1, LOWEST, 60.5, HIGHEST, HIGHEST + 0.5, float("nan"))],
+                         [False, True, True, True, False, False])
+        # A note past an end of the range has that end nearest to it.
+        self.assertEqual([nearest(note) for note in (-20000, LOWEST, 60.5, HIGHEST, 20000, float("inf"))],
+                         [LOWEST, LOWEST, 60.5, HIGHEST, HIGHEST, HIGHEST])
 
 
 class HzTest(unittest.TestCase):

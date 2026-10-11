@@ -284,6 +284,14 @@ class TransposeTest(unittest.TestCase):
         self.assertEqual(transpose("o9 b-", 1), "o9 b")
         self.assertEqual(transpose("o8 b", 12), "o9 b")
 
+    def test_a_note_moved_out_of_the_reach_of_o_is_come_to_with_marks_and_reads_back(self):
+        self.assertEqual(transpose("o0 c o9 b4.", -1), "o0 < b o9 b-4.")
+        self.assertEqual(transpose("o0 c o9 b4.", 13), "o1 d- o9 > > c4.")
+        for semis in (-109, -13, 5, 30):
+            with self.subTest(semis=semis):
+                events = parse(transpose("o0 c o9 b", semis), "lead")[0]
+                self.assertEqual([found["note"] for found in events], [12 + semis, 131 + semis])
+
     def test_lengths_and_dots_stay_on_their_notes(self):
         self.assertEqual(transpose("c4. d8.. e16 f", 1), "o4 d-4. o4 e-8.. o4 f16 o4 g-")
         self.assertEqual(transpose("c12 d12 e12 >c6.<b-24", 11), "o4 b12 o5 d-12 o5 e-12 o5 b6. o5 a24")

@@ -4,16 +4,31 @@ from __future__ import annotations
 
 import math
 import unittest
+from pathlib import Path
 
 import numpy as np
 
+from rowsynth import notes
 from rowsynth.errors import RowSynthError
 from rowsynth.measure import brightness, measure, pitch_at, spectrum
+from rowsynth.project import Project
+from rowsynth.sound import render_sound
+
+EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
 
 def tone(hz: float, count: int, rate: int, level: float = 1.0) -> np.ndarray:
     """`count` samples of a sine that starts at zero."""
     return level * np.sin(2 * np.pi * hz * np.arange(count) / rate)
+
+
+def hiss(count: int) -> np.ndarray:
+    """White noise at half of full scale, the same every time it is made."""
+    state, found = 1, []
+    for _ in range(count):
+        state = (state * 1103515245 + 12345) % 2 ** 31
+        found.append(state / 2 ** 31 - 0.5)
+    return np.array(found)
 
 
 class MeasureTest(unittest.TestCase):
@@ -276,21 +291,40 @@ class PitchAtTest(unittest.TestCase):
         self.assertEqual(pitch_at(tone(3520, 8820, 44100), 0.0), 3519.7)
         self.assertEqual(pitch_at(tone(3520, 9600, 48000), 0.0, rate=48000), 3519.2)
 
-    def test_two_clicks_read_as_the_gap_between_them(self):
+    def test_clicks_read_as_the_gap_between_them_and_two_alone_as_no_note(self):
         # The only lag at which anything lines up is 50 samples, and nothing either side pulls it off 50.
         clicks = np.zeros(400)
-        clicks[0] = clicks[50] = 0.75
+        clicks[::50] = 0.75
         self.assertEqual(pitch_at(clicks, 0.0), 882.0)
         self.assertEqual(pitch_at(clicks, 0.0, rate=8000), 160.0)
+        # Two clicks are a gap and no wave that repeats: moved by the gap, one of the two meets nothing.
+        clicks[100:] = 0.0
+        self.assertEqual(pitch_at(clicks, 0.0), 0.0)
 
-    def test_a_peak_level_with_both_its_neighbours_reads_at_its_own_lag(self):
-        # A click at 0 against clicks of 100/128, 99/128 and 98/128 at 11, 12 and 13, over 100, 99 and 98
-        # pairs: lags 11, 12 and 13 all come to exactly 1/128. Lag 10 comes to 1/101, which is more, so
-        # 12 is the first lag no lower than the one before it, and 44100 / 12 is 3675.
-        clicks = np.zeros(111)
-        clicks[0] = clicks[10] = 1.0
-        clicks[11:14] = (100 / 128, 99 / 128, 98 / 128)
-        self.assertEqual(pitch_at(clicks, 0.0), 3675.0)
+    def test_noise_reads_as_no_note(self):
+        white = hiss(8820)
+        for t in (0.0, 0.05, 0.1, 0.15):
+            self.assertEqual(pitch_at(white, t), 0.0, t)
+        # The engine's noise holds each value for a while, the longer the lower its note, and repeats no more.
+        for pitch in ("c4", "c5", "c6", "c7", "c8"):
+            noise = render_sound({"voices": [{"inst": {"wave": "noise"}, "notes": [[0, pitch, 30]]}]})
+            for t in (0.05, 0.2, 0.35):
+                self.assertEqual(pitch_at(noise, t), 0.0, (pitch, t))
+
+    def test_each_note_of_a_fast_run_with_an_echo_reads_as_itself_in_its_middle(self):
+        # Six notes on one voice, the first five 4 ticks each, with the echo of the notes before under each.
+        defn = Project.load(EXAMPLES / "arcade.json").sound("powerup")["def"]
+        (voice,) = defn["voices"]
+        self.assertEqual((len(voice["notes"]), defn["echo"]["time"]), (6, 0.09))
+        samples = render_sound(defn)
+        for tick, note, ticks in voice["notes"]:
+            with self.subTest(note=note):
+                got = pitch_at(samples, (tick + ticks / 2) / 60)
+                self.assertGreater(got, 0.0)
+                # A quarter tone is half a semitone.
+                self.assertLess(abs(12 * math.log2(got / notes.hz(notes.midi(note)))), 0.5)
+        # At 0.15 s the third note has the end of the second and the echo of the first two under it.
+        self.assertEqual(pitch_at(samples, 0.15), 783.0)
 
     def test_a_wave_with_overtones_reads_as_its_lowest_note(self):
         # A square wave of 200 samples a period: 220.5 Hz at 44100 Hz and 240 Hz at 48000 Hz.

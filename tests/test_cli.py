@@ -520,6 +520,11 @@ class Measure(CommandLineCase):
         # The first variant plays e5, which is 7 semitones above the 440 Hz of a4.
         self.assertAlmostEqual(told["pitch"]["hz"], 440 * 2 ** (7 / 12), delta=1)
 
+    def test_at_gives_0_for_the_pitch_where_there_is_no_note_to_read(self) -> None:
+        # The tap is three ticks of noise.
+        self.assertEqual(self.named("tap", "--at", "0"), 0)
+        self.assertEqual(json.loads(self.out.getvalue())["pitch"], {"at": 0.0, "hz": 0.0})
+
     def test_at_the_end_of_a_sound_or_of_a_song_is_refused_by_that_word_with_code_2(self) -> None:
         (buffer,) = render_entry(Project.from_dict(PROJECT).sound("tap"), 8000)
         seconds = len(buffer) / 8000

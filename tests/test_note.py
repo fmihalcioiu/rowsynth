@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import math
 import re
+import time
 import unittest
 
 import numpy as np
@@ -10,7 +11,7 @@ import numpy as np
 from rowsynth.errors import RowSynthError
 from rowsynth.fm import fm_tone
 from rowsynth.note import DEFAULT_RATE, TICK_HZ, render_note, step
-from rowsynth.notes import hz
+from rowsynth.notes import HIGHEST, LOWEST, hz
 from rowsynth.osc import tone
 
 # A tick is 133 and a third samples at 8000 Hz: ticks start at samples 0, 133, 267, 400, 533, 667, 800.
@@ -372,6 +373,32 @@ class SlideTest(unittest.TestCase):
 
     def test_slide_of_0_leaves_the_note_plain(self):
         self.assertTrue(np.array_equal(play({"slide": 0}), play({})))
+
+
+class RangeTest(unittest.TestCase):
+    def test_a_note_carried_far_past_the_range_sounds_at_its_end_and_is_done_at_once(self):
+        for wave in ("pulse", "saw", "tri", "noise", "fm"):
+            voice = {"wave": wave, "ops": [{}, {}]} if wave == "fm" else {"wave": wave}
+            # The kernels are compiled by the first note that is played.
+            play(voice)
+            for step_up, end in ((12000.0, HIGHEST), (-12000.0, LOWEST)):
+                with self.subTest(wave=wave, end=end):
+                    # A thousand octaves further at every tick but the first.
+                    started = time.perf_counter()
+                    far = play({**voice, "pitch": [0, step_up]}, ticks=6)
+                    self.assertLess(time.perf_counter() - started, 1.0)
+                    self.assertTrue(np.isfinite(far).all())
+                    self.assertTrue(np.array_equal(far, play({**voice, "pitch": [0, end - 69, 0]}, ticks=6)))
+            # A vibrato this deep swings past both ends of the range.
+            self.assertTrue(np.isfinite(play({**voice, "vib": {"depth": 30000}}, ticks=6)).all(), wave)
+
+    def test_noise_at_the_top_of_the_range_is_done_in_under_a_second_at_44100(self):
+        play(HISS, rate=44100)
+        started = time.perf_counter()
+        top = play(HISS, HIGHEST, ticks=12, rate=44100)
+        self.assertLess(time.perf_counter() - started, 1.0)
+        self.assertEqual(len(top), 10290)
+        self.assertTrue((top[:8820] > 0).any() and (top[:8820] < 0).any())
 
 
 class DutyTest(unittest.TestCase):
@@ -1001,6 +1028,12 @@ class ErrorTest(unittest.TestCase):
     def test_refuses_a_note_that_is_not_a_number(self):
         for note in ("a4", None, True, [69], float("nan")):
             self.begins("note", self.refused(note=note), repr(note))
+
+    def test_refuses_a_note_lower_or_higher_than_a_note_can_be_played(self):
+        out = np.full(400, 0.5, dtype=np.float32)
+        for note in (20000, HIGHEST + 1, LOWEST - 0.5):
+            self.assertEqual(self.refused(note=note, out=out), f"note: must be a note from -97 to 136, not {note!r}")
+        self.assertTrue(np.array_equal(out, np.full(400, 0.5, dtype=np.float32)))
 
     def test_refuses_ticks_that_are_not_a_length_of_time(self):
         for ticks in ("2", None, True, -1, -0.5, float("inf")):

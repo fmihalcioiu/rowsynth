@@ -10,7 +10,7 @@ import numpy as np
 
 from .errors import RowSynthError
 from .note import DEFAULT_RATE, TICK_HZ, _RELEASE, _count, _flag, render_note
-from .notes import midi
+from .notes import HIGHEST, LOWEST, in_range, midi
 from .sound import finish
 
 # Everything a channel's text can hold, one kind to a line.
@@ -118,6 +118,15 @@ def parse(text: str, inst: str, rows_per_beat: int = 4, drums: dict | None = Non
 _NAMES = ("c", "d-", "d", "e-", "e", "f", "g-", "g", "a-", "a", "b-", "b")
 
 
+def _octave(octave: int) -> str:
+    """The text that puts a channel in an octave. `o` says 0 to 9, and marks go on from the nearest of those."""
+    if octave < 0:
+        return " ".join(["o0"] + ["<"] * -octave)
+    if octave > 9:
+        return " ".join(["o9"] + [">"] * (octave - 9))
+    return f"o{octave}"
+
+
 def transpose(text: str, semis: int) -> str:
     """Rewrites a channel's text `semis` semitones higher, spelling each note with its octave in front."""
     out = []
@@ -129,7 +138,7 @@ def transpose(text: str, semis: int) -> str:
             raise _unread(text, at)
         if found["name"] and found["name"] != "r":
             note = _number(octave, found["name"], found["sign"]) + semis
-            out.append(f"o{note // 12 - 1} {_NAMES[note % 12]}{found['length']}{found['dots']}")
+            out.append(f"{_octave(note // 12 - 1)} {_NAMES[note % 12]}{found['length']}{found['dots']}")
         elif found["octave"]:
             octave = int(found["octave"])
         elif found["mark"] == ">":
@@ -180,7 +189,8 @@ def lay(song: dict) -> tuple[dict[str, list[dict]], float]:
 
     An event's row is counted from the start of the song. A pattern lasts as long as the longest of its
     channels, and the next one starts where it ends. A channel is left out when no pattern in the order has
-    text for it.
+    text for it. Text can be read that cannot be played: a note it puts lower than `notes.LOWEST` or higher
+    than `notes.HIGHEST`, with octave marks or with a drum's note, is refused here.
     """
     rows_per_beat = song.get("rows_per_beat", 4)
     instruments = song.get("instruments", {})
@@ -197,6 +207,9 @@ def lay(song: dict) -> tuple[dict[str, list[dict]], float]:
                 for found in events:
                     if found["inst"] not in instruments:
                         raise RowSynthError(f"no instrument called {found['inst']!r}")
+                    if not in_range(found["note"]):
+                        raise RowSynthError(f"the note at row {found['row']:g} is {found['note']:g}, and a note "
+                                            f"is from {LOWEST} to {HIGHEST}")
                     found["row"] += start
             longest = max(longest, rows)
             laid.setdefault(channel, []).extend(events)
