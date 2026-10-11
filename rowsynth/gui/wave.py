@@ -346,19 +346,52 @@ class Map:
         return replace(self, start=min(max(self.start, 0.0), last))
 
 
-def tabs(seen: Map, laid: Sequence[tuple[str, float, Shape]]) -> list[Rect]:
-    """The tab of each label in the strip of the names: from where its shape starts, `TAB_PAD` round its text."""
+def beside(lefts: Sequence[int], widths: Sequence[int]) -> list[int]:
+    """The x at which each of some tabs is laid, by the x each starts at and how wide each is: none lies on another.
+
+    They are taken from the left, and those that start at one x in the order they are given. A tab that would
+    lie on the one laid before it stands just after that one. Any other stays where it starts, and so does the
+    first of those that start together.
+    """
+    found, end = list(lefts), None
+    # The order is that of where they start: it is settled before any of them is laid elsewhere.
+    for index in sorted(range(len(found)), key=found.__getitem__):
+        if end is not None and found[index] < end:
+            found[index] = end
+        end = found[index] + widths[index]
+    return found
+
+
+def tabs(seen: Map, laid: Sequence[tuple[str, float, Shape]], parts: bool = False) -> list[Rect]:
+    """The tab of each label in the strip of the names: from where its shape starts, `TAB_PAD` round its text.
+
+    The shapes of `parts` can start together. Their tabs are laid as `beside` lays them, so that each can be
+    taken by the mouse: one that would lie on another stands after it, and not where its part starts.
+    """
     _, y, _, h = seen.names
-    return [(seen.x(place), y, Font.width(label) + 2 * TAB_PAD, h) for label, place, _ in laid]
+    lefts = [seen.x(place) for _, place, _ in laid]
+    widths = [Font.width(label) + 2 * TAB_PAD for label, _, _ in laid]
+    return [(left, y, wide, h) for left, wide in zip(beside(lefts, widths) if parts else lefts, widths)]
 
 
-def plus(seen: Map, laid: Sequence[tuple[str, float, Shape]]) -> Rect:
+def plus(seen: Map, laid: Sequence[tuple[str, float, Shape]], parts: bool = False) -> Rect:
     """The box of the sign that adds a sound, in the strip of the names: `PLUS_GAP` after the tab that ends
-    furthest on, and no further on than the strip goes."""
+    furthest on, as `tabs` lays them, and no further on than the strip goes."""
     x, y, w, h = seen.names
     wide = Font.width(ADD) + 2 * TAB_PAD
-    after = max((left + width for left, _, width, _ in tabs(seen, laid)), default=x) + PLUS_GAP
+    after = max((left + width for left, _, width, _ in tabs(seen, laid, parts)), default=x) + PLUS_GAP
     return max(x, min(after, x + w - wide)), y, wide, h
+
+
+def key_name(seen: Map, pitch: int) -> Rect:
+    """The room of the name of a key, at the right end of the key: its letters, and a pixel free all round them.
+
+    The letters stand in the middle of the key's height. A key no higher than its room has its outline cut by
+    the room, above the letters or under them too, which is what keeps the letters whole.
+    """
+    x, _, w, _ = seen.keys
+    wide = Font.width(name(pitch)) + 2
+    return x + w - 4 - wide, seen.y(pitch) + (seen.key_h - BODY_H) // 2 - 1, wide, BODY_H + 2
 
 
 def called(kind: str, index: int) -> str:
@@ -665,7 +698,8 @@ class SoundView(Widget):
     What belongs to the kind of the entry has handles, which are there once the owner has set `handled`. The
     label of a part is a tab that is dragged along the clock to where the part is to start, on a tick and never
     before second 0: its bars follow, and so does its own wave where `alone` gives the wave of a part by itself.
-    The two borders of a held sound are dragged in the strip of the labels, and stop where `soundedit.held_with`
+    The tabs of parts that start together stand side by side, so that each is taken by itself. The two borders
+    of a held sound are dragged in the strip of the labels, and stop where `soundedit.held_with`
     keeps the start and the loop, by the instruments that `show` was given. Where the entry has a longest time,
     its `max_seconds`, a line stands at that second in the colour of a fault, and is dragged in the ruler. The
     clock goes on to a line that is no more than `LIMIT_REACH` times the sound away. While a handle is dragged
@@ -968,7 +1002,7 @@ class SoundView(Widget):
 
     def tab(self, which: int) -> Rect:
         """The tab of the label of one of the shapes, counted from 0, in the strip of the names."""
-        return tabs(self.map, self._laid)[which]
+        return tabs(self.map, self._laid, self.kind == "parts")[which]
 
     def handle_at(self, pos: Pos) -> tuple[str, int] | None:
         """The handle a position is on: what it is, and which part it is of or which variant's line it is.
@@ -996,7 +1030,7 @@ class SoundView(Widget):
 
     def _tab_at(self, seen: Map, pos: Pos) -> int | None:
         """The shape whose tab a position is on, the one drawn last first, or None for none."""
-        boxes = tabs(seen, self._laid)
+        boxes = tabs(seen, self._laid, self.kind == "parts")
         return next((which for which in reversed(range(len(boxes))) if inside(boxes[which], pos)), None)
 
     def _own(self, second: float) -> tuple[int, float]:
@@ -1047,7 +1081,7 @@ class SoundView(Widget):
                     START: "drag to move where the loop starts", LOOP: "drag to move where the loop ends",
                     LIMIT: "the longest time the sound may last: drag to move it"}[hit[0]]
         adds = bool(self._spans) and self.added is not None and self.kind in ADDED
-        if adds and inside(seen.names, pos) and inside(plus(seen, self._laid), pos):
+        if adds and inside(seen.names, pos) and inside(plus(seen, self._laid, self.kind == "parts"), pos):
             end = " at the end" if self.kind == "parts" else ""
             return f"add a {ADDED[self.kind]}{end}, a copy of {called(self.kind, self._sound)}"
         if self._spans and self.asked is not None and inside(seen.ruler, pos):
@@ -1158,7 +1192,7 @@ class SoundView(Widget):
             return True
         if self.added is None or self.kind not in ADDED:
             return False
-        if inside(seen.names, pos) and inside(plus(seen, self._laid), pos):
+        if inside(seen.names, pos) and inside(plus(seen, self._laid, self.kind == "parts"), pos):
             self.added(None)
         elif self.kind == "parts" and "ctrl" in event.mods and inside(seen.ruler, pos):
             self.added(on_tick(second))
@@ -1390,7 +1424,11 @@ class SoundView(Widget):
                 canvas.text_in(f"{mark * step:.{max(0, -power)}f}", number, theme.DIM)
 
     def _draw_keys(self, canvas: Canvas, seen: Map) -> None:
-        """The keys: each a light block, a black one dark for most of its length, and each c named if it has room."""
+        """The keys: each a light block, a black one dark for most of its length, and each c named if it has room.
+
+        The names are drawn over the keys, each in the room `key_name` gives it, cleared to the light of its key:
+        so the outline of a low key does not run into its letters.
+        """
         x, _, w, _ = seen.keys
         with canvas.clip(seen.keys):
             for pitch in seen.pitches():
@@ -1400,8 +1438,12 @@ class SoundView(Widget):
                     canvas.frame(key, theme.BACKGROUND)
                 if black(pitch):
                     canvas.box((x, key[1], BLACK_W, seen.key_h), theme.BACKGROUND)
-                elif pitch % 12 == 0 and seen.key_h >= BODY_H + 2:
-                    canvas.text_in(name(pitch), (x, key[1], w - 5, seen.key_h), theme.BACKGROUND, "right")
+            if seen.key_h >= BODY_H + 2:
+                for pitch in seen.pitches():
+                    if pitch % 12 == 0:
+                        room = key_name(seen, pitch)
+                        canvas.box(room, theme.TEXT)
+                        canvas.text_in(name(pitch), room, theme.BACKGROUND, "centre")
 
     def _zones(self, seen: Map) -> list[tuple[int, int]]:
         """The zones of a held sound from side to side, each as (x, width): one ends where the next starts, and the
@@ -1508,32 +1550,42 @@ class SoundView(Widget):
         Where there are handles, the label of a part is on a tab, lit while it is dragged, with a line down
         the grid from every one, and each border of a held sound has a grip in the strip of the labels. After
         the last label of variants and of parts stands the sign that adds one, where somebody is told of it.
+
+        The label of a part stands where `tabs` lays its tab, which is beside the tab it would lie on. Its line
+        stays at the second the part starts at: it is the edge of a tab that stands there, and runs under any
+        other tab.
         """
         x, y, w, h = seen.names
         deep = h + seen.grid[3]
         laid, pull = self._placed(), self._pull
         starts = [seen.x(place) for _, place, _ in laid]
         handles = bool(self._spans) and self.handled is not None
-        boxes = tabs(seen, laid) if handles and self.kind == "parts" else []
+        every = tabs(seen, laid, self.kind == "parts")
+        lefts = [left for left, _, _, _ in every]
+        boxes = every if handles and self.kind == "parts" else []
         grips = handles and self.kind == "held"
         with canvas.clip((x, y, w, deep)):
+            for index, start in enumerate(starts):
+                if index or boxes:
+                    canvas.vline(start, y, deep, theme.TEXT)
             for index, (label, _, _) in enumerate(laid):
                 # A label that starts at a grip stands clear of it.
-                left = starts[index] + (GRIP if grips and index else 0)
+                left = lefts[index] + (GRIP if grips and index else 0)
                 if boxes:
                     pulled = pull is not None and (pull.kind, pull.which) == (PART, index)
                     canvas.box(boxes[index], theme.LIT if pulled else theme.RAISED)
                     canvas.frame(boxes[index], theme.LINE)
-                if index or boxes:
-                    canvas.vline(starts[index], y, deep, theme.TEXT)
-                # A label has the room up to the next start there is after its own.
-                room = min((start for start in starts if start > left), default=x + w) - left - 4
+                    # The lines were drawn first, so that none runs over a tab: this one is the tab's own.
+                    if left == starts[index]:
+                        canvas.vline(left, y, h, theme.TEXT)
+                # A label has the room up to the next label there is after its own.
+                room = min((start for start in lefts if start > left), default=x + w) - left - 4
                 canvas.text_in(label.upper(), (left + 3, y, max(0, room), h), self._ink(index))
             if grips:
                 for left in starts[1:]:
                     canvas.box((left - GRIP, y, 2 * GRIP + 1, h), theme.TEXT)
             if self._spans and self.added is not None and self.kind in ADDED:
-                sign = plus(seen, laid)
+                sign = plus(seen, laid, self.kind == "parts")
                 canvas.box(sign, theme.RAISED)
                 canvas.frame(sign, theme.LINE)
                 canvas.text_in(ADD, sign, theme.TEXT, "centre")

@@ -420,13 +420,17 @@ class SoundPanel(Panel):
 
         Where that sound is another by now than the one the view was shown, it was changed outside while a
         gesture was under way here. What the hand made is saved all the same, and the session is told that it
-        was, and that taking the step back gives the other.
+        was, and that taking the step back gives the other. Where the project has no sound of that name any
+        more, nothing is saved, and the session is told so.
         """
         model = self.session.model
         project, name = held(model), self.heading[1]
+        current = project.sounds.get(name)
+        if current is None:
+            return self._refuse("the project has no such sound any more")
         try:
-            entry = soundedit.with_sound(project.sounds[name], index, defn, project.instruments, model.rate)
-            meanwhile = soundedit.sound_in(project.sounds[name], index) != soundedit.sound_in(self._entry, index)
+            entry = soundedit.with_sound(current, index, defn, project.instruments, model.rate)
+            meanwhile = soundedit.sound_in(current, index) != soundedit.sound_in(self._entry, index)
         except RowSynthError as error:
             return self._refuse(str(error))
         saved = self._put(entry, label, index)

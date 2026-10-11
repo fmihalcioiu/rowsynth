@@ -18,9 +18,10 @@ from rowsynth.gui.font import Font
 from rowsynth.gui.roll import BOX, DARKER, LIGHTER, MOVE, PICK, PLACE, REMOVE, STRETCH, mix
 from rowsynth.gui.soundview import Bar, Shape
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import (GRIP, LIMIT_AIR, PART, STALE, VARIANT_GAP, ZONES, ZOOM_MOST, Map, SoundView, Span,
-                               bars, begins, called, echo_colour, joined, keys, limit_lines, on_tick, places,
-                               ruler_step, span_at, spans, spelt, stretch, tint, voice_colour)
+from rowsynth.gui.wave import (GRIP, LABEL, LIMIT_AIR, PART, PLUS_GAP, STALE, VARIANT_GAP, ZONES, ZOOM_MOST, Map,
+                               SoundView, Span, bars, begins, beside, called, echo_colour, joined, key_name, keys,
+                               limit_lines, on_tick, places, plus, ruler_step, span_at, spans, spelt, stretch, tabs,
+                               tint, voice_colour)
 from rowsynth.project import Project
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -238,6 +239,24 @@ class Sums(unittest.TestCase):
     def test_a_place_is_in_the_stretch_that_starts_last_before_it_or_at_it(self) -> None:
         self.assertEqual([stretch([58, 258], at) for at in (57, 58, 257, 258, 1000)], [None, 0, 0, 1, 1])
         self.assertEqual((stretch([], 5), stretch([0.0, 0.5, 0.5], 0.5)), (None, 2))
+
+    def test_tabs_that_would_lie_on_one_another_are_laid_side_by_side_and_the_others_stay(self) -> None:
+        # Two that start together: the first has its place, and the second stands just after it.
+        self.assertEqual(beside([58, 58], [11, 11]), [58, 69])
+        # Three, in the order they are given, each as wide as it is.
+        self.assertEqual(beside([58, 58, 58], [11, 17, 11]), [58, 69, 86])
+        # Two that are near and clear of one another stay where they are, and so does one alone.
+        self.assertEqual((beside([58, 69], [11, 11]), beside([80, 58], [11, 11]), beside([58], [11]), beside([], [])),
+                         ([58, 69], [80, 58], [58], []))
+        # One that starts under where another was laid stands after that one. The one that starts sooner is
+        # laid first, whichever of them it is.
+        self.assertEqual((beside([58, 58, 75], [11, 11, 11]), beside([60, 58], [11, 11])), ([58, 69, 80], [69, 58]))
+        # In the strip of the names it is the tabs of parts that are laid so, with the sign after the last.
+        seen = Map(RECT, labels=True)
+        laid = [(label, 0.25, Shape((), 0.5, ())) for label in ("1", "2", "3")]
+        self.assertEqual((tabs(seen, laid, True), plus(seen, laid, True)),
+                         ([(158, 30, 11, 10), (169, 30, 11, 10), (180, 30, 11, 10)], (193, 30, 11, 10)))
+        self.assertEqual((tabs(seen, laid), plus(seen, laid)), ([(158, 30, 11, 10)] * 3, (171, 30, 11, 10)))
 
 
 class Hands(unittest.TestCase):
@@ -836,6 +855,32 @@ class Edits(unittest.TestCase):
         self.drag(self.at(13, 64), button=3)
         self.assertEqual((self.view.picked, self.notes(0), len(self.edits)), ({C4}, [[1, "c4", 6], FIRST[1]], 2))
 
+    def test_the_tabs_of_parts_that_start_together_stand_side_by_side_and_each_is_taken_by_itself(self) -> None:
+        told: list[tuple] = []
+        self.view.handled = lambda *what: told.append(what)
+        self.view.added = lambda at: told.append(("added", at))
+        self.view.asked = lambda what, which, second, pos: told.append((what, which))
+        low, high = (part[1] for part in LAYERS["parts"])
+        self.show({"parts": [[0.1, low], [0.1, high], [0.1, low]]})
+        seen = self.view.map
+        x, (_, y, _, h) = seen.x(0.1), seen.names
+        # The first stands where the three start, and the others after it, each as wide as its label makes it.
+        self.assertEqual([self.view.tab(which) for which in range(3)],
+                         [(x, y, 11, h), (x + 11, y, 11, h), (x + 22, y, 11, h)])
+        for which in range(3):
+            on = (x + 11 * which + 5, y + 4)
+            self.mouse("move", on)
+            self.assertEqual((self.view.handle_at(on), self.ui.help),
+                             ((PART, which), f"drag to move where part {which + 1} starts, or press the right "
+                                             "button for more"))
+        # The second is dragged by its own tab, a twentieth of a second on, and the hand is in it.
+        self.drag((x + 16, y + 4), (x + 16 + round(0.05 * seen.scale), y + 4))
+        self.assertEqual((told, self.view.sound), ([(PART, 1, 0.15)], 1))
+        # The right button on the third asks for the menu of that one, and the sign comes after the last tab.
+        self.drag((x + 27, y + 4), button=3)
+        self.drag((x + 33 + PLUS_GAP + 2, y + 4))
+        self.assertEqual(told[1:], [(LABEL, 2), ("added", None)])
+
 
 @unittest.skipUnless(pygame, NEEDS)
 class Drawn(unittest.TestCase):
@@ -995,6 +1040,33 @@ class Drawn(unittest.TestCase):
         # The row of a black key is darker than that of a white one, and the keys end a pixel short of the grid.
         self.assertEqual((self.at(70, c + 3), self.at(70, d_flat + 3)), (theme.RAISED, theme.BACKGROUND))
         self.assertEqual(self.colours((57, 30, 1, 205)), {theme.PANEL})
+
+    def test_the_name_of_a_c_is_whole_on_a_key_that_is_no_higher_than_its_letters_with_the_air_round_them(
+            self) -> None:
+        heights, inks = [], []
+        # The 205 pixels of the grid are keys 11 high for six notes, 10 high for twenty and 9 high for twenty-two.
+        for high in (65, 79, 81):
+            self.view.show(one(bar(0.0, 0.5, 60), bar(0.5, 0.5, high)), [], RATE, theme.SOUND)
+            seen = self.draw()
+            x, y, w, h = room = key_name(seen, 60)
+            heights.append(seen.key_h)
+            inks.append({(at - x, row - y) for at, row in self.where(theme.BACKGROUND, room)})
+            self.assertEqual(((x, w, h), self.colours(room)), ((41, 13, 9), {theme.TEXT, theme.BACKGROUND}))
+        # On each it is the same letters, c4, with a pixel of the light of the key all round them: on the two
+        # lower keys the room is cut out of the outline of the key, which else runs into the letters.
+        self.assertEqual((heights, inks[1:]), ([11, 10, 9], [inks[0]] * 2))
+        self.assertTrue(inks[0] and all(0 < at < 12 and 0 < row < 8 for at, row in inks[0]))
+        # Beside the name the outline of the key is as it was: here that of the lowest key, which is 9 high.
+        self.assertEqual(self.colours((11, seen.y(60), 30, 1)), {theme.BACKGROUND})
+
+    def test_a_key_too_low_for_letters_has_no_name(self) -> None:
+        # Twenty-five notes leave a key 8 pixels: the key of a c is then drawn as that of a d, with nothing on it.
+        self.view.show(one(bar(0.0, 0.5, 60), bar(0.5, 0.5, 84)), [], RATE, theme.SOUND)
+        seen = self.draw()
+        c, d = ({(at, row - seen.y(pitch)) for at, row in self.where(theme.BACKGROUND, (10, seen.y(pitch), 48, 8))}
+                for pitch in (72, 74))
+        self.assertEqual((seen.key_h, c), (8, d))
+        self.assertEqual(self.colours((11, seen.y(72) + 1, 45, 6)), {theme.TEXT})
 
     def test_the_playhead_is_a_line_at_its_second_and_nothing_is_drawn_outside_the_rectangle(self) -> None:
         self.view.playhead = 0.5
@@ -1192,6 +1264,28 @@ class Drawn(unittest.TestCase):
         self.assertTrue(self.ui.handle(Event("key", key="escape")))
         self.ui.handle(Event("up", (x + 4 + by, y + 4), button=1))
         self.assertEqual((len(told), self.view.busy), (1, False))
+
+    def test_tabs_laid_side_by_side_have_each_its_label_and_the_line_of_a_part_stays_at_its_second(self) -> None:
+        self.view.handled = lambda *what: None
+        long, short = {"def": solo([0, "c4", 40])}, {"def": solo([0, "c5", 6])}
+        # Two parts start a tenth of a second in, and a third a tick after them: on a clock of 0.8 s that is 8
+        # pixels on, under the tab of the first.
+        entry = {"parts": [[0.1, long], [0.1, short], [on_tick(0.1 + 1 / 60), short]]}
+        self.view.show(soundview.shapes(entry, instruments=INSTRUMENTS), [], 44100, theme.SOUND, "parts", entry)
+        seen = self.draw()
+        (_, y, _, h), lefts = seen.names, [self.view.tab(which)[0] for which in range(3)]
+        self.assertEqual(([seen.x(at) for at, _ in entry["parts"]], lefts), ([108, 108, 116], [108, 119, 130]))
+        # Each label is in its own tab. The first tab stands where its part starts, and has that line for its
+        # edge: the others have their own outline.
+        inked = {at for at, _ in self.where(theme.TEXT, seen.names)}
+        labels = [set(range(left + 3, left + 8)) for left in lefts]
+        self.assertEqual(([bool(inked & label) for label in labels], inked - set().union(*labels)),
+                         ([True] * 3, {108}))
+        self.assertEqual([(self.at(left, y + 1), self.at(left + 1, y + 1)) for left in lefts],
+                         [(theme.TEXT, theme.RAISED), (theme.LINE, theme.RAISED), (theme.LINE, theme.RAISED)])
+        # The line of the third runs down the grid at its second, and under the tab of the first on its way.
+        self.assertEqual({at for at, _ in self.where(theme.TEXT, seen.grid)}, {108, 116})
+        self.assertEqual(self.at(116, y + h), theme.TEXT)
 
     def test_coin_of_the_arcade_example_is_its_two_bars_over_the_wave_of_its_render(self) -> None:
         view, seen, shapes, (samples,) = self.arcade("coin")

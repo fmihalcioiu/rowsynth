@@ -925,6 +925,18 @@ class Saved(OnAFile):
         self.assertEqual((self.data()["sounds"]["two"], self.view.drawn, self.session.undo_label),
                          ({"def": duo(FIRST, SECOND), "db": -3.5}, duo(FIRST, SECOND), "two: level -3.5 DB"))
 
+    def test_a_gesture_that_ends_after_its_sound_was_removed_outside_saves_nothing_and_says_so(self) -> None:
+        start, stop = self.at(1, 60), self.at(3, 60)
+        self.mouse("down", start)
+        self.mouse("move", stop)
+        written = self.outside(lambda sounds: sounds.pop("two"))
+        self.panel.update()
+        self.assertEqual((self.view.busy, "two" in self.session.model.project.sounds), (True, False))
+        steps = self.session.undo_label
+        self.mouse("up", stop)
+        self.assertEqual((self.data(), self.session.message, self.session.undo_label, self.view.busy),
+                         (written, "two: the project has no such sound any more", steps, False))
+
     def test_a_change_that_leaves_the_note_of_a_held_sound_too_short_is_refused_and_said_and_saves_nothing(
             self) -> None:
         self.pick("drone")
@@ -1104,6 +1116,23 @@ class Kinds(OnAFile):
         self.choose("Copy")
         self.assertEqual((self.sound("both")["parts"][4:], self.session.undo_label, self.view.sound),
                          ([[0, low]], "both: part 1 copied as part 5", 4))
+
+    def test_a_part_copied_has_its_tab_beside_that_of_the_part_it_starts_with_and_is_dragged_by_it(self) -> None:
+        self.pick("both")
+        self.drag(self.label(0), button=3)
+        self.choose("Copy")
+        first, copy = self.view.tab(0), self.view.tab(2)
+        self.assertEqual((self.sound("both")["parts"][2][0], copy[0]), (0, first[0] + first[2]))
+        # Dragged by its own tab to a tenth of a second, it starts with the second part: its tab is beside that one.
+        x, y = self.label(2)
+        self.drag((x, y), (x + round(0.1 * self.view.map.scale), y))
+        second, copy = self.view.tab(1), self.view.tab(2)
+        self.assertEqual(([at for at, _ in self.sound("both")["parts"]], self.session.undo_label, copy[0]),
+                         ([0, 0.1, 0.1], "both: part 3 moved to 0.1 s", second[0] + second[2]))
+        # The first is still taken by its tab, and so is the second.
+        for which in (0, 1):
+            self.drag(self.label(which))
+            self.assertEqual(self.view.sound, which)
 
     def test_the_level_of_a_part_is_typed_in_a_box_over_its_label(self) -> None:
         self.pick("both")

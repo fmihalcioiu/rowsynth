@@ -45,7 +45,8 @@ Picked = frozenset[Pick]
 Clip = tuple[tuple[int, list], ...]
 
 #: The lowest note and the highest that a note is placed at or moved to: the c of octave -9 and the b of octave 9,
-#: the ends of what a name can say. The engine takes any number for a note and has no ends of its own.
+#: the ends of what a name can say. They lie inside the engine's own, the `LOWEST` and `HIGHEST` of `rowsynth.notes`,
+#: outside which the project refuses a note.
 LOWEST, HIGHEST = -96, 131
 
 # What a sound made into a held one begins with. The start, the loop and the join are the ticks its notes are held
