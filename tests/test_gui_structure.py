@@ -897,7 +897,7 @@ class Settings(Opened):
 
     def test_the_grid_steps_the_rows_of_a_beat_through_those_at_which_the_song_sounds_the_same(self) -> None:
         panel, before = self.panel, self.song()
-        self.assertEqual((panel.grid.options, panel.grid.picked), (("1", "2", "3", "4", "6", "8", "12"), 3))
+        self.assertEqual((panel.grid.options, panel.grid.picked), (("2", "4", "6", "8", "12"), 1))
         x, y, w, _ = panel.grid.rect
         self.click((x + w - 3, y + 3))
         made = self.song()
@@ -905,7 +905,7 @@ class Settings(Opened):
                          (6, 4, ["row_ticks", "rows_per_beat"]))
         # The tempo is the one it was, and a bar has half as many rows again: the notes are where they were in it.
         self.assertEqual((self.shown()[0], panel.grid.picked, self.read("a").rows, self.session.undo_label),
-                         ("150", 4, 24.0, "tune: 6 rows to a beat"))
+                         ("150", 2, 24.0, "tune: 6 rows to a beat"))
         self.assertEqual((panel.roll.bar_rows, [note.row for note in panel.roll.notes]), (24, [0.0, 6.0, 12.0, 18.0]))
         self.click((x + 3, y + 3))
         self.assertEqual((self.song(), self.session.undo_label),

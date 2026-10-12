@@ -485,7 +485,7 @@ class SongPanel(Panel):
     of the settings bar, whatever is shown under it. The tempo is one of those `tempo_steps` gives, shown in
     beats a minute. The buttons move every tuned note of the song a semitone down or up, and `shifted` between
     them counts the semitones since the song was opened: a move that is taken back is counted back. Between
-    the tempo and the key stands `grid`, the rows of a beat: it steps through those `songedit.grids` gives,
+    the tempo and the key stands `grid`, the rows of a beat: it steps through those `songedit.offered` gives,
     at each of which `songedit.gridded` leaves the song sounding as it did.
 
     A press on a block of the strip counts as a gesture under way from the press to its release, and so does a
@@ -738,7 +738,7 @@ class SongPanel(Panel):
         self._ticks = [ticks for ticks, _ in steps]
         self.tempo.options = tuple(tempo_text(beats) for _, beats in steps)
         self.tempo.picked = self._ticks.index(song["row_ticks"])
-        self._grids = songedit.grids(song)
+        self._grids = songedit.offered(song)
         self.grid.options = tuple(plain(rows) for rows in self._grids)
         self.grid.picked = self._grids.index(song.get("rows_per_beat", 4))
         self._count()

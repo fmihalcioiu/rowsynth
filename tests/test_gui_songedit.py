@@ -12,8 +12,8 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import songview
 from rowsynth.gui.songedit import (LETTERS, added, allowed, channel_added, channel_copied, channel_dropped,
                                    channel_kind, channel_moved, channel_renamed, copied, dropped, drum_added,
-                                   drum_removed, drum_set, gridded, grids, moved, renamed, repeated, resized, tempos,
-                                   transposed, with_tempo)
+                                   drum_removed, drum_set, gridded, grids, moved, offered, renamed, repeated,
+                                   resized, tempos, transposed, with_tempo)
 from rowsynth.layers import render_groups
 from rowsynth.project import Project
 from rowsynth.song import render_loop, render_song, render_stems, up
@@ -446,6 +446,14 @@ class Grids(unittest.TestCase):
         # The grid the song has is among those it can be given, whatever its ticks.
         odd = {**given, "row_ticks": 7, "rows_per_beat": 5}
         self.assertEqual((grids(odd), grids({**given, "row_ticks": 1})), ([1, 5, 7], [1, 2, 4]))
+
+    def test_the_window_offers_only_the_grids_at_which_every_written_note_is_on_a_row(self) -> None:
+        # Eighths and a quarter: on the rows from two rows a beat up, and between them at one row a beat.
+        plain = {**self.SONG, "patterns": {"a": {"tune": "o4 l8 c e g4 c2", "low": "o2 c2 g2", "beat": "l4 k t k t"}}}
+        self.assertEqual((grids(plain), offered(plain)), ([1, 2, 3, 4, 6, 8, 12], [2, 4, 6, 8, 12]))
+        # A triplet is on the rows only where a beat has a number of rows that three goes into. The grid a song
+        # has is offered whatever its notes do.
+        self.assertEqual(offered(self.SONG), [4, 12])
 
     def test_a_grid_at_which_a_row_would_last_no_whole_number_of_ticks_is_refused_and_so_is_one_that_is_none(
             self) -> None:

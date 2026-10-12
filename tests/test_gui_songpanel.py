@@ -610,7 +610,7 @@ class Shown(unittest.TestCase):
         self.assertEqual((panel.tempo.rect, panel.lower.rect, panel.shifted.rect, panel.higher.rect),
                          ((575, 135, 56, 13), (677, 135, 13, 13), (690, 135, 24, 13), (714, 135, 13, 13)))
         self.assertEqual((panel.grid.rect, panel.grid.options, panel.grid.picked, panel.grid.visible),
-                         ((637, 135, 34, 13), ("1", "2", "3", "4", "6", "8", "12"), 3, True))
+                         ((637, 135, 34, 13), ("2", "4", "6", "8", "12"), 1, True))
         self.assertEqual(key_parts((677, 135, 50, 13)), ((677, 135, 13, 13), (690, 135, 24, 13), (714, 135, 13, 13)))
         self.assertEqual((bar.follow.rect, bar.ghosts.rect, panel.tempo.visible, bar.volume.visible, bar.pan.visible),
                          ((733, 127, 43, 13), (733, 143, 43, 13), True, True, True))

@@ -1058,6 +1058,26 @@ class InTheApp(unittest.TestCase):
         app.frame_do(CLOSE)
         self.assertTrue(app.closed)
 
+    def test_the_title_row_moves_and_closes_the_window_while_a_menu_is_open_over_the_widgets(self) -> None:
+        self.held()
+        app = self.silent()
+        down, move, up = pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP
+        x, y, w, h = app.screen.stand()
+        app.file_menu((10, 40))
+        menu = app.ui.modal
+        self.assertIsNotNone(menu)
+        # The menu has the mouse, and the row takes hold of the window all the same. The menu stays open.
+        self.mouse(app, down, (300, 10))
+        self.mouse(app, move, (340, 35))
+        app.update()
+        self.mouse(app, up, (340, 35))
+        self.assertEqual((app.screen.stand(), app.ui.modal), ((x + 40, y + 25, w, h), menu))
+        # A button of the row acts on its release.
+        at = tuple(part * app.screen.scale for part in middle(title_parts(app.title.rect)[CLOSE]))
+        self.mouse(app, down, at)
+        self.mouse(app, up, at)
+        self.assertTrue(app.closed)
+
     def test_with_the_frame_of_the_system_kept_there_is_no_title_row_and_the_system_names_the_file(self) -> None:
         self.held()
         with mock.patch("rowsynth.gui.screen.own_frame", return_value=None):

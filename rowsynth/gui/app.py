@@ -28,7 +28,7 @@ from .screen import Screen
 from .session import Session
 from .theme import Colour
 from .topbar import CLOSE, MINIMISE, Title, TopBar
-from .ui import NOWHERE, Pos, Ui, translate
+from .ui import NOWHERE, Event, Pos, Ui, inside, translate
 
 FPS = 60
 # The seconds a message that was just said has the status bar, whatever the mouse is on.
@@ -153,6 +153,8 @@ class App:
         # Where in the window the mouse was last seen, and the place of it that a drag has yet to follow.
         self._mouse: Pos = NOWHERE
         self._pulled: Pos | None = None
+        # Whether the title row has a press of its own while something is open over the widgets.
+        self._row_pressed = False
         self.ui = Ui()
         # What the app has to say while no session is open to say it, and how many times it had something.
         self._own = ""
@@ -430,8 +432,27 @@ class App:
         if self._framed(event):
             return
         happened = translate(event, self.screen.to_art)
-        if happened is not None:
+        if happened is None:
+            return
+        if self._rows(happened):
+            self.title.on(happened, self.ui)
+        else:
             self.ui.handle(happened)
+
+    def _rows(self, event: Event) -> bool:
+        """Whether an event is the title row's although a menu or a box is open over the widgets.
+
+        What is open has everything the mouse does, so the row would be dead under it. The window is moved,
+        minimised and closed all the same: a press of the left button on the row is the row's, and so is the
+        release that follows it.
+        """
+        if self.title is None or self.ui.modal is None or event.kind not in ("down", "up") or event.button != 1:
+            return False
+        if event.kind == "down":
+            self._row_pressed = inside(self.title.rect, event.pos)
+            return self._row_pressed
+        pressed, self._row_pressed = self._row_pressed, False
+        return pressed
 
     def _grip(self, pos: Pos) -> str:
         """The edge or corner of the window that a position of the window takes hold of, and "" for none.

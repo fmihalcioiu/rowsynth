@@ -10,7 +10,7 @@ from ..errors import RowSynthError
 from ..note import TICK_HZ
 from ..notes import midi
 from ..project import _AT, _NOT_IN_FILE_NAMES
-from ..song import _within, up
+from ..song import _within, parse, up
 from . import songview
 from .noteedit import _held
 from .songview import Note
@@ -570,6 +570,23 @@ def gridded(song: dict, rows_per_beat: int) -> dict:
     return made
 
 
+def _on_rows(song: dict, rows_per_beat: int) -> bool:
+    """Whether every note a song has written starts on a row and ends on one where a beat has that many rows."""
+    drums = song.get("drums")
+    for pattern in song["patterns"].values():
+        for channel, text in pattern.items():
+            settings = song["channels"].get(channel, {})
+            try:
+                events, rows = parse(text, settings.get("inst", ""), rows_per_beat,
+                                     drums if settings.get("drums") else None)
+            except RowSynthError:
+                return False
+            if not _is_whole(rows) or any(not (_is_whole(event["row"]) and _is_whole(event["rows"]))
+                                          for event in events):
+                return False
+    return True
+
+
 def grids(song: dict) -> list[int]:
     """The rows to a beat a song can be given and sound the same, the fewest first: those `gridded` makes.
 
@@ -579,3 +596,12 @@ def grids(song: dict) -> list[int]:
     found = {rows for rows in range(1, GRID_MOST + 1)
              if _row_ticks(song, rows) >= 1 and _is_whole(_row_ticks(song, rows))}
     return sorted(found | {song.get("rows_per_beat", 4)})
+
+
+def offered(song: dict) -> list[int]:
+    """The rows to a beat the window offers for a song: those of `grids` at which every written note is on a row.
+
+    At the others the song would sound the same, but notes would start or end between two rows, where they are
+    shown and cannot be changed. The grid the song has is always among them.
+    """
+    return [rows for rows in grids(song) if rows == song.get("rows_per_beat", 4) or _on_rows(song, rows)]
