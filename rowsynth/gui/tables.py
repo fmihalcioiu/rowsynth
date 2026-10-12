@@ -9,9 +9,8 @@ from typing import TYPE_CHECKING
 
 from .. import note
 from ..errors import RowSynthError
-from . import theme
+from . import kit, theme
 from .dials import plain
-from .font import Font
 from .layout import Rect
 from .theme import Colour
 from .ui import NOWHERE, Event, Pos, Ui, Widget, inside
@@ -19,8 +18,6 @@ from .ui import NOWHERE, Event, Pos, Ui, Widget, inside
 if TYPE_CHECKING:
     from .canvas import Canvas
 
-#: How high the line above the field is, which has the label and the count of the steps.
-HEAD_H = 10
 #: How high the strip under the field is, in which the bracket of the loop lies.
 LOOP_H = 5
 #: From the outside of the field to the bars: its outline, and a pixel of air.
@@ -36,13 +33,17 @@ HANDLE_H = 9
 MOST = 64
 #: How dark the steps that repeat are drawn after the last bar, as a share of the colour of the bars.
 FAINT = 0.4
-#: How many pixels one step of the wheel scrolls a table whose steps do not fit, with shift held.
-WHEEL_PX = 24
 #: The most places after the point of a value that the mouse sets in a table of values that are not whole.
 PLACES = 3
 
 #: What a press can begin, as `begins` calls it.
 DRAW, ZERO, SIZE, LOOP = "draw", "zero", "size", "loop"
+#: What the help line says the right press does on a step, and the left press on the handle after the last bar.
+ZERO_HELP = "back to zero"
+SIZE_HELP = "drag right for more steps, left for fewer"
+#: What it says the left press does under the bars: on a table with a loop, and before the step of one with none.
+LOOP_HELP = "drag the start of the loop, off the left end to take the loop away"
+LOOP_FROM = "loop the table from"
 
 Steps = tuple[float, ...]
 #: A table taken apart: its steps, and the index it goes round from, or None when it holds its last step.
@@ -158,16 +159,10 @@ class Map:
         _ranged(self.low, self.high)
 
     @property
-    def head(self) -> Rect:
-        """The line of the label and the count, along the top."""
-        x, y, w, _ = self.rect
-        return x, y, w, HEAD_H
-
-    @property
     def field(self) -> Rect:
-        """The field with its outline: what the line above it and the strip under it leave of the rectangle."""
+        """The field with its outline: what the strip under it leaves of the rectangle."""
         x, y, w, h = self.rect
-        return x, y + HEAD_H, w, max(0, h - HEAD_H - LOOP_H)
+        return x, y, w, max(0, h - LOOP_H)
 
     @property
     def bars(self) -> Rect:
@@ -376,27 +371,36 @@ class StepTable(Widget):
     when `whole`. The right button sets them to zero. The handle after the last bar is dragged right for more
     steps and left for fewer. Under the bars is the bracket of the loop: the step it begins at is dragged, off
     the left end to take the loop away, and a click where no bracket is sets one. After the handle the steps are
-    drawn again, fainter, as the table goes on past its end. With shift the wheel scrolls a table whose steps do
-    not fit, and without it the wheel is not used.
+    drawn again, fainter, as the table goes on past its end.
 
-    `text` is the label, shown above in capitals. `word` is what a value is called in the help line, which names
-    the step under the mouse: anywhere else the line is `help`.
+    The widget has no name on it: its owner writes its name and the count of its steps beside it. An owner with
+    several tables under one ruler gives each the same `span`, the count of the steps the bars make room for,
+    so that the bars of all are equally wide: with 0 a table makes room for its own. `first` is how many pixels
+    of the bars are scrolled away to the left. The wheel is read by `kit.wheel`: sideways, which is with shift,
+    it scrolls a table whose steps do not fit, and `moved` is told the new `first`, for an owner that has its
+    other tables go along. Any other step of the wheel is left to what lies under the table.
+
+    The help line says what the presses do where the mouse is: on a step, which it names with its value as
+    `word` calls it, on the handle, and under the bars. After that it says `wheel_help`, which is what the wheel
+    does there. Anywhere else, and on a table that is not enabled, the line is `help`.
     """
 
     def __init__(self, rect: Rect, table: object, low: float, high: float,
-                 changed: Callable[[object], object] | None = None, colour: Colour = theme.ACTIVE, text: str = "",
-                 whole: bool = True, help: str = "", word: str = "value") -> None:
+                 changed: Callable[[object], object] | None = None, colour: Colour = theme.ACTIVE,
+                 whole: bool = True, help: str = "", word: str = "value", wheel_help: str = "") -> None:
         super().__init__(rect, help)
         _ranged(low, high)
         self.low = low
         self.high = high
         self.changed = changed
         self.colour = colour
-        self.text = text
         self.whole = whole
         self.word = word
+        self.wheel_help = wheel_help
+        self.span = 0
+        self.first = 0
+        self.moved: Callable[[int], object] | None = None
         self._mouse: Pos = NOWHERE
-        self._first = 0
         self._drag: Gesture | None = None
         self.table = table
 
@@ -430,18 +434,29 @@ class StepTable(Widget):
         """The sums of the widget as it is now: while a drag is under way, as they were at its press."""
         if self._drag is not None:
             return self._drag.seen
-        count = len(self._steps)
+        count = max(len(self._steps), self.span)
         width = max(0, self.rect[2] - 2 * INSET)
-        return Map(self.rect, self.low, self.high, fit(width, count), self._first, self.whole).within(count)
+        return Map(self.rect, self.low, self.high, fit(width, count), self.first, self.whole).within(count)
 
     @property
     def help(self) -> str:
-        """The step under the mouse in plain words, with its value and its time, or the line it was made with."""
+        """What the presses and the wheel do where the mouse is, or the line the table was made with.
+
+        It goes by what a press of the left button would begin there, and while a drag is under way by what
+        that drag is. A step is named with the value it has, or would have on a release now.
+        """
+        if not self.enabled:
+            return self._help
         seen, steps = self.map, self.steps
-        step = seen.step_at(self._mouse[0])
-        if self.enabled and 0 <= step < len(steps) and (inside(seen.zone, self._mouse)
-                                                         or inside(seen.strip, self._mouse)):
-            return told(step, steps, self.word)
+        kind = self._drag.kind if self._drag is not None else begins(seen, len(steps), self.loop, self._mouse)
+        step = min(max(seen.step_at(self._mouse[0]), 0), len(steps) - 1)
+        if kind in (DRAW, ZERO):
+            return kit.told(f"set {told(step, steps, self.word)}", ZERO_HELP, self.wheel_help)
+        if kind == SIZE:
+            return kit.told(SIZE_HELP, wheel=self.wheel_help)
+        if kind == LOOP:
+            return kit.told(LOOP_HELP if self.loop is not None else f"{LOOP_FROM} step {step + 1}",
+                            wheel=self.wheel_help)
         return self._help
 
     @help.setter
@@ -455,7 +470,8 @@ class StepTable(Widget):
     def on(self, event: Event, ui: Ui) -> bool:
         """Note where the mouse is, begin a drag at a press and carry it on to its release, and scroll.
 
-        A press is used when it begins a drag. The wheel is used with shift, by a table whose steps do not fit.
+        A press is used when it begins a drag. The wheel is used when it goes sideways on a table whose steps
+        do not fit.
         """
         if event.kind == "key":
             return False
@@ -473,11 +489,14 @@ class StepTable(Widget):
         return False
 
     def _scroll(self, event: Event) -> bool:
-        """Scroll the bars by a step of the wheel with shift held, and say whether there was anything to scroll."""
-        seen, count = self.map, len(self._steps)
-        if "shift" not in event.mods or seen.reach(count) <= seen.bars[2]:
+        """Scroll the bars by a step of the wheel that goes sideways, and say whether there was anything to scroll."""
+        way, steps = kit.wheel(event)
+        seen, count = self.map, max(len(self._steps), self.span)
+        if way != kit.ACROSS or seen.reach(count) <= seen.bars[2]:
             return False
-        self._first = replace(seen, first=seen.first - event.wheel * WHEEL_PX).within(count).first
+        self.first = replace(seen, first=seen.first - steps * kit.WHEEL_PX).within(count).first
+        if self.moved is not None:
+            self.moved(self.first)
         return True
 
     def _press(self, event: Event) -> bool:
@@ -498,7 +517,7 @@ class StepTable(Widget):
                 self.changed(self.table)
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the label and the count, the bars in the field, the repeat after them and the bracket of the loop.
+        """Draw the bars in the field, the repeat after them and the bracket of the loop.
 
         All of it is in the rectangle. While a drag is under way the bars are as its release would leave them.
         It is dim when not enabled.
@@ -509,10 +528,6 @@ class StepTable(Widget):
         ink, mark = (self.colour, theme.TEXT) if self.enabled else (theme.DIM, theme.LINE)
         left, top, wide, high = seen.bars
         with canvas.clip(self.rect):
-            x, y, w, h = seen.head
-            tally = counted(count)
-            canvas.text_in(self.text.upper(), (x, y, max(0, w - Font.width(tally) - theme.PAD), h), theme.DIM)
-            canvas.text_in(tally, seen.head, theme.DIM, "right")
             canvas.box(seen.field, theme.BACKGROUND)
             canvas.frame(seen.field, theme.LINE)
             with canvas.clip(seen.bars):

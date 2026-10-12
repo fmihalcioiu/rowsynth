@@ -12,7 +12,7 @@ import numpy as np
 
 from .. import fm
 from ..errors import RowSynthError
-from . import theme
+from . import kit, theme
 from .dials import plain
 from .layout import Rect
 from .theme import Colour
@@ -22,7 +22,7 @@ if TYPE_CHECKING:
     from .canvas import Canvas
 
 #: The number the first operator goes by, in a picture and in the help line: the file counts them from 0.
-FIRST = 0
+FIRST = 1
 
 #: The height a row of wirings is drawn for, and how far two pictures of it are apart.
 WIRING_H = 62
@@ -113,7 +113,7 @@ def _listed(ops: Sequence[int]) -> str:
 
 
 def told(algorithm: int) -> str:
-    """A wiring in plain words: `0 and 1 change 2, 2 changes 3; 3 is heard`."""
+    """A wiring in plain words, the operators by the numbers they go by: `1 and 2 change 3, 3 changes 4; 4 is heard`."""
     wired = wires(algorithm)
     changed: dict[tuple[int, ...], list[int]] = {}
     for op in sorted({op for _, op in wired.changes}):
@@ -211,14 +211,14 @@ def picture(cell: Rect, algorithm: int) -> Picture:
         (boxes[wired.feedback][0] - LOOP, boxes[wired.feedback][1] - LOOP, 2 * LOOP, 2 * LOOP))
 
 
-def cells(rect: Rect) -> list[Rect]:
-    """The rectangle of each algorithm's picture in a row of them: side by side from the left, a gap between two."""
+def cells(rect: Rect, between: int = BETWEEN) -> list[Rect]:
+    """The rectangle of each algorithm's picture in a row of them: side by side from the left, `between` apart."""
     x, y, w, h = rect
     count = len(fm.CARRIER)
     found = []
-    for width in share(max(0, w - (count - 1) * BETWEEN), [1] * count):
+    for width in share(max(0, w - (count - 1) * between), [1] * count):
         found.append((x, y, width, h))
-        x += width + BETWEEN
+        x += width + between
     return found
 
 
@@ -228,22 +228,29 @@ class Wiring(Widget):
     A picture shows the operators as numbered boxes. The heard ones are in the colour of what is on and stand on
     a base line. The others are in the colour of a song, each with a line to the one it changes. The feedback is
     a small loop on the corner of its operator. A click on a picture picks it, and `changed` is called with the
-    algorithm when that is another one. Over a picture the help line says its wiring in plain words, and
-    anywhere else it is `help`.
+    algorithm when that is another one. Two pictures are `between` pixels apart.
+
+    Over a picture the help line says that a press picks its algorithm, with its wiring in plain words, and
+    after that `wheel_help`, which is what the wheel does there: the widget leaves the wheel to what lies under
+    it. Anywhere else the line is `help`.
     """
 
     def __init__(self, rect: Rect, algorithm: int = 0, changed: Callable[[int], object] | None = None,
-                 help: str = "") -> None:
+                 help: str = "", between: int = BETWEEN, wheel_help: str = "") -> None:
         super().__init__(rect, help)
         self.algorithm = _whole(algorithm)
         self.changed = changed
+        self.between = between
+        self.wheel_help = wheel_help
         self._mouse: Pos = NOWHERE
 
     @property
     def help(self) -> str:
-        """The wiring of the picture under the mouse in plain words, or the line the widget was made with."""
+        """What a press does on the picture under the mouse, with its wiring, or the line the widget was made with."""
         over = self.at(self._mouse)
-        return self._help if over is None else told(over)
+        if over is None:
+            return self._help
+        return kit.told(f"pick algorithm {over}: {told(over)}", wheel=self.wheel_help)
 
     @help.setter
     def help(self, line: str) -> None:
@@ -251,7 +258,8 @@ class Wiring(Widget):
 
     def at(self, pos: Pos) -> int | None:
         """The algorithm whose picture a position is on, or None when it is on none."""
-        return next((index for index, cell in enumerate(cells(self.rect)) if inside(cell, pos)), None)
+        return next((index for index, cell in enumerate(cells(self.rect, self.between))
+                     if inside(cell, pos)), None)
 
     def pick(self, algorithm: int) -> None:
         """Pick an algorithm, and tell. Picking the one that is picked changes nothing."""
@@ -275,7 +283,7 @@ class Wiring(Widget):
     def draw(self, canvas: Canvas) -> None:
         """Draw the eight pictures. The picked one is lit and outlined in the colour of what is on."""
         over = self.at(self._mouse) if self.hot else None
-        for algorithm, cell in enumerate(cells(self.rect)):
+        for algorithm, cell in enumerate(cells(self.rect, self.between)):
             picked = algorithm == self.algorithm
             wired, seen = wires(algorithm), picture(cell, algorithm)
             inks = [theme.ACTIVE if op in wired.heard else theme.SONG for op in range(len(seen.boxes))]
@@ -518,17 +526,21 @@ class Envelope(Widget):
     falls while the note is held. The widget saves nothing. `changed` is called with the operator each time a
     move of a drag makes it another, and `settled` once when the drag ends and the operator is another than it
     was at the press: both get it as the file would hold it. Setting `op` drops a drag that is under way, so an
-    owner that reads the file each frame leaves it alone while the widget is `busy`. Over a point the help line
-    names it and what it is set to, and anywhere else it is `help`.
+    owner that reads the file each frame leaves it alone while the widget is `busy`.
+
+    Over a point the help line says that a press drags it, with its name and what it is set to, and after that
+    `wheel_help`, which is what the wheel does there: the widget leaves the wheel to what lies under it.
+    Anywhere else the line is `help`.
     """
 
     def __init__(self, rect: Rect, op: dict, changed: Callable[[dict], object] | None = None,
                  settled: Callable[[dict], object] | None = None, colour: Colour = theme.ACTIVE,
-                 seconds: float | None = None, help: str = "") -> None:
+                 seconds: float | None = None, help: str = "", wheel_help: str = "") -> None:
         super().__init__(rect, help)
         self.changed = changed
         self.settled = settled
         self.colour = colour
+        self.wheel_help = wheel_help
         self.seconds = seconds
         self._mouse: Pos = NOWHERE
         self._drag: _Drag | None = None
@@ -568,9 +580,11 @@ class Envelope(Widget):
 
     @property
     def help(self) -> str:
-        """The point under the mouse, or the one that is dragged, with what it is set to. Else the widget's line."""
+        """What a press does on the point under the mouse, or on the one that is dragged. Else the widget's line."""
         point = self._live()
-        return self._help if point is None else said(point, settings(self._op))
+        if point is None:
+            return self._help
+        return kit.told(f"drag the {said(point, settings(self._op))}", wheel=self.wheel_help)
 
     @help.setter
     def help(self, line: str) -> None:

@@ -13,9 +13,9 @@ from rowsynth import fm
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
-from rowsynth.gui.fmview import (ATTACK, DECAY, HOLD, POINTS, RANGES, RELEASE, SUSTAIN, WIRING_H, Envelope, Map, Wires,
-                                 Wiring, cells, falling, length, moments, moved, nearest, picture, places, said,
-                                 settings, told, wires)
+from rowsynth.gui.fmview import (ATTACK, DECAY, FIRST, HOLD, POINTS, RANGES, RELEASE, SUSTAIN, WIRING_H, Envelope, Map,
+                                 Wires, Wiring, cells, falling, length, moments, moved, nearest, picture, places,
+                                 said, settings, told, wires)
 from rowsynth.gui.font import Font
 from rowsynth.gui.ui import Event, Ui
 
@@ -117,16 +117,18 @@ class Wirings(unittest.TestCase):
                     differs = not np.array_equal(tone(algorithm, quiet), tone(algorithm, quiet, 0.9))
                     self.assertEqual(differs, reaches(wired, wired.feedback, quiet), (algorithm, sorted(quiet)))
 
-    def test_a_wiring_in_plain_words(self) -> None:
+    def test_a_wiring_in_plain_words_has_the_operators_by_the_numbers_1_to_4(self) -> None:
+        # The file counts the operators from 0. On the window the first is operator 1.
+        self.assertEqual(FIRST, 1)
         self.assertEqual([told(algorithm) for algorithm in range(8)], [
-            "0 changes 1, 1 changes 2, 2 changes 3; 3 is heard",
-            "0 and 1 change 2, 2 changes 3; 3 is heard",
-            "1 changes 2, 0 and 2 change 3; 3 is heard",
-            "0 changes 1, 1 and 2 change 3; 3 is heard",
-            "0 changes 1, 2 changes 3; 1 and 3 are heard",
-            "0 changes 1, 2 and 3; 1, 2 and 3 are heard",
-            "0 changes 1; 1, 2 and 3 are heard",
-            "none changes another; 0, 1, 2 and 3 are heard",
+            "1 changes 2, 2 changes 3, 3 changes 4; 4 is heard",
+            "1 and 2 change 3, 3 changes 4; 4 is heard",
+            "2 changes 3, 1 and 3 change 4; 4 is heard",
+            "1 changes 2, 2 and 3 change 4; 4 is heard",
+            "1 changes 2, 3 changes 4; 2 and 4 are heard",
+            "1 changes 2, 3 and 4; 2, 3 and 4 are heard",
+            "1 changes 2; 2, 3 and 4 are heard",
+            "none changes another; 1, 2, 3 and 4 are heard",
         ])
 
 
@@ -195,6 +197,11 @@ class Laid(unittest.TestCase):
         self.assertEqual([cell[:3:2] for cell in cells((0, 0, 640, 40))],
                          [(0, 75), (81, 75), (162, 74), (242, 75), (323, 75), (404, 75), (485, 74), (565, 75)])
         self.assertEqual([cell[2] for cell in cells((0, 0, 30, 40))], [0] * 8)
+        # An owner with a narrow row has them closer, or with nothing between two.
+        self.assertEqual([cell[:3:2] for cell in cells((0, 0, 523, 62), 0)],
+                         [(0, 65), (65, 66), (131, 65), (196, 66), (262, 65), (327, 65), (392, 66), (458, 65)])
+        shown = Wiring((0, 0, 523, 62), between=0)
+        self.assertEqual([shown.at((x, 30)) for x in (0, 64, 65, 522, 523)], [0, 0, 1, 7, None])
 
 
 class Picked(unittest.TestCase):
@@ -234,13 +241,19 @@ class Picked(unittest.TestCase):
         self.shown.pick(0)
         self.assertEqual((self.shown.algorithm, self.told), (0, [0]))
 
-    def test_the_help_line_says_the_wiring_under_the_mouse_in_plain_words(self) -> None:
+    def test_the_help_line_says_that_a_press_picks_the_algorithm_under_the_mouse_and_how_it_is_wired(self) -> None:
         said_here = []
         for place in ((3 + 80 + 30, 40), (3 + 4 * 80 + 30, 40), (3 + 4 * 80 + 76, 40)):
             self.ui.handle(Event("move", place))
             said_here.append(self.ui.help)
-        self.assertEqual(said_here, ["0 and 1 change 2, 2 changes 3; 3 is heard",
-                                     "0 changes 1, 2 changes 3; 1 and 3 are heard", "how the four operators are wired"])
+        self.assertEqual(said_here, ["press: pick algorithm 1: 1 and 2 change 3, 3 changes 4; 4 is heard",
+                                     "press: pick algorithm 4: 1 changes 2, 3 changes 4; 2 and 4 are heard",
+                                     "how the four operators are wired"])
+        # What the wheel does there comes last. The owner says it, since the wheel is left to what lies under.
+        self.shown.wheel_help = "along the operators"
+        self.assertEqual(self.ui.handle(Event("wheel", (3 + 30, 40), wheel=1)), False)
+        self.assertEqual(self.ui.help, "press: pick algorithm 0: 1 changes 2, 2 changes 3, 3 changes 4; 4 is heard   "
+                                       "wheel: along the operators")
 
 
 class Sums(unittest.TestCase):
@@ -474,15 +487,18 @@ class Handled(unittest.TestCase):
         for place in (*SPOTS, (36, 22), (50, 40)):
             self.ui.handle(Event("move", place))
             said_here.append(self.ui.help)
-        self.assertEqual(said_here, ["attack: 0.2 s", "decay: 0.3 s, level 0.5", "sustain: falls 0 dB a second",
-                                     "release: 0.2 s", "attack: 0.2 s",
+        self.assertEqual(said_here, ["press: drag the attack: 0.2 s", "press: drag the decay: 0.3 s, level 0.5",
+                                     "press: drag the sustain: falls 0 dB a second", "press: drag the release: 0.2 s",
+                                     "press: drag the attack: 0.2 s",
                                      "how the level of the operator rises and falls"])
         # While a point is dragged the line is its own, with what a release now would give.
         self.ui.handle(Event("down", (64, 49), button=1))
         self.ui.handle(Event("move", (59, 34)))
-        self.assertEqual(self.ui.help, "decay: 0.25 s, level 0.8")
+        self.assertEqual(self.ui.help, "press: drag the decay: 0.25 s, level 0.8")
+        # What the wheel does there comes last. The owner says it, since the wheel is left to what lies under.
+        self.shown.wheel_help = "along the operators"
         self.ui.handle(Event("move", (34, 24)))
-        self.assertEqual(self.ui.help, "decay: 0 s, level 1")
+        self.assertEqual(self.ui.help, "press: drag the decay: 0 s, level 1   wheel: along the operators")
 
 
 @unittest.skipUnless(pygame, NEEDS)
@@ -563,7 +579,7 @@ class Drawn(unittest.TestCase):
                                  {theme.ACTIVE if heard else theme.SONG})
                 self.assertEqual(self.at(x + 1, y + 1), theme.ACTIVE if heard else theme.BACKGROUND)
                 self.assertEqual(self.ink((x + 1, y + 1, 9, 9), theme.BACKGROUND if heard else theme.SONG),
-                                 self.written(str(op), (x, y, w, h)))
+                                 self.written(str(op + FIRST), (x, y, w, h)))
             # The base line and what stands on it, and each line from a changing one to the one it changes.
             self.assertLessEqual(pixels(seen.base, *seen.stems), self.ink(cell, theme.ACTIVE))
             self.assertLessEqual(pixels(*itertools.chain(*seen.lines)), self.ink(cell, theme.SONG))

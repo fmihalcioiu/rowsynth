@@ -1,10 +1,10 @@
-"""The middle of the window for an instrument: its wave, tables and knobs, its FM voice, and a keyboard to try it on."""
+"""The middle of the window for an instrument: its wave, its settings, its tables or FM voice, and keys to try it."""
 from __future__ import annotations
 
 import copy
 import re
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from functools import partial
 from typing import TYPE_CHECKING
@@ -13,7 +13,7 @@ import numpy as np
 
 from ..edit import NOTHING, steps
 from ..errors import RowSynthError
-from ..fm import CARRIER, ENVELOPE, _SILENT, _algorithm
+from ..fm import CARRIER, ENVELOPE, FEEDBACK_OPERATOR, _SILENT, _algorithm
 from ..note import DEFAULT_RATE
 from ..osc import WAVES
 from . import theme
@@ -21,64 +21,68 @@ from .channelbar import tidy
 from .dials import Knob, Stepper, plain
 from .fmview import FIRST, POINTS, WIRING_H, Envelope, Wiring, settings, wires
 from .font import Font
+from .kit import ALONG, Bar, Heading, ScrollBar, Slot, told, wheel
 from .layout import Rect
 from .model import inst_of, inst_place, own
 from .panels import Panel, within
 from .scope import TEXT_H, Scope, Spectrum
 from .session import piano
-from .tables import StepTable
-from .theme import Colour
-from .ui import NOWHERE, Choice, Event, Label, Pos, Toggle, Ui, Widget, draw_button, inside, share
+from .tables import INSET, MOST, Map, StepTable, counted, fit
+from .ui import NOWHERE, Choice, Event, Label, Pos, Toggle, Ui, Widget, inside, share
 
 if TYPE_CHECKING:
     from ..project import Project
     from .canvas import Canvas
     from .session import Session
 
-#: From the sides of the panel to its two boxes, and between the two.
+#: From the sides of the panel to its parts, and from one part to the next: as the panel of a song has them.
 MARGIN = 4
-#: How high the box of the heading is, from its sides to its words, and between two things it says. The heading
-#: of an operator has that much between its two things as well.
-HEAD_H = 17
-HEAD_PAD = 5
-HEAD_SPACE = 8
-#: From the outline of the lower box to the page in it.
-PAD = 4
-#: From one part of the page to the next, and from one table to the next.
+GAP = 2
+#: From one row of the main area to the next, and from the ruler to the first row under it.
+ROW_GAP = 3
+#: How high the ruler of the steps is, and every how many steps it has a number.
+RULER_H = 10
+RULER_EVERY = 8
+#: In the side column: from its frame to the words of a row, and from the top of a row to its name.
+SIDE_PAD = 5
+SIDE_TOP = 3
+#: How high the row of a table is at the least, and that of an operator: its envelope is no lower.
+TABLE_MIN = 36
+ENV_MIN = 45
+#: A knob: how high it is with its two lines, and how wide at the least in the settings bar. A knob there whose
+#: name is wider has the room of its name, and a pixel free at each end.
+KNOB_H = theme.BAR_ROW_H
+KNOB_W = 33
+#: The knobs of an operator, which stand in its row before its envelope: how wide each is, and between two.
+DIAL_W = 37
+DIAL_GAP = 4
+#: From the knobs of an operator to its envelope, and between two parts of the foot.
 SPACE = 6
-TABLE_GAP = 3
-#: How high the line of the wave is: its buttons are small ones.
-ROW_H = 13
-#: How wide an icon of a wave is, as the set file has them.
-ICON = 9
-#: How high a table is at the least, for each share it has of the height of the tables.
-TABLE_UNIT = 15
-#: How high the row of the knobs is, how wide a knob with its two lines is at the most, and between two knobs.
-KNOB_H = 37
-KNOB_W = 54
-KNOB_GAP = 4
-#: The keyboard: how high, how wide at the most, how many octaves, and how wide the stepper of its octave. It is
-#: as high as the scope and the spectrum beside it need to be read, and those two share the room by these shares.
+#: How far apart the pictures of the wirings are: they share the width of a row, which is just enough for them.
+WIRING_GAP = 0
+#: In the foot: from its frame to what stands in it, from side to side. The keyboard: how high, how wide at the
+#: most, how many octaves, and how wide the stepper of its octave. It is as high as the scope and the spectrum
+#: beside it need to be read, and those two share the room by these shares.
+FOOT_PAD = 6
 KEYS_H = 56
 KEYS_W = 196
 OCTAVES = 2
 OCTAVE_W = 36
 BESIDE = (2, 3)
-#: How high the envelope of an operator is at the least, and the shares by which the envelopes and the tables
-#: under them take the height that the page of an FM instrument has to spare.
-ENV_MIN = 45
-SPARE = (3, 2)
-#: How many pixels one step of the wheel scrolls a page that does not fit, and how wide the thumb that shows it.
-WHEEL_PX = 24
-THUMB_W = 2
-#: The rectangle of a widget that has no room: one for which the page that is laid out has no part.
+#: The rectangle of a widget that has no room: one for which the panel as it is laid out has no part.
 OFF = (0, 0, 0, 0)
 
-#: What the heading and the line of the wave read, and the toggle of the short noise.
+#: What the heading reads before the name, the switch of the short noise with its two states, and the word over
+#: the keyboard.
 INSTRUMENT = "INSTRUMENT"
-WAVE = "WAVE"
-BUZZ = "BUZZ"
-#: What stands over the column of an operator before its number, and after it what the operator does in the wiring.
+SHORT = "SHORT NOISE"
+IS_ON, IS_OFF = "ON", "OFF"
+TRY = "TRY IT"
+#: What the side column calls the row of the wirings, and what the picked one is called: under its name, and in
+#: a step that can be taken back.
+WIRING = "WIRING"
+ALGORITHM = "algorithm"
+#: What the side column calls an operator before its number, and under that what the operator does in the wiring.
 OPERATOR = "OPERATOR"
 HEARD = "HEARD"
 CHANGES = "CHANGES"
@@ -91,7 +95,7 @@ USUAL = "pulse"
 #: The operators of an FM voice, by their numbers in the file, and the wiring the engine takes for an instrument
 #: that names none.
 OPERATORS = range(CARRIER.shape[1])
-WIRING = _algorithm({})
+USUAL_WIRING = _algorithm({})
 #: What the engine takes for an operator that an instrument leaves out: one that is silent.
 SILENT = _SILENT
 #: The operators an instrument with none is given when the FM wave is first picked for it, so that it is heard:
@@ -117,14 +121,20 @@ PIANO = tuple(key for key in "abcdefghijklmnopqrstuvwxyz0123456789" if piano(key
 _AT = re.compile(r"@(\w+)", re.ASCII)
 
 
+def turned(what: str, back: str) -> str:
+    """The line of help of a knob: what a drag of it is for, what a right press puts it back to, and the wheel."""
+    return told(f"drag up or down {what}, slower with shift", f"back to {back}", "steps it")
+
+
 @dataclass(frozen=True)
 class Table:
     """One step table an instrument can have: its key in the file, and how it is shown.
 
-    text is its label and word what one of its values is called. low and high are the range the mouse draws in,
-    and absent what the engine takes for every tick where the instrument has no such table. share is its share
-    of the height of the tables. wave is the one wave that uses it, None for all of them, and unused what its
-    help line says under any other wave.
+    text is its name in the side column, and in small letters what a change to it is called in a step that can
+    be taken back. word is what one of its values is called. low and high are the range the mouse draws in, and
+    absent what the engine takes for every tick where the instrument has no such table. help is what it does to
+    the sound. wave is the one wave that uses it, None for all of them, and unused what its help line says
+    under any other wave.
     """
 
     key: str
@@ -133,7 +143,6 @@ class Table:
     low: float
     high: float
     absent: float
-    share: int
     help: str
     wave: str | None = None
     unused: str = ""
@@ -143,9 +152,10 @@ class Table:
 class Number:
     """One number of an instrument that a knob holds: its place in the instrument, and how it is shown.
 
-    text is the knob's label and words what the setting is called in a step that can be taken back. The knob
+    text is the knob's name and words what the setting is called in a step that can be taken back. The knob
     goes from low to high in so many steps. absent is what the engine takes where the instrument has no such
-    number: a knob put there is taken out of the file.
+    number: a knob put there is taken out of the file. needs is what the help line says while the knob takes
+    no mouse, for one that has such times.
     """
 
     key: str
@@ -156,86 +166,93 @@ class Number:
     steps: int
     absent: float
     help: str
+    needs: str = ""
 
 
 #: The step tables, from the top. A file may hold any number in most of them, so the ranges are chosen here:
-#: the loudness and the width are the engine's own, a jump and a sweep go an octave each way, and the filter
+#: the volume and the width are the engine's own, an arpeggio and a pitch go an octave each way, and the cutoff
 #: goes up to 8000 Hz, with 0 for none.
 TABLES = (
-    Table("vol", "LOUDNESS", "loudness", 0, 15, 15, 3,
-          "how loud a note is tick by tick, 0 to 15: drag to draw it, and the handle at its end makes it longer"),
-    Table("duty", "PULSE WIDTH", "width", 0, 3, 2, 2,
+    Table("vol", "VOLUME SHAPE", "volume", 0, 15, 15, "how loud a note is tick by tick, from 0 to 15"),
+    Table("duty", "PULSE WIDTH", "pulse width", 0, 3, 2,
           "the shape of the pulse tick by tick: 0 is thin and sharp, 1 fuller, 2 square and hollow, 3 sounds like 1",
-          "pulse", "only the pulse wave has a width: with another wave this table does nothing"),
-    Table("arp", "JUMP", "jump", -12, 12, 0, 3,
+          "pulse", "only the pulse wave has a pulse width: with another wave this table does nothing"),
+    Table("arp", "ARPEGGIO", "arpeggio", -12, 12, 0,
           "semitones above or below its note that the sound jumps to at each tick: a fast round is heard as a chord"),
-    Table("pitch", "SWEEP", "sweep", -12, 12, 0, 3,
+    Table("pitch", "PITCH", "pitch", -12, 12, 0,
           "semitones the note moves by at each tick and keeps: under the line it falls, as a kick or a zap does"),
-    Table("lp", "FILTER", "filter", 0, 8000, 0, 3,
+    Table("lp", "CUTOFF", "cutoff", 0, 8000, 0,
           "how much of the high end is left tick by tick: all above this many hertz is dulled, and 0 dulls nothing"),
 )
-#: The numbers, from the left. The three of the vibrato are parts of one setting, which is there with its depth.
+#: What the two other knobs of the vibrato say while it has no depth.
+NO_VIBRATO = "there is no vibrato to set: turn VIBRATO DEPTH up first"
+#: The numbers, in the order they stand in the settings bar. The three of the vibrato are parts of one setting,
+#: which is there with its depth.
 NUMBERS = (
-    Number("gain", "LEVEL", "level", 0, 2, 200, 1,
-           "how loud the instrument is beside the others, as a factor on its loudness: a right click is 1 again"),
-    Number("release", "FADE", "fade", 0, 60, 60, 2,
-           "how many ticks a note takes to fade away once it is let go: a right click is 2 again"),
-    Number("gate", "HELD FOR", "held for", 0.05, 1, 95, 0.9,
-           "the share of its length a note of a song is held for before it is let go: the keys here do not go by it"),
+    Number("gain", "VOLUME", "volume", 0, 2, 200, 1,
+           turned("for how loud the instrument is beside the others", "1")),
+    Number("release", "RELEASE", "release", 0, 60, 60, 2,
+           turned("for the ticks a note takes to fade once let go", "2")),
+    Number("gate", "GATE", "gate", 0.05, 1, 95, 0.9,
+           turned("for the share of its length a song holds a note", "0.9")),
     Number("slide", "SLIDE", "slide", -24, 24, 96, 0,
-           "semitones a second the note keeps sliding by for as long as it sounds, up or down"),
-    Number("vib.depth", "VIBRATO", "vibrato", 0, 2, 200, 0,
-           "how far the note wavers up and down, in semitones: at 0 it does not waver"),
-    Number("vib.delay", "VIB WAIT", "vibrato wait", 0, 60, 60, 0,
-           "how many ticks into a note the wavering starts: it needs VIBRATO above 0"),
-    Number("vib.rate", "VIB RATE", "vibrato rate", 1, 20, 38, 6,
-           "how many times a second the note wavers: it needs VIBRATO above 0"),
-    Number("res", "RING", "ring", 0, 0.98, 98, 0,
-           "how strongly the filter rings at the pitch where it starts to dull: it needs the FILTER table"),
-    Number("key_scale", "KEY TILT", "key tilt", -12, 12, 48, 0,
-           "decibels louder for each octave above middle c and quieter for each below: under 0 high notes are quiet"),
+           turned("for the semitones a second a note keeps sliding", "0")),
+    Number("vib.depth", "VIBRATO DEPTH", "vibrato depth", 0, 2, 200, 0,
+           turned("for how far the note wavers, in semitones", "0")),
+    Number("vib.delay", "DELAY", "vibrato delay", 0, 60, 60, 0,
+           turned("for the ticks before a note starts to waver", "0"), NO_VIBRATO),
+    Number("vib.rate", "RATE", "vibrato rate", 1, 20, 38, 6,
+           turned("for how many times a second the note wavers", "6"), NO_VIBRATO),
+    Number("res", "RESONANCE", "resonance", 0, 0.98, 98, 0,
+           turned("for how the cutoff rings, heard with a CUTOFF table", "0")),
+    Number("key_scale", "KEY TRACKING", "key tracking", -12, 12, 48, 0,
+           turned("for the decibels louder each higher octave is", "0")),
 )
-#: The feedback of the FM wave, and the numbers of an operator beside its envelope, from the left. A file may
-#: hold any number in them, so the ranges are chosen here: they reach past everything the examples use.
+#: The feedback of the FM wave, which stands last in the settings bar, and the numbers of an operator before its
+#: envelope, from the left. A file may hold any number in them, so the ranges are chosen here: they reach past
+#: everything the examples use.
 FEEDBACK = Number("fb", "FEEDBACK", "feedback", 0, 3, 60, 0,
-                  "how far operator 0 bends its own wave, in radians: a little makes it brighter, and a lot is noise")
+                  turned(f"for how far operator {FEEDBACK_OPERATOR + FIRST} bends its own wave", "0"))
 DIALS = (
-    Number("mul", "PITCH X", "pitch times", 0, 16, 64, 1,
-           "the pitch of the operator as so many times the pitch of the note: 2 is an octave above it, 0.5 one below"),
-    Number("det", "DETUNE", "detune", -10, 10, 200, 0,
-           "hertz added to the pitch of the operator: a little sets it beating slowly against the others"),
-    Number("level", "LEVEL", "level", 0, 8, 160, 1,
-           "how loud the operator is where it is heard, and where it is not, how far it bends the ones it changes"),
+    Number("mul", "RATIO", "ratio", 0, 16, 64, 1, turned("for its pitch as so many times that of the note", "1")),
+    Number("det", "DETUNE", "detune", -10, 10, 200, 0, turned("for the hertz added to its pitch", "0")),
+    Number("level", "VOLUME", "volume", 0, 8, 160, 1,
+           turned("for how loud it is, or how far it bends another", "1")),
 )
-#: What the toggle of the short noise says of itself, under the noise wave and under any other.
-BUZZ_HELP = "noise in its short register, which is a buzz with a pitch to it"
-BUZZ_UNUSED = "only the noise wave has a short register: with another wave this does nothing"
-#: What the choice of the wave, the keyboard and the stepper of its octave say of themselves.
-WAVE_HELP = "what the sound is made of: PULSE is hollow, SAW bright, TRI soft, NOISE a hiss, FM four sines"
-KEYS_HELP = "press a key to hear it, and drag along the keys: the keys of the computer play them too"
-OCTAVE_HELP = "the octave the keyboard starts at: its lowest key is this c"
+#: What the switch of the short noise says of itself, under the noise wave and under any other.
+SHORT_HELP = told("switch the short noise on or off: it is a buzz with a pitch to it")
+SHORT_UNUSED = "only the noise wave has a short noise: with another wave this does nothing"
+#: What the choice of the wave and the stepper of the octave say of themselves, and the keyboard after the key.
+WAVE_HELP = told("pick what the sound is made of: PULSE is hollow, SAW bright, TRI soft, NOISE a hiss, FM four sines")
+OCTAVE_HELP = told("an arrow moves the keyboard an octave: its lowest key is this c", wheel="steps it")
+KEYS_HELP = "and a drag plays each key it comes onto"
 #: What the wirings and the envelope of an operator say of themselves, off their pictures and off their points, and
 #: the scope and the spectrum while they have no sound to show.
-WIRING_HELP = "which operators are heard and which change which: click a wiring to pick it"
-ENVELOPE_HELP = ("how loud the operator is over a note: drag a point to set its attack, its decay, its fall while "
-                 "held or its release")
+WIRING_HELP = "which operators are heard and which change which"
+ENVELOPE_HELP = "how loud the operator is over a note: the points set its attack, decay, fall while held and release"
 SCOPE_HELP = "a few cycles of the note played last, as the instrument sounds now"
 SPECTRUM_HELP = "what is in the note played last from low to high, and where it begins to be harsh"
-#: What the ground of the panel says of itself, where the mouse is on none of its parts.
-PAGE_HELP = ("press here and the keys of the computer play the instrument: the wheel moves the page where it does "
-             "not fit")
+#: What a press does on the ground of the panel, where the mouse is on none of its parts, and on the scroll bar.
+PAGE_HELP = "the two rows of piano keys of the computer play the instrument"
+BAR_HELP = "drag the bar to go along them, or press beside it to jump"
+#: What the wheel does over the main area, as the help lines say it: with the tables in it, and with an FM voice.
+WHEEL_TABLES = "along the tables"
+WHEEL_VOICE = "along the operators"
 
-#: How high the tables are together at the least, with the gaps between them, and the page with all its parts.
-TABLES_MIN = TABLE_UNIT * sum(table.share for table in TABLES) + TABLE_GAP * (len(TABLES) - 1)
-NEEDED = ROW_H + SPACE + TABLES_MIN + SPACE + KNOB_H + SPACE + KEYS_H
-#: The tables an FM voice reads, which stand side by side on its page, how high they are at the least, and that
-#: page with all its parts: the wirings, the heading, the envelope and the knobs of an operator, and the rest.
+#: The tables an FM voice reads: all but the width of a pulse.
 FM_TABLES = tuple(table for table in TABLES if table.wave in (None, "fm"))
-FM_TABLE_MIN = TABLE_UNIT * max(table.share for table in FM_TABLES)
-FM_NEEDED = (ROW_H + SPACE + WIRING_H + SPACE + Font.LINE + ENV_MIN + TABLE_GAP + KNOB_H + SPACE + FM_TABLE_MIN
-             + SPACE + KNOB_H + SPACE + KEYS_H)
 #: What the scope and the spectrum are handed for a note that could not be made: no sound.
 NO_SOUND = np.zeros(0, dtype=np.float32)
+
+
+def slot_w(name: str) -> int:
+    """How wide the room of a control is in the settings bar: the least a knob has, or what its name needs."""
+    return max(KNOB_W, Font.width(name) + 2)
+
+
+def beside(line: str, wheeled: str) -> str:
+    """A line of help that says something of a place, and after it what the wheel does there."""
+    return f"{line}   {told(wheel=wheeled)}"
 
 
 def note_name(pitch: int) -> str:
@@ -254,7 +271,7 @@ def _held(held: object, key: str, absent: object) -> object:
 
 
 def role(algorithm: int, op: int) -> str:
-    """What an operator does in a wiring, as the heading of its column says it: `HEARD`, or `CHANGES 1, 2`."""
+    """What an operator does in a wiring, as the side column says it under its name: `HEARD`, or `CHANGES 2, 3`."""
     wired = wires(algorithm)
     changed = ", ".join(str(to + FIRST) for source, to in wired.changes if source == op)
     return HEARD if op in wired.heard else f"{CHANGES} {changed}"
@@ -328,14 +345,12 @@ def used(found: dict[str, dict[str, int]], named: bool = True) -> str:
     return "in " + ", ".join(parts) if parts else NOWHERE_USED
 
 
-def heading(name: str, song: str | None, said: str) -> list[tuple[str, Colour]]:
-    """What the heading reads from the left, each thing with its colour: `INSTRUMENT name` and what is said of it.
+def heading(name: str, song: str | None, said: str) -> tuple[str, str]:
+    """What the heading reads after `INSTRUMENT`: the name, and the facts, which are what is said of its use.
 
-    The name is in the colour of an instrument and the rest is dim. An instrument of a song's own has its
-    song after its name, as in `INSTRUMENT lead of tune`.
+    An instrument of a song's own has its song before those, as in `INSTRUMENT lead  of tune  in 2 channels`.
     """
-    of = [] if song is None else [(f"of {song}", theme.DIM)]
-    return [(INSTRUMENT, theme.DIM), (name, theme.INSTRUMENT), *of, (said, theme.DIM)]
+    return name, said if song is None else f"of {song}  {said}"
 
 
 def keyboard(rect: Rect, low: int) -> list[tuple[int, Rect]]:
@@ -362,144 +377,209 @@ def key_at(rect: Rect, low: int, pos: Pos) -> int | None:
     return next((pitch for pitch, key in reversed(keyboard(rect, low)) if inside(key, pos)), None)
 
 
-def slack(rect: Rect, fm: bool = False) -> int:
-    """How many pixels the page of a panel can be scrolled: by how much it is higher than its room. 0 if it fits.
+@dataclass(frozen=True)
+class Row:
+    """One row of the main area: what it is called, how high it is at the least, and whether it grows.
 
-    `fm` is whether the page is that of an FM instrument.
+    A row that grows has a share of the height the view has to spare when all the rows are in it.
     """
-    return max(0, (FM_NEEDED if fm else NEEDED) - arrange(rect)["view"][3])
+
+    key: str
+    least: int
+    grows: bool = True
 
 
-def arrange(rect: Rect, scroll: int = 0, fm: bool = False) -> dict[str, Rect]:
-    """Where the parts of the panel go in its rectangle, each by what it is called.
+def rows(fm: bool = False) -> tuple[Row, ...]:
+    """The rows of the main area from the top: the tables, each by its key.
 
-    "head" is the box of the heading, along the top. "box" is the box under it, down to the foot, and "view"
-    what is inside that box, clear of its outline: those three are cut to the panel. The other parts are the
-    page, which is as wide as the view and as high, or `NEEDED` high where the view is lower: it is then
-    scrolled `scroll` pixels up, no further than to its end, and a part of it can lie outside the view.
+    With `fm` they are those of an FM instrument: the wirings ("alg"), the operators ("ops[0]" and so on), the
+    ruler of the steps ("ruler"), and under it the tables an FM voice reads.
+    """
+    if not fm:
+        return tuple(Row(table.key, TABLE_MIN) for table in TABLES)
+    return (Row("alg", WIRING_H, False), *(Row(f"ops[{op}]", ENV_MIN) for op in OPERATORS),
+            Row("ruler", RULER_H, False), *(Row(table.key, TABLE_MIN) for table in FM_TABLES))
 
-    Down the page come the line of the wave ("word", "wave" and "short"), the tables one under the other, each
-    by its key, sharing what height is left by their shares, the row of the knobs, each by its key, and at the
-    foot "octave", "keys" and beside the keyboard "scope" and "spectrum". The spectrum is as high as the
-    keyboard, and the scope as high as the box of the spectrum, which has the names of its marks under it.
 
-    With `fm` the page is that of an FM instrument, `FM_NEEDED` high at the least. In the place of the tables
-    it has the wirings ("alg") with the knob of the feedback ("fb") after them, and under those the operators
-    side by side. Each is a column: its heading ("ops[0]", and "ops[0].does" for what it does in the wiring),
-    its envelope ("ops[0].env") and under that its knobs ("ops[0].mul" and so on). Under the columns the
-    tables of `FM_TABLES` stand side by side. The envelopes and those tables take the height that is left by
-    the shares of `SPARE`. A part that only the other page has is not there.
+def heights(found: Sequence[Row], room: int) -> list[int]:
+    """How high each row is in a view `room` pixels high: its least, and a share of what is spare where all fit."""
+    spare = max(0, room - sum(row.least for row in found) - ROW_GAP * (len(found) - 1))
+    more = iter(share(spare, [1] * sum(row.grows for row in found)))
+    return [row.least + (next(more) if row.grows else 0) for row in found]
+
+
+def offsets(tall: Sequence[int]) -> list[int]:
+    """How many pixels of the rows lie over each of them, by their heights, the gap after each row counted."""
+    found, over = [], 0
+    for high in tall:
+        found.append(over)
+        over += high + ROW_GAP
+    return found
+
+
+def furthest(tall: Sequence[int], room: int) -> int:
+    """The last row a view `room` pixels high can begin at: the first from which every row after it is in view.
+
+    That is the first row when all of them fit, and the last one when not even that one fits.
+    """
+    starts = offsets(tall)
+    end = starts[-1] + tall[-1] if tall else 0
+    return next((row for row, start in enumerate(starts) if end - start <= room), max(0, len(tall) - 1))
+
+
+def tops(tall: Sequence[int], first: int, room: int) -> list[int | None]:
+    """How far under the top of a view each row begins, when the view begins at the row `first`.
+
+    None is for a row that is not wholly in the view: one before the first, the one the view ends in, and every
+    row after that one.
+    """
+    starts = offsets(tall)
+    found: list[int | None] = []
+    for row, (start, high) in enumerate(zip(starts, tall)):
+        at = start - starts[first]
+        found.append(at if row >= first and at + high <= room else None)
+    return found
+
+
+def skeleton(rect: Rect) -> dict[str, Rect]:
+    """The parts every editor has, in the rectangle of the panel, each by what it is called.
+
+    "head" is the heading, `theme.HEAD_H` high, and under it "bar" the settings bar, `theme.BAR_H` high. "foot"
+    is at the lower end, `theme.FOOT_H` high. "main" is what is left between the bar and the foot: "side" is
+    the column down its left, `theme.SIDE_W` wide, and "body" the rest of it.
     """
     x, y, w, h = rect
-    box = within((x + MARGIN, y + 2 * MARGIN + HEAD_H, w - 2 * MARGIN, h - 3 * MARGIN - HEAD_H), rect)
-    view = within((box[0] + PAD, box[1] + PAD, box[2] - 2 * PAD, box[3] - 2 * PAD), box)
-    placed = {"head": within((x + MARGIN, y + MARGIN, w - 2 * MARGIN, HEAD_H), rect), "box": box, "view": view}
-    left, top, wide, high = view
-    needed = FM_NEEDED if fm else NEEDED
-    page = max(high, needed)
-    at = top - min(max(scroll, 0), page - high)
+    left, wide, end = x + MARGIN, w - 2 * MARGIN, y + h - MARGIN
+    bar = y + MARGIN + theme.HEAD_H + GAP
+    top = bar + theme.BAR_H + GAP
+    foot = max(top, end - theme.FOOT_H)
+    high = max(0, foot - GAP - top)
+    return {"head": (left, y + MARGIN, wide, theme.HEAD_H), "bar": (left, bar, wide, theme.BAR_H),
+            "main": (left, top, wide, high), "side": (left, top, theme.SIDE_W, high),
+            "body": (left + theme.SIDE_W + GAP, top, max(0, wide - theme.SIDE_W - GAP), high),
+            "foot": (left, foot, wide, theme.FOOT_H)}
 
-    word, short = Font.width(WAVE), Font.width(BUZZ) + 2 * theme.PAD
-    waves = sum(Font.width(name) + ICON + theme.GAP + 2 * theme.PAD for name in NAMES)
-    placed["word"] = (left, at, word, ROW_H)
-    placed["wave"] = (left + word + SPACE, at, waves, ROW_H)
-    placed["short"] = (left + word + waves + 2 * SPACE, at, short, ROW_H)
-    at += ROW_H + SPACE
 
-    if fm:
-        knob = min(KNOB_W, wide)
-        placed["alg"] = (left, at, max(0, wide - knob - SPACE), WIRING_H)
-        placed[FEEDBACK.key] = (left + wide - knob, at + (WIRING_H - KNOB_H) // 2, knob, KNOB_H)
-        at += WIRING_H + SPACE
-        more, taller = share(page - needed, SPARE)
-        tall, column = ENV_MIN + more, left
-        for op, across in enumerate(share(max(0, wide - SPACE * (len(OPERATORS) - 1)), [1] * len(OPERATORS))):
-            name = f"ops[{op}]"
-            named = min(across, Font.width(f"{OPERATOR} {op + FIRST}"))
-            said = min(across, named + HEAD_SPACE)
-            placed[name] = (column, at, named, Font.LINE)
-            placed[f"{name}.does"] = (column + said, at, across - said, Font.LINE)
-            placed[f"{name}.env"] = (column, at + Font.LINE, across, tall)
-            cell = max(0, min(KNOB_W, (across - KNOB_GAP * (len(DIALS) - 1)) // len(DIALS)))
-            for place, number in enumerate(DIALS):
-                placed[f"{name}.{number.key}"] = (column + place * (cell + KNOB_GAP),
-                                                  at + Font.LINE + tall + TABLE_GAP, cell, KNOB_H)
-            column += across + SPACE
-        at += Font.LINE + tall + TABLE_GAP + KNOB_H + SPACE
-        tall, column = FM_TABLE_MIN + taller, left
-        for table, across in zip(FM_TABLES, share(max(0, wide - SPACE * (len(FM_TABLES) - 1)), [1] * len(FM_TABLES))):
-            placed[table.key] = (column, at, across, tall)
-            column += across + SPACE
-        at += tall + SPACE
-    else:
-        room = page - needed + TABLES_MIN - TABLE_GAP * (len(TABLES) - 1)
-        for table, tall in zip(TABLES, share(room, [table.share for table in TABLES])):
-            placed[table.key] = (left, at, wide, tall)
-            at += tall + TABLE_GAP
-        at += SPACE - TABLE_GAP
+def view(rect: Rect, fm: bool = False) -> Rect:
+    """Where the rows stand in the body of a panel: beside the scroll bar, and under the ruler along its top.
 
-    cell = max(0, min(KNOB_W, (wide - KNOB_GAP * (len(NUMBERS) - 1)) // len(NUMBERS)))
-    for place, number in enumerate(NUMBERS):
-        placed[number.key] = (left + place * (cell + KNOB_GAP), at, cell, KNOB_H)
-    at += KNOB_H + SPACE
+    With `fm` the ruler is no part of the body: it is a row then, and stands over the first table.
+    """
+    x, y, w, h = skeleton(rect)["body"]
+    ruled = 0 if fm else RULER_H + ROW_GAP
+    return x, y + ruled, max(0, w - theme.SCROLL_W - theme.SCROLL_GAP), max(0, h - ruled)
 
-    keys = max(0, min(KEYS_W, wide - OCTAVE_W - SPACE))
-    beside = left + OCTAVE_W + keys + 2 * SPACE
-    scope, spectrum = share(max(0, left + wide - beside - SPACE), BESIDE)
-    placed["octave"] = (left, at + (KEYS_H - ROW_H) // 2, OCTAVE_W, ROW_H)
-    placed["keys"] = (left + OCTAVE_W + SPACE, at, keys, KEYS_H)
-    placed["scope"] = (beside, at, scope, KEYS_H - TEXT_H)
-    placed["spectrum"] = (beside + scope + SPACE, at, spectrum, KEYS_H)
-    return placed
+
+def reach(rect: Rect, fm: bool = False) -> int:
+    """The last row the view of a panel can begin at: how many steps of the wheel its rows go. 0 where all fit."""
+    room = view(rect, fm)[3]
+    return furthest(heights(rows(fm), room), room)
+
+
+def _row(key: str, row: Rect, side: int) -> dict[str, Rect]:
+    """The parts of one row that stands in a rectangle, with its two lines in the side column, which begins at `side`.
+
+    The ruler is the row itself, and has no lines. Any other row has its name and under it its facts. The row of
+    an operator has its knobs side by side from the left, in the middle of its height, and after them its envelope.
+    """
+    x, y, w, h = row
+    if key == "ruler":
+        return {key: row}
+    name = (side + SIDE_PAD, y + SIDE_TOP, theme.SIDE_W - 2 * SIDE_PAD, Font.LINE)
+    parts = {key: row, f"{key}.name": name, f"{key}.facts": (name[0], name[1] + Font.LINE, name[2], Font.LINE)}
+    if key.startswith("ops"):
+        for place, number in enumerate(DIALS):
+            parts[f"{key}.{number.key}"] = (x + place * (DIAL_W + DIAL_GAP), y + (h - KNOB_H) // 2, DIAL_W, KNOB_H)
+        taken = len(DIALS) * (DIAL_W + DIAL_GAP) - DIAL_GAP + SPACE
+        parts[f"{key}.env"] = (x + taken, y, max(0, w - taken), h)
+    return parts
+
+
+def arrange(rect: Rect, first: int = 0, fm: bool = False) -> dict[str, Rect]:
+    """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
+
+    The parts of `skeleton` are there. In the body stand "view", where the rows are, as `view` has it, "scroll",
+    the bar down its right side, and "ruler", the ruler of the steps along its top.
+
+    The rows are those of `rows`, as high as `heights` has them in the view. They stand one under the other from
+    the row `first`, which is no further than `furthest` lets it be, and only a row that is wholly in the view is
+    there. A row is there by its key: the rectangle of a table, of the wirings ("alg"), and of all of an
+    operator ("ops[0]"). Beside it in the side column are its name ("vol.name") and under that its facts
+    ("vol.facts"). An operator has its knobs ("ops[0].mul" and so on) and after them its envelope ("ops[0].env").
+    With `fm` the ruler is one of the rows, and is there while it is in view.
+
+    In the foot stand "try", the word over "octave", then "keys", and beside the keyboard "scope" and "spectrum".
+    The spectrum is as high as the keyboard, and the scope as high as the box of the spectrum, which has the
+    names of its marks under it.
+    """
+    placed = skeleton(rect)
+    left, wide = placed["main"][0], placed["main"][2]
+    body_x, body_y, body_w, _ = placed["body"]
+    x, y, across, room = placed["view"] = view(rect, fm)
+    placed["scroll"] = (body_x + body_w - theme.SCROLL_W, y, theme.SCROLL_W, room)
+    if not fm:
+        placed["ruler"] = (x, body_y, across, RULER_H)
+    found = rows(fm)
+    tall = heights(found, room)
+    first = min(max(first, 0), furthest(tall, room))
+    for row, at, high in zip(found, tops(tall, first, room), tall):
+        if at is not None:
+            placed.update(_row(row.key, (x, y + at, across, high), left))
+
+    at, top = left + FOOT_PAD, placed["foot"][1] + (theme.FOOT_H - KEYS_H) // 2
+    end = left + wide - FOOT_PAD
+    keys = max(0, min(KEYS_W, end - at - OCTAVE_W - SPACE))
+    after = at + OCTAVE_W + keys + 2 * SPACE
+    scope, spectrum = share(max(0, end - after - SPACE), BESIDE)
+    placed["try"] = (at, top, OCTAVE_W, Font.LINE)
+    placed["octave"] = (at, top + Font.LINE + SPACE, OCTAVE_W, theme.BUTTON_H)
+    placed["keys"] = (at + OCTAVE_W + SPACE, top, keys, KEYS_H)
+    placed["scope"] = (after, top, scope, KEYS_H - TEXT_H)
+    placed["spectrum"] = (after + scope + SPACE, top, spectrum, KEYS_H)
+    return {part: within(place, rect) for part, place in placed.items()}
 
 
 class Page(Widget):
     """The ground the parts of a panel stand on. It takes the press and the wheel that no part of the panel used.
 
-    A press gives it the focus, so that the keys go to the panel. `scrolled` is called with the steps of the
-    wheel, and says whether the page moved.
+    A press gives it the focus, so that the keys go to the panel. `wheeled` is handed a step of the wheel, and
+    says whether it was used. `area` is where the wheel does something: there the help line says `wheel_help`
+    after what a press does, which is the line the ground was made with.
     """
 
-    def __init__(self, rect: Rect, scrolled: Callable[[int], bool], help: str = "") -> None:
+    def __init__(self, rect: Rect, wheeled: Callable[[Event], bool], help: str = "") -> None:
         super().__init__(rect, help)
-        self.scrolled = scrolled
+        self.wheeled = wheeled
+        self.area: Rect = (0, 0, 0, 0)
+        self.wheel_help = ""
+        self._mouse: Pos = NOWHERE
+
+    @property
+    def help(self) -> str:
+        """What a press does on the ground, and over `area` what the wheel does as well."""
+        return told(self._help, wheel=self.wheel_help if inside(self.area, self._mouse) else "")
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use a press, and a step of the wheel that moves the page."""
+        """Note where the mouse is, use a press, and hand a step of the wheel on."""
+        if event.kind == "key":
+            return False
+        self._mouse = event.pos
         if event.kind == "wheel":
-            return self.scrolled(event.wheel)
+            return self.wheeled(event)
         return event.kind == "down"
 
 
 class Waves(Choice):
-    """A choice of waves by their names, each with its icon before its name in capitals."""
+    """A choice of waves, each by its name in capitals: `waves` has the names as the engine knows them."""
 
     def __init__(self, rect: Rect, waves: tuple[str, ...], changed: Callable[[int], object] | None = None,
                  help: str = "") -> None:
         super().__init__(rect, [wave.upper() for wave in waves], 0, changed, help)
         self.waves = tuple(waves)
-
-    def cells(self) -> list[Rect]:
-        """The rectangle of each wave, side by side from the left, shared out by what each shows."""
-        x, y, _, h = self.rect
-        cells = []
-        for width in share(self.rect[2], [Font.width(text) + ICON + theme.GAP + 2 * theme.PAD
-                                          for text in self.options]):
-            cells.append((x, y, width, h))
-            x += width
-        return cells
-
-    def draw(self, canvas: Canvas) -> None:
-        """Draw the waves as joined toggles with their icons. The one that is on is drawn last, whole."""
-        cells = self.cells()
-        for index in sorted(range(len(cells)), key=lambda index: index == self.picked):
-            x, y, w, h = cells[index]
-            is_on = index == self.picked
-            lit = self.hot and index == self._over
-            ink = theme.DIM if not self.enabled else theme.ACTIVE if is_on else theme.TEXT
-            # All but the last reach one pixel into the next, so that the two outlines are one line.
-            draw_button(canvas, (x, y, w + (index < len(cells) - 1), h), self.options[index], self.waves[index],
-                        ink, lit, lit and self.held, theme.ACTIVE if is_on else None)
 
 
 class Keys(Widget):
@@ -508,7 +588,8 @@ class Keys(Widget):
     A press of the left button on a key calls `played` with its pitch, and so does each other key the mouse
     comes onto while the button is kept pressed: a key is played once for as long as the mouse stays on it.
     `lit` is the pitch of the key that is drawn lit, None for none: the one played last, here or by its owner.
-    The help line names the key under the mouse.
+    The help line says that a press lets the key under the mouse be heard, by its name, and after that the
+    words the keyboard was made with.
     """
 
     def __init__(self, rect: Rect, low: int, played: Callable[[int], object] | None = None, help: str = "") -> None:
@@ -522,9 +603,9 @@ class Keys(Widget):
 
     @property
     def help(self) -> str:
-        """The name of the key under the mouse and then the line it was made with, or that line alone."""
+        """What a press does on the key under the mouse, which is named, or on a key that is not."""
         pitch = key_at(self.rect, self.low, self._mouse)
-        return self._help if pitch is None else f"{note_name(pitch)}: {self._help}"
+        return told(f"hear {'a key' if pitch is None else note_name(pitch)}, {self._help}")
 
     @help.setter
     def help(self, line: str) -> None:
@@ -568,31 +649,45 @@ class Keys(Widget):
 class InstPanel(Panel):
     """The middle of the window while an instrument is picked: every setting of it to see, to change and to hear.
 
-    The heading is the name of the instrument, and in dim words where it is used. An instrument of a song's own
-    is shown and changed as one of the project's is: `song` is then its song, which the heading names after it,
-    and it is changed at its place in the song and heard as the song has it. The heading names that song once:
-    where the instrument is used is then said with no song named. Under the heading `wave` is a choice
-    of the waves the engine has, and `short` the toggle of the short noise. `tables` are the step tables an
-    instrument can have, each by its key, one under the other, and `knobs` its numbers, each by its place in
-    the instrument. `keys` is a keyboard that plays the instrument, with `octave` to move it, and the keys of
-    the computer play it as a piano while a part of the panel has the focus. Beside the keyboard `scope` and
-    `spectrum` show the note played last, `last`, as the instrument sounds now: they are handed it when it is
-    played, and again after each change to the file, made here or outside. `settings` is from each key an
-    instrument can have in the file to the widgets that show it. With a song, a sound or nothing picked the
-    panel shows nothing.
+    It is laid out as every editor is. `heading` says what instrument it is, and in dim words where it is
+    used. An instrument of a song's own is shown and changed as one of the project's is: `song` is then its
+    song, which the heading names after it, and it is changed at its place in the song and heard as the song
+    has it. The heading names that song once: where the instrument is used is then said with no song named.
+    At the right end of the heading `wave` is a choice of the waves the engine has.
 
-    A table that the picked wave does not use is dim and takes no mouse, and so is the toggle.
+    `frame` is the settings bar: `knobs` are the numbers of the instrument, each by its place in it, and after
+    them stands `short`, the switch of the short noise. The main area has a side column and a body. `tables`
+    are the step tables an instrument can have, each by its key, one under the other in the body as rows of
+    bars, under a ruler that numbers their steps. The side column has for each its name and under that the
+    count of its steps, which are `titles` and `facts`. Every table has the same room for its steps, so a step
+    is as wide in one as in another, and a table that is scrolled sideways takes the others and the ruler
+    along. In the foot `keys` is a keyboard that plays the instrument, with `octave` to move it, and the keys
+    of the computer play it as a piano while a part of the panel has the focus: a press anywhere on the panel
+    gives it that. Beside the keyboard `scope` and `spectrum` show the note played last, `last`, as the
+    instrument sounds now: they are handed it when it is played, and again after each change to the file, made
+    here or outside. `settings` is from each key an instrument can have in the file to the widgets that show
+    it. With a song, a sound or nothing picked the panel shows nothing.
 
-    While the wave is FM the page is another one. `wiring` is the wirings of the four operators as pictures, of
-    which a click picks one, and `feedback` the knob of the feedback. Under them each operator has a column:
-    its number and what it does in the picked wiring (`names` and `roles`), in the colour the pictures have for
-    one that is heard or for one that changes another, its envelope in that colour with points to drag, and a
-    knob for each number it has beside the envelope. `operators` has, for each operator, the widget of each key
-    an operator can have in the file. An operator the file leaves out is shown as the engine takes it, silent.
-    Under the columns are the tables an FM voice reads, side by side: the one it does not read is not there.
+    A table that the picked wave does not use is dim and takes no mouse, and so is the switch. The two other
+    knobs of a vibrato that has no depth are dim as well.
+
+    While the wave is FM the main area has other rows, and the settings bar has `feedback`, the knob of the
+    feedback, after the switch. The first row is `wiring`, the wirings of the four operators as pictures, of
+    which a click picks one: the side column names the row, and under that the picked one. Then each operator
+    has a row: its knobs, one for each number it has beside the envelope, and its envelope with points to
+    drag. The side column has its number and what it does in the picked wiring (`names` and `roles`), in the
+    colour the pictures have for one that is heard or for one that changes another, and the envelope is in
+    that colour too. `operators` has, for each operator, the widget of each key an operator can have in the
+    file. An operator the file leaves out is shown as the engine takes it, silent. Under the operators stands
+    the ruler, and under that the tables an FM voice reads: the one it does not read is not there.
+
+    Rows that do not fit are not dropped. `first` is the row the view begins at, and only rows that are wholly
+    in view are seen. The wheel over the main area goes along the rows, as `kit.wheel` reads it, and changes no
+    value there: over a knob it turns the knob. `along` is the scroll bar down the side of the body, which
+    shows where the view is and can be dragged.
 
     Each change is one change to the file at the place of the instrument, and one step that can be taken back:
-    the wave, the toggle and the wiring as they are picked, a table and an envelope when the mouse lets go of
+    the wave, the switch and the wiring as they are picked, a table and an envelope when the mouse lets go of
     them, a knob when the hand has. A number put back to what the engine takes without it is taken out of the
     file, and so is a table of that one value, a vibrato with no depth, and a part of an envelope that a drag
     put there. An operator the file leaves out is written when it is changed, after silent ones for those
@@ -604,9 +699,6 @@ class InstPanel(Panel):
 
     When the model has loaded its file again, the widgets show what it holds now. One that is under the hand
     just then is left as the hand has it, and shows the file when it is let go.
-
-    What does not fit in a low panel is not dropped: the page is scrolled with the wheel, `scroll` pixels, and
-    a part that is not wholly in view is not seen.
     """
 
     def __init__(self, session: Session, ui: Ui, clock: Callable[[], float] = time.perf_counter) -> None:
@@ -619,23 +711,33 @@ class InstPanel(Panel):
                                  steps=number.steps, colour=theme.INSTRUMENT, text=number.text, help=number.help,
                                  settled=settled, clock=clock))
 
+        # The ground is under everything, and the heading and the bar under what stands on them.
         self.page = self.add(Page(OFF, self._wheel, PAGE_HELP))
-        self.word = self.add(Label(OFF, WAVE))
+        self.heading = self.add(Heading(OFF, INSTRUMENT, theme.INSTRUMENT))
         self.wave = self.add(Waves(OFF, NAMES, self._waved, WAVE_HELP))
-        self.short = self.add(Toggle(OFF, BUZZ, changed=self._buzzed, colour=theme.INSTRUMENT, help=BUZZ_HELP))
+        self.frame = self.add(Bar(OFF))
+        self.knobs: dict[str, Knob] = {number.key: knob(number, partial(self._turned, number)) for number in NUMBERS}
+        self.short = self.add(Toggle(OFF, IS_OFF, changed=self._switched, colour=theme.INSTRUMENT, help=SHORT_HELP))
+        self.feedback = knob(FEEDBACK, partial(self._turned, FEEDBACK))
         self.tables: dict[str, StepTable] = {
             table.key: self.add(StepTable(OFF, table.absent, table.low, table.high, partial(self._drawn, table),
-                                          theme.INSTRUMENT, table.text, help=table.help, word=table.word))
+                                          theme.INSTRUMENT, help=table.help, word=table.word))
             for table in TABLES}
-        self.knobs: dict[str, Knob] = {number.key: knob(number, partial(self._turned, number)) for number in NUMBERS}
-        self.wiring = self.add(Wiring(OFF, WIRING, self._wired, WIRING_HELP))
-        self.feedback = knob(FEEDBACK, partial(self._turned, FEEDBACK))
+        for table in self.tables.values():
+            table.moved = self._went
+        self.wiring = self.add(Wiring(OFF, USUAL_WIRING, self._wired, WIRING_HELP, WIRING_GAP))
+        self.titles: dict[str, Label] = {key: self.add(Label(OFF, text, theme.TEXT))
+                                         for key, text in ((*((table.key, table.text) for table in TABLES),
+                                                            ("alg", WIRING)))}
+        self.facts: dict[str, Label] = {key: self.add(Label(OFF, "")) for key in self.titles}
         self.names = [self.add(Label(OFF, f"{OPERATOR} {op + FIRST}")) for op in OPERATORS]
         self.roles = [self.add(Label(OFF, "")) for _ in OPERATORS]
         self.operators: list[dict[str, Widget]] = [
             {**{number.key: knob(number, partial(self._tuned, op, number)) for number in DIALS},
              "env": self.add(Envelope(OFF, {}, settled=partial(self._shaped, op), help=ENVELOPE_HELP))}
             for op in OPERATORS]
+        self.along = self.add(ScrollBar(OFF, self._to))
+        self.word = self.add(Label(OFF, TRY))
         self.octave = self.add(Stepper(OFF, [f"c{octave}" for octave in LOWEST], FIRST_OCTAVE, self._stepped,
                                        OCTAVE_HELP))
         self.keys = self.add(Keys(OFF, 12 * (LOWEST[FIRST_OCTAVE] + 1), self._play, KEYS_HELP))
@@ -653,20 +755,21 @@ class InstPanel(Panel):
         self.name: str | None = None
         self.song: str | None = None
         self.used = ""
-        # What the heading says of its use: that, with no song named where the heading names the song before it.
-        self._said = ""
         #: The note that is heard again after a change: the one played last on the keyboard, whose key is lit.
         self.last = self.keys.lit = A4
-        self.scroll = 0
-        #: The widgets that have a part of a page each, by what `arrange` calls the part.
-        self._placed: dict[str, Widget] = {"word": self.word, "wave": self.wave, "short": self.short, **self.tables,
-                                           **self.knobs, "alg": self.wiring, FEEDBACK.key: self.feedback,
-                                           "octave": self.octave, "keys": self.keys, "scope": self.scope,
-                                           "spectrum": self.spectrum}
+        #: The row the view of the main area begins at.
+        self.first = 0
+        #: The widgets that `arrange` has a part for, each by what the part is called.
+        self._placed: dict[str, Widget] = {**self.tables, "alg": self.wiring, "scroll": self.along,
+                                           "try": self.word, "octave": self.octave, "keys": self.keys,
+                                           "scope": self.scope, "spectrum": self.spectrum}
+        for key in self.titles:
+            self._placed.update({f"{key}.name": self.titles[key], f"{key}.facts": self.facts[key]})
         for op, column in zip(OPERATORS, self.operators):
-            self._placed.update({f"ops[{op}]": self.names[op], f"ops[{op}].does": self.roles[op],
+            self._placed.update({f"ops[{op}].name": self.names[op], f"ops[{op}].facts": self.roles[op],
                                  **{f"ops[{op}].{key}": widget for key, widget in column.items()}})
-        # Every knob there is: each has a frame of its own to take.
+        # What stands in the settings bar, which lays it out, and every knob there is: each has a frame to take.
+        self._barred: tuple[Widget, ...] = (*self.knobs.values(), self.short, self.feedback)
         self._dials = [widget for widget in self.widgets if isinstance(widget, Knob)]
         # What was read last: the picked thing, the project it was read from, and the wave of the instrument.
         self._picked: tuple[str, str] | None = None
@@ -676,6 +779,9 @@ class InstPanel(Panel):
         self._waits = False
         # What each vibrato that was taken out here had beside its depth, by the place of its instrument.
         self._vibs: dict[str, dict] = {}
+        # How many steps the tables make room for, and how many pixels of their bars are scrolled away.
+        self._span = MOST
+        self._across = 0
         self._parts = arrange(OFF)
         for key in PIANO:
             spot = (key, frozenset())
@@ -697,7 +803,8 @@ class InstPanel(Panel):
 
         The frame of a knob ends a run of the wheel whose time is up, which saves it. Another thing picked
         takes every widget at once, and what the hand was doing is dropped with nothing saved. A project
-        loaded again leaves the widget under the hand as it is, until the hand has let go.
+        loaded again leaves the widget under the hand as it is, until the hand has let go. The side column
+        counts the steps of each table as it is drawn, also while its handle is dragged.
         """
         model = self.session.model
         fresh = model.picked != self._picked
@@ -705,29 +812,32 @@ class InstPanel(Panel):
             if fresh:
                 dial.drop()
             dial.update()
-        waited = self._waits and not any(self._hand(widget) for widget in self._placed.values())
+        waited = self._waits and not any(self._hand(widget) for widget in self.widgets)
         if fresh or waited or model.project is not self._project:
             self._read(fresh)
+        self._count()
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the two boxes, the heading in the upper one, and beside a page that is scrolled its thumb."""
+        """Draw the frames of the side column and of the foot, and the ruler with the numbers of its steps."""
         if self.name is None:
             return
         parts = self._parts
         with canvas.clip(self.rect):
-            for box in (parts["head"], parts["box"]):
-                canvas.box(box, theme.PANEL)
-                canvas.frame(box, theme.LINE)
-            x, y, w, h = parts["head"]
-            at, last = x + HEAD_PAD, x + w - HEAD_PAD
-            for text, colour in heading(self.name, self.song, self._said):
-                canvas.text_in(text, (at, y, max(0, last - at), h), colour)
-                at += Font.width(text) + HEAD_SPACE
-            reach = slack(self.rect, self._wave == "fm")
-            if reach:
-                x, y, w, h = parts["view"]
-                long = max(theme.LIST_THUMB_MIN, h * h // (h + reach))
-                canvas.box((x + w + 1, y + (h - long) * self.scroll // reach, THUMB_W, long), theme.LINE)
+            for part in ("side", "foot"):
+                canvas.box(parts[part], theme.PANEL)
+                canvas.frame(parts[part], theme.LINE)
+            ruler = parts.get("ruler", OFF)
+            seen = self._steps()
+            canvas.box(ruler, theme.PANEL)
+            with canvas.clip(ruler):
+                for step in range(0, self._span, RULER_EVERY):
+                    canvas.text_in(str(step + 1), (seen.x(step), ruler[1], RULER_EVERY * seen.pitch, ruler[3]),
+                                   theme.DIM)
+
+    def _steps(self) -> Map:
+        """Where the steps are from side to side of the view: as every table has them, and the ruler with them."""
+        seen = self._parts["view"]
+        return Map(seen, 0, 1, fit(max(0, seen[2] - 2 * INSET), self._span), self._across).within(self._span)
 
     def _hand(self, widget: Widget) -> bool:
         """Whether a widget is under the hand: pressed, a knob in a run of the wheel, or an envelope in a drag."""
@@ -743,7 +853,7 @@ class InstPanel(Panel):
     def _read(self, forced: bool = False) -> None:
         """Set the widgets from what the project holds now for the picked instrument, and the heading with them.
 
-        With `forced` every widget is set. Without, one that is under the hand is left to the hand. The page
+        With `forced` every widget is set. Without, one that is under the hand is left to the hand. The panel
         is laid out again, as its wave has it, and the scope and the spectrum are handed the sound as it is now.
         """
         model = self.session.model
@@ -755,22 +865,31 @@ class InstPanel(Panel):
         self._waits = False
         if held is not None:
             found = uses(self._project, name, song)
-            self.used, self._said = used(found), used(found, song is None)
+            self.used = used(found)
+            self.heading.show(*heading(name, song, used(found, song is None)))
             self._wave = wave = held.get("wave", USUAL)
+            wheeled = WHEEL_VOICE if wave == "fm" else WHEEL_TABLES
+            self.page.wheel_help = self.wiring.wheel_help = wheeled
+            self.along.help = told(BAR_HELP, wheel=wheeled)
+            self.wiring.help = beside(WIRING_HELP, wheeled)
             self._show(self.wave, "picked", NAMES.index(wave), forced)
             self._show(self.short, "is_on", held.get("short", False), forced)
+            self.short.text = IS_ON if self.short.is_on else IS_OFF
             self.short.enabled = wave == "noise"
-            self.short.help = BUZZ_HELP if self.short.enabled else BUZZ_UNUSED
+            self.short.help = SHORT_HELP if self.short.enabled else SHORT_UNUSED
             for table in TABLES:
                 widget = self.tables[table.key]
                 self._show(widget, "table", held.get(table.key, table.absent), forced)
                 widget.enabled = table.wave in (None, wave)
-                widget.help = table.help if widget.enabled else table.unused
+                widget.wheel_help = wheeled
+                widget.help = beside(table.help if widget.enabled else table.unused, wheeled)
+                self.titles[table.key].colour = theme.TEXT if widget.enabled else theme.DIM
             for number in NUMBERS:
-                self._show(self.knobs[number.key], "value", _held(held, number.key, number.absent), forced)
-            for key in ("vib.delay", "vib.rate"):
-                self.knobs[key].enabled = "vib" in held
-            wired = held.get("alg", WIRING)
+                dial = self.knobs[number.key]
+                self._show(dial, "value", _held(held, number.key, number.absent), forced)
+                dial.enabled = not number.needs or "vib" in held
+                dial.help = number.help if dial.enabled else number.needs
+            wired = held.get("alg", USUAL_WIRING)
             self._show(self.wiring, "algorithm", wired, forced)
             self._show(self.feedback, "value", held.get(FEEDBACK.key, FEEDBACK.absent), forced)
             for op, column in zip(OPERATORS, self.operators):
@@ -778,36 +897,63 @@ class InstPanel(Panel):
                 self.roles[op].text = role(wired, op)
                 colour = theme.ACTIVE if op in wires(wired).heard else theme.SONG
                 self.names[op].colour = self.roles[op].colour = column["env"].colour = colour
+                column["env"].wheel_help = wheeled
+                column["env"].help = beside(ENVELOPE_HELP, wheeled)
                 self._show(column["env"], "op", has, forced)
                 for number in DIALS:
                     self._show(column[number.key], "value", has.get(number.key, number.absent), forced)
         self._lay()
+        self._count()
         self._trace()
 
-    def _lay(self) -> None:
-        """Give each widget its rectangle: its part of the page, scrolled no further than the page goes.
+    def _count(self) -> None:
+        """Have the side column say the picked wiring, and how many steps each table has as it is drawn."""
+        self.facts["alg"].text = f"{ALGORITHM} {self.wiring.algorithm}"
+        for key, table in self.tables.items():
+            self.facts[key].text = counted(len(table.steps))
 
-        The page is the one the wave of the instrument has, and a widget that page has no part for has no room.
+    def _lay(self) -> None:
+        """Give each widget its rectangle: its part of the panel, the rows from no further than they go.
+
+        The rows are those the wave of the instrument has, and a widget that has no part has no room. The
+        heading lays the choice of the wave out at its right end, and the settings bar its controls from its
+        left, the feedback last and only for an FM voice. Every table is given the room of the longest of them,
+        and of no fewer steps than the handle makes a table. The scroll bar is shown where the view is.
         """
         fm = self._wave == "fm"
-        self.scroll = min(max(self.scroll, 0), slack(self.rect, fm))
-        self._parts = parts = arrange(self.rect, self.scroll, fm)
+        room = view(self.rect, fm)[3]
+        tall = heights(rows(fm), room)
+        far = furthest(tall, room)
+        self.first = min(max(self.first, 0), far)
+        self._parts = parts = arrange(self.rect, self.first, fm)
+        self.page.rect, self.page.area = self.rect, parts["main"]
+        self.heading.rect, self.frame.rect = parts["head"], parts["bar"]
+        self.heading.right([self.wave])
+        slots = [Slot(number.text, self.knobs[number.key], slot_w(number.text)) for number in NUMBERS]
+        slots.append(Slot(SHORT, self.short, slot_w(SHORT)))
+        self.feedback.rect = OFF
+        self.frame.lay([*slots, Slot(FEEDBACK.text, self.feedback, slot_w(FEEDBACK.text))] if fm else slots)
         for part, widget in self._placed.items():
             widget.rect = parts.get(part, OFF)
-        self.page.rect = parts["box"]
+        starts = offsets(tall)
+        self.along.show(starts[far] + room, room, starts[self.first])
+        self._span = max(MOST, *(len(table.steps) for table in self.tables.values()))
+        self._across = self._steps().first
+        for table in self.tables.values():
+            table.span, table.first = self._span, self._across
         self._see()
 
     def _see(self) -> None:
-        """Have each widget seen or not: by whether the panel is on the window, what there is to show, and the view.
+        """Have each widget seen or not: by whether the panel is on the window, what there is to show, and its room.
 
-        A part of the page is seen only when all of it is in view, and a widget with no room is not seen.
+        A widget with no room is not seen: a row that is not wholly in view, a part of the other wave, and a
+        control the settings bar is too narrow for.
         """
         on = self.shown and self.name is not None
-        view = self._parts["view"]
-        for widget in self._placed.values():
-            _, _, w, h = widget.rect
-            widget.visible = on and w > 0 and h > 0 and within(widget.rect, view) == widget.rect
-        self.page.visible = on
+        for widget in (*self._placed.values(), *self._barred):
+            widget.visible = on and widget.rect[2] > 0 and widget.rect[3] > 0
+        for widget in (self.page, self.heading, self.wave, self.frame):
+            widget.visible = on
 
     def _trace(self) -> None:
         """Hand the scope and the spectrum the note played last, as the model makes it of the instrument now.
@@ -824,12 +970,33 @@ class InstPanel(Panel):
             self.scope.show(NO_SOUND, DEFAULT_RATE)
             self.spectrum.show(NO_SOUND, DEFAULT_RATE)
 
-    def _wheel(self, steps: int) -> bool:
-        """Scroll the page by steps of the wheel, up for up, and say whether it moved."""
-        before = self.scroll
-        self.scroll -= steps * WHEEL_PX
+    def _wheel(self, event: Event) -> bool:
+        """Go along the rows by a step of the wheel over the main area, up for up, and say whether they moved.
+
+        Only a step that goes up and down is used, and it changes no value.
+        """
+        way, count = wheel(event)
+        if way != ALONG or not inside(self._parts["main"], event.pos):
+            return False
+        before = self.first
+        self.first -= count
         self._lay()
-        return self.scroll != before
+        return self.first != before
+
+    def _to(self, offset: int) -> None:
+        """Have the view begin at the row that starts nearest to where the scroll bar was taken, in pixels."""
+        fm = self._wave == "fm"
+        room = view(self.rect, fm)[3]
+        tall = heights(rows(fm), room)
+        starts = offsets(tall)
+        self.first = min(range(furthest(tall, room) + 1), key=lambda row: abs(starts[row] - offset))
+        self._lay()
+
+    def _went(self, first: int) -> None:
+        """Have every table, and the ruler with them, scrolled sideways as far as the one the wheel was on."""
+        self._across = first
+        for table in self.tables.values():
+            table.first = first
 
     def _where(self, key: str = "") -> str:
         """The place of the instrument that is shown, or of a place in it: among the project's, or in its song."""
@@ -873,14 +1040,14 @@ class InstPanel(Panel):
         else:
             self._change("wave", wave, f"wave {wave}")
 
-    def _buzzed(self, on: bool) -> None:
+    def _switched(self, on: bool) -> None:
         """Save the short noise as it was switched: off is what the engine takes without it."""
-        self._change("short", True if on else NOTHING, f"buzz {'on' if on else 'off'}")
+        self._change("short", True if on else NOTHING, f"{SHORT.lower()} {'on' if on else 'off'}")
 
     def _drawn(self, table: Table, steps: object) -> None:
         """Save a table as the mouse left it, in the shape the file takes."""
         alone = not isinstance(steps, (list, dict))
-        self._change(table.key, NOTHING if alone and steps == table.absent else steps, f"{table.word} table")
+        self._change(table.key, NOTHING if alone and steps == table.absent else steps, f"{table.text.lower()} table")
 
     def _turned(self, number: Number, value: float) -> None:
         """Save the value a knob was left at, written as `tidy` has it and called by what the knob shows."""
@@ -907,7 +1074,7 @@ class InstPanel(Panel):
 
     def _wired(self, algorithm: int) -> None:
         """Save the wiring that was picked, at its one place."""
-        self._change("alg", algorithm, f"wiring {algorithm}")
+        self._change("alg", algorithm, f"{ALGORITHM} {algorithm}")
 
     def _tuned(self, op: int, number: Number, value: float) -> None:
         """Save the value a knob of an operator was left at, as `_turned` saves one of the instrument."""

@@ -88,13 +88,17 @@ KINDS: dict[str, tuple[str, ...]] = {
     "a held sound, the labels": ("drag to move where the loop starts", "drag to move where the loop ends",
                                  "click to work on the note", "click to work on the end"),
     "a held sound, the ruler": ("the longest time the sound may last: drag to move it", "press the right button"),
-    "a step table, a step": ("step 1 of ",),
-    "a step table, its heading and its handle": (instpanel.TABLES[0].help,),
-    "the keyboard, a key": ("c3: press a key to hear it",),
-    "the instrument, between its parts": (instpanel.PAGE_HELP,),
-    "the wirings, a picture": (fmview.told(0),),
-    "an envelope, a point": ("attack: ",),
-    "an envelope, off its points": (instpanel.ENVELOPE_HELP,),
+    "a step table, a step": ("press: set step 1 of ",),
+    "a step table, its handle": ("press: drag right for more steps, left for fewer   wheel: along the tables",),
+    "a step table, the loop under its bars": ("press: loop the table from step 1   wheel: along the tables",),
+    "a step table, off its steps": (f"{instpanel.TABLES[0].help}   wheel: along the tables",),
+    "the keyboard, a key": ("press: hear c3",),
+    "the instrument, between its parts": (f"press: {instpanel.PAGE_HELP}",
+                                          f"press: {instpanel.PAGE_HELP}   wheel: along the tables"),
+    "the instrument, its scroll bar": (f"press: {instpanel.BAR_HELP}   wheel: along the tables",),
+    "the wirings, a picture": (f"press: pick algorithm 0: {fmview.told(0)}   wheel: along the operators",),
+    "an envelope, a point": ("press: drag the attack: ",),
+    "an envelope, off its points": (f"{instpanel.ENVELOPE_HELP}   wheel: along the operators",),
     "the export, its parts": tuple(exports.HELP[part]
                                    for part in ("tabs", "stems", "change", "files", "write", "close")),
     "the export, off its parts": (exports.HELP["window"],),
@@ -381,17 +385,20 @@ class Walked(unittest.TestCase):
         cls.walk(app, "an instrument")
         table = panel.tables["vol"]
         seen = table.map
-        cls.at("a step table, a step", app, [(seen.x(0), middle(seen.zone)[1]), (seen.x(0), middle(seen.strip)[1])])
-        cls.at("a step table, its heading and its handle", app, [middle(seen.head),
-                                                                 middle(seen.handle(len(table.steps)))])
+        cls.at("a step table, a step", app, [(seen.x(0), middle(seen.zone)[1])])
+        cls.at("a step table, its handle", app, [middle(seen.handle(len(table.steps)))])
+        cls.at("a step table, the loop under its bars", app, [(seen.x(0), middle(seen.strip)[1])])
+        cls.at("a step table, off its steps", app, [(seen.zone[0] + seen.zone[2] - 1, middle(seen.zone)[1])])
         cls.at("the keyboard, a key", app, [middle(instpanel.keyboard(panel.keys.rect, panel.keys.low)[0][1])])
         cls.at("the instrument, between its parts", app, [next(pos for pos in across(panel.page.rect, 1)
-                                                              if over(app.ui, pos) is panel.page)])
+                                                              if over(app.ui, pos) is panel.page),
+                                                         middle(panel.page.area)[:1] + (panel.page.area[1] + 1,)])
+        cls.at("the instrument, its scroll bar", app, [middle(panel.along.rect)])
         drive = json.loads((EXAMPLES / "piece.json").read_text(encoding="utf-8"))["instruments"]["fmdrive"]
         cls.change(app, "instruments.fmdrive", drive)
         session.pick("instrument", "fmdrive")
         cls.walk(app, "an FM instrument")
-        cls.at("the wirings, a picture", app, [middle(fmview.cells(panel.wiring.rect)[0])])
+        cls.at("the wirings, a picture", app, [middle(fmview.cells(panel.wiring.rect, panel.wiring.between)[0])])
         envelope = panel.operators[0]["env"]
         cls.at("an envelope, a point", app, [envelope.map.spots(fmview.settings(envelope.op))[0]])
         cls.at("an envelope, off its points", app, [next(pos for pos in across(envelope.rect, 1)

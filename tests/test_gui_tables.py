@@ -11,8 +11,8 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
-from rowsynth.gui.tables import (DRAW, FAINT, GAP, LOOP, MOST, SIZE, ZERO, Map, StepTable, at, begins, counted, fit,
-                                 passed, read, sized, told, write)
+from rowsynth.gui.tables import (DRAW, FAINT, GAP, LOOP, LOOP_HELP, MOST, SIZE, SIZE_HELP, ZERO, Map, StepTable, at,
+                                 begins, counted, fit, passed, read, sized, told, write)
 from rowsynth.gui.ui import Event, Ui
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -29,9 +29,9 @@ NEEDS = "pygame is not installed"
 SHIFT = frozenset({"shift"})
 
 #: A table whose bars are in (12, 32, 116, 45): three rows of pixels to a level from 0 to 15, the foot at y 77.
-RECT = (10, 20, 120, 64)
+RECT = (10, 30, 120, 54)
 #: One whose bars are in (12, 32, 116, 49): from -12 to 12 that is two rows to a semitone round a zero line at y 56.
-TALL = (10, 20, 120, 68)
+TALL = (10, 30, 120, 58)
 #: The surface they are drawn on, which is larger on every side, and the colour of what is not theirs.
 SIZE_PX = (140, 110)
 OUTSIDE = theme.GOOD
@@ -90,7 +90,8 @@ class Shapes(unittest.TestCase):
 class Sums(unittest.TestCase):
     def test_the_parts_of_the_rectangle(self) -> None:
         seen = Map(RECT, 0, 15)
-        self.assertEqual((seen.head, seen.field, seen.bars), ((10, 20, 120, 10), (10, 30, 120, 49), (12, 32, 116, 45)))
+        # The field begins at the top: the name of a table and the count of its steps are written by its owner.
+        self.assertEqual((seen.field, seen.bars), ((10, 30, 120, 49), (12, 32, 116, 45)))
         self.assertEqual((seen.zone, seen.strip), ((12, 30, 116, 49), (12, 79, 116, 5)))
         # After eight bars: the handle, and the bars of the ticks past the end. Under them the bracket of a loop.
         self.assertEqual((seen.handle(8), seen.after(8, 0), seen.after(8, 2)), ((92, 30, 3, 49), 96, 116))
@@ -353,35 +354,81 @@ class Handled(unittest.TestCase):
         self.ui.handle(Event("move", (35, 50)))
         self.assertEqual(self.ui.help, "the level at each tick")
 
-    def test_the_help_line_names_the_step_under_the_mouse_with_its_value_and_its_time(self) -> None:
-        self.table(help="the level at each tick", word="level")
+    def said(self, *places: tuple[int, int]) -> list[str]:
+        """What the help line says with the mouse rested at each of some places."""
         said = []
-        for place in ((35, 50), (85, 31), (35, 81), (35, 25), (93, 50), (120, 50)):
+        for place in places:
             self.ui.handle(Event("move", place))
             said.append(self.ui.help)
-        self.assertEqual(said, ["step 3 of 8: level 12, at 0.03 s", "step 8 of 8: level 2, at 0.12 s",
-                                "step 3 of 8: level 12, at 0.03 s"] + ["the level at each tick"] * 3)
+        return said
+
+    def test_the_help_line_says_what_the_presses_do_on_the_step_under_the_mouse_which_it_names(self) -> None:
+        shown = self.table(help="the level at each tick", word="level")
+        # The left press, then the right one. Above the table there is no line, and right of the handle it is
+        # the line the table was made with.
+        self.assertEqual(self.said((35, 50), (85, 31), (35, 29), (120, 50)),
+                         ["press: set step 3 of 8: level 12, at 0.03 s   right press: back to zero",
+                          "press: set step 8 of 8: level 2, at 0.12 s   right press: back to zero",
+                          "", "the level at each tick"])
         # While a drag is under way the value is the one its release would give.
         self.ui.handle(Event("down", (35, 62), button=1))
         self.ui.handle(Event("move", (45, 74)))
-        self.assertEqual(self.ui.help, "step 4 of 8: level 1, at 0.05 s")
+        self.assertEqual(self.ui.help, "press: set step 4 of 8: level 1, at 0.05 s   right press: back to zero")
+        self.ui.handle(Event("up", (45, 74), button=1))
+        # What the wheel does there comes last. The owner says it, since the wheel is left to the owner.
+        shown.wheel_help = "along the tables"
+        self.assertEqual(self.said((85, 50)), ["press: set step 8 of 8: level 2, at 0.12 s   right press: back to "
+                                              "zero   wheel: along the tables"])
 
-    def test_the_wheel_is_not_used_and_with_shift_it_scrolls_a_table_whose_steps_do_not_fit(self) -> None:
+    def test_the_handle_and_the_loop_under_the_bars_each_have_a_line_of_their_own(self) -> None:
+        shown = self.table(help="the level at each tick", wheel_help="along the tables")
+        self.assertEqual(self.said((93, 50), (35, 81)),
+                         [f"press: {SIZE_HELP}   wheel: along the tables",
+                          "press: loop the table from step 3   wheel: along the tables"])
+        self.assertEqual(SIZE_HELP, "drag right for more steps, left for fewer")
+        # With a loop the press under the bars takes hold of its start, up to the step it begins at. On the
+        # bracket further along a press does nothing, and the line is the one the table was made with.
+        shown.table = {"v": VOL, "loop": 3}
+        self.assertEqual(self.said((15, 81), (45, 81), (55, 81)),
+                         [f"press: {LOOP_HELP}   wheel: along the tables"] * 2 + ["the level at each tick"])
+        self.assertEqual(LOOP_HELP, "drag the start of the loop, off the left end to take the loop away")
+        # While the handle is dragged the line stays that of the handle, wherever the mouse has got to.
+        self.ui.handle(Event("down", (93, 50), button=1))
+        self.assertEqual(self.said((60, 40)), [f"press: {SIZE_HELP}   wheel: along the tables"])
+
+    def test_only_the_wheel_that_goes_sideways_is_used_and_only_by_a_table_whose_steps_do_not_fit(self) -> None:
         shown = self.table()
-        for mods in (frozenset(), SHIFT):
+        for mods in (frozenset(), SHIFT, frozenset({"ctrl"})):
             self.assertFalse(self.ui.handle(Event("wheel", (35, 50), wheel=-1, mods=mods)))
         self.ui.widgets.clear()
         shown = self.table([1] * MOST)
-        self.assertFalse(self.ui.handle(Event("wheel", (35, 50), wheel=-1)))
+        moved: list[int] = []
+        shown.moved = moved.append
+        # Up and down, and with ctrl, the wheel is left to what lies under the table: it changes no value.
+        for mods in (frozenset(), frozenset({"ctrl"})):
+            self.assertFalse(self.ui.handle(Event("wheel", (35, 50), wheel=-1, mods=mods)))
         self.assertTrue(self.ui.handle(Event("wheel", (35, 50), wheel=-1, mods=SHIFT)))
-        self.assertEqual((shown.map.first, shown.map.bar, shown.map.step_at(12)), (24, 2, 8))
+        self.assertEqual((shown.first, shown.map.first, shown.map.bar, shown.map.step_at(12), moved),
+                         (36, 36, 2, 12, [36]))
         # A press is on the step that is drawn there.
         self.drag((12, 32))
-        self.assertEqual(self.told, [[1] * 8 + [15] + [1] * 55])
+        self.assertEqual((self.told, shown.table), ([[1] * 12 + [15] + [1] * 51], [1] * 12 + [15] + [1] * 51))
         self.ui.handle(Event("wheel", (35, 50), wheel=-9, mods=SHIFT))
         self.assertEqual(shown.map.first, 79)
         self.ui.handle(Event("wheel", (35, 50), wheel=99, mods=SHIFT))
-        self.assertEqual(shown.map.first, 0)
+        self.assertEqual((shown.map.first, moved), (0, [36, 79, 0]))
+
+    def test_tables_under_one_ruler_have_room_for_as_many_steps_and_go_sideways_as_one(self) -> None:
+        short, long = self.table(), self.table([1] * 100, rect=(10, 90, 120, 54))
+        self.assertEqual((short.map.bar, long.map.bar), (9, 2))
+        # Given the count of the longest, a step is as wide in the short one, and at the same place.
+        short.span = long.span = 100
+        self.assertEqual((short.map.bar, [short.map.x(step) for step in (0, 7)]),
+                         (2, [long.map.x(step) for step in (0, 7)]))
+        # Its owner has it go along with the one the wheel was on: it goes as far, though its own steps fit.
+        long.moved = lambda first: setattr(short, "first", first)
+        self.assertTrue(self.ui.handle(Event("wheel", (35, 110), wheel=-2, mods=SHIFT)))
+        self.assertEqual((long.map.first, short.map.first, short.map.x(24), long.map.x(24)), (72, 72, 12, 12))
 
     def test_another_table_is_shown_when_it_is_set_and_one_that_was_not_changed_keeps_its_shape(self) -> None:
         shown = self.table([15])
@@ -492,20 +539,18 @@ class Drawn(unittest.TestCase):
         self.assertEqual(self.ink(RECT, faint), cells(*((56 + 10 * turn, 62, 9, 15) for turn in range(7)),
                                                       (126, 62, 2, 15)))
 
-    def test_the_label_is_above_at_the_left_in_capitals_and_the_count_at_the_right(self) -> None:
-        wide = (10, 20, 122, 64)
-        shown = self.table(rect=wide, text="level")
+    def test_no_word_is_drawn_and_a_step_the_handle_adds_is_drawn_while_it_is_dragged(self) -> None:
+        wide = (10, 30, 122, 54)
+        shown = self.table(rect=wide)
         self.draw()
-        head = (10, 20, 122, 10)
-        label = self.written("LEVEL", (10, 20, 29, 10), "left")
-        self.assertEqual(self.ink(head, theme.DIM), label | self.written("8 steps, 0.13 s", head, "right"))
-        # While the handle is dragged, the count is the one the release would give.
+        # The name and the count are written beside the table by its owner: nothing in it is in the dim colour.
+        self.assertEqual(self.ink(wide, theme.DIM), set())
+        # While the handle is dragged, the steps are the ones the release would give.
         self.ui.handle(Event("down", (93, 50), button=1))
         self.ui.handle(Event("move", (103, 50)))
         self.draw()
-        self.assertEqual(self.ink(head, theme.DIM), label | self.written("9 steps, 0.15 s", head, "right"))
         self.assertEqual(len(self.ink(wide, theme.ACTIVE) - self.ink((12, 32, 80, 45), theme.ACTIVE)), 9 * 6)
-        self.assertEqual(shown.steps[-1], 2)
+        self.assertEqual((shown.steps[-1], counted(len(shown.steps))), (2, "9 steps, 0.15 s"))
 
     def test_a_table_that_is_not_enabled_is_dim(self) -> None:
         shown = self.table({"v": VOL, "loop": 2})
@@ -523,7 +568,7 @@ class Drawn(unittest.TestCase):
             self.draw()
             return all(self.at(*pos) == OUTSIDE for pos in around)
 
-        shown = self.table({"v": [15] * MOST, "loop": 0}, text="a label that is far too long for its line")
+        shown = self.table({"v": [15] * MOST, "loop": 0})
         self.assertTrue(clean())
         self.ui.handle(Event("wheel", (35, 50), wheel=-9, mods=SHIFT))
         self.assertTrue(clean())
@@ -536,8 +581,8 @@ class Drawn(unittest.TestCase):
         self.ui.handle(Event("down", (93, 50), button=1))
         self.ui.handle(Event("move", (700, -90)))
         self.assertTrue(clean())
-        for small in ((10, 20, 30, 12), (10, 20, 3, 40), (10, 20, 0, 0)):
-            self.table({"v": PITCH, "loop": 1}, -12, 12, small, text="sweep")
+        for small in ((10, 30, 30, 12), (10, 30, 3, 40), (10, 30, 0, 0)):
+            self.table({"v": PITCH, "loop": 1}, -12, 12, small)
             self.assertTrue(clean())
 
     def test_the_tables_of_every_instrument_of_the_examples_are_read_drawn_and_written_back(self) -> None:
