@@ -6,11 +6,12 @@
 
 | Part | Holds |
 |---|---|
-| Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end the count of findings: a green tick with 0, or a red sign with how many |
-| The list on the left | `SONGS`, `SOUNDS` and `INSTRUMENTS` by name. A click picks one, and Space plays what is picked |
-| The middle | What is picked. A song is a strip of blocks along the top, one for each pattern in its order, and under it `NOTES`, `MIXER` or `LAYERS`. A sound is its notes on a timeline over its wave. An instrument is its wave, its tables as bars, its knobs and a keyboard |
-| The inspector on the right | `MEASURED`: the figures of what is picked, as `LENGTH`, `PEAK`, `LOUDNESS`, `OFFSET`, `CLIPPED`, `START`, `END`, `HIGHS` and `BRIGHTNESS`, with one that breaks a rule in red. `FOUND`: the findings of `check` in words |
-| Status line | What the window has to say, and help for whatever the mouse is on. At its right end is what is picked, as in `SONG tune` |
+| Title row | The name of the file, and buttons to minimise, maximise and close. The window has it in place of the system's frame |
+| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, and at the right end the count of findings: a green tick with 0, or a red sign with how many |
+| The list on the left | `SONGS`, `SOUNDS` and `INSTRUMENTS` by name, with a `+` after the last of each. A click picks one, and Space plays what is picked |
+| The middle | What is picked. The three editors are laid out alike: a heading, one bar with the knobs, the main area, and a foot. A song has a strip of blocks, one for each pattern in its order, and `NOTES`, `MIXER` or `LAYERS` under it. A sound is its notes beside a keyboard on a clock of seconds, over its wave. An instrument is its tables as bars beside their names, over a keyboard to try it on |
+| The inspector on the right | `MEASURED`: the figures of what is picked, as `LENGTH`, `PEAK`, `LOUDNESS`, `OFFSET`, `CLIPPED`, `START`, `END`, `HIGHS`, `BRIGHTNESS` and for a song or a held sound `LOOP JOIN`, with one that breaks a rule in red. `FOUND`: the findings of `check` in words |
+| Status line | What the window has to say, and for whatever the mouse is on what a press, a right press and the wheel do there. At its right end is what is picked, as in `SONG tune` |
 
 Every change the person makes is written to the file as they make it, in the layout `set` writes. There is no Save. Each change is a step, and Ctrl+Z takes the last one back.
 
@@ -47,8 +48,9 @@ Say what you changed and where it is, in the words the window uses:
 
 - A song: its name in the list on the left, then the block of the pattern in the strip along the top, then the channel in the list under `NOTES`. Space plays the song and stops it. With `FOLLOW` on, as it is when the window opens, the pattern that is shown goes along with the playing.
 - One channel among the others: `MIXER`, and `S` on that channel to hear it alone, or `M` to hear the song without it.
-- A sound or an instrument: a click on its name in the list plays it. A song or a sound that plays an instrument you changed has changed with it.
-- A level, a pan or an echo of a channel: the knobs over its notes, and its fader in `MIXER`.
+- A sound or an instrument: a click on its name in the list shows it, and Space plays it. Nothing plays by itself. A song or a sound that plays an instrument you changed has changed with it.
+- The volume, the pan or the echo of a channel: `VOLUME`, `PAN` and `ECHO` in the bar over its notes, and its fader in `MIXER`.
+- A knob of an instrument or of a sound: the window names them `VOLUME`, `RELEASE`, `GATE`, `RESONANCE`, `KEY TRACKING`, and the tables `VOLUME SHAPE`, `PULSE WIDTH`, `ARPEGGIO`, `PITCH` and `CUTOFF`, for `gain`, `release`, `gate`, `res`, `key_scale`, `vol`, `duty`, `arp`, `pitch` and `lp` of the file.
 - The findings: the count at the right end of the top bar, and `FOUND` in the inspector, where a click on a finding goes to the thing it is in.
 - If they do not want the change: Ctrl+Z, with the window in front.
 

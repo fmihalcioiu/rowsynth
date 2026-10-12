@@ -350,59 +350,90 @@ python -m rowsynth gui examples/piece.json
 
 The window shows a project file as something to click on. Notes are placed with the mouse and heard as they are placed, and every change is written to the file as it is made. It works on the same files as the commands, and the two can work on one file at the same time.
 
-It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels: the largest square at which the screen still has room for the whole of it. The window can be resized.
+It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels: the largest square at which the screen still has room for the whole of it.
+
+The window has a title row of its own in place of the system's: the name of the file, and buttons to minimise, to maximise and to close. A drag on the row moves the window, a double press on it maximises, and the edges and corners resize. Where that cannot be set up, the window opens with the frame of the system.
 
 ### The parts of the screen
 
 | Part | What it is for |
 |---|---|
-| Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end how many findings `check` has for the project |
-| The list on the left | The songs, the sounds and the instruments. A click picks one, and Space plays what is picked. The right button on one renames it, copies it or deletes it, and anywhere else in the list it makes a new one |
+| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, and at the right end how many findings `check` has for the project |
+| The list on the left | The songs, the sounds and the instruments. A click picks one, and Space plays what is picked. After the last of each kind stands a `+` that makes a new one. The `+` of the instruments offers `Empty` and a few ready instruments to start from |
 | The middle | What is picked, to change: a song, an instrument or a sound, each as below |
-| The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in. A finding with one sure repair has a `FIX` button: a channel that is short of its pattern, a song or a sound that is too loud, a group that a version names twice. `FIX ALL` makes all of them as one step |
-| Status line | One line of help for whatever the mouse is on, and what the window has to say. At its right end is what is picked |
+| The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in. A finding with one sure repair has a `FIX` button, and `FIX ALL` makes all of them as one step |
+| Status line | One line for whatever the mouse is on: what a press does there, what a right press does, and what the wheel does. At its right end is what is picked |
 
-After every change the picked thing is rendered again and the checks are run again, so the numbers and the findings are those of the file as it is.
+The borders between the list, the middle and the inspector are dragged to give one of them more room.
+
+The three editors of the middle are laid out alike. At the top is a heading with the name of the thing and the buttons that act on all of it. Under it is one bar with the knobs of what is picked inside. Then comes the main area with a column of names at its side, and at the foot what comes out of it: the velocity of the notes, the wave, or the scope.
+
+After every change the picked thing is rendered again and the checks are run again, so the numbers and the findings are those of the file as it is. Nothing plays by itself: a pick or a change is silent, and a note that is placed is heard alone.
+
+### The mouse and the wheel
+
+They do the same in every view.
+
+| Where | Press | Right press |
+|---|---|---|
+| An empty place on a grid of notes, drum steps or a step table | puts a note, a hit or a value there; a drag draws along | |
+| A note, a hit, a step | picks it; a drag moves it, and by its right end makes it longer or shorter | rubs it out |
+| A thing with a name: a row of a list, a block, a tab, a channel, a drum, a group, a version, a chord | picks it; twice renames it, where its name can be changed | opens its menu: `Rename...`, `Copy`, what is special to it, `Remove` |
+| A knob or a fader | a drag turns it, a tenth as fast with Shift | puts it back to its usual value |
+| A button with a small arrow | opens its list | |
+
+Shift and a drag on a grid draw a box that picks notes, and Ctrl and a press add a note to the picked ones.
+
+The wheel goes up and down over a grid or a list: along the keys, the lanes or the rows. With Shift it goes sideways, along the time. With Ctrl it zooms the time. A view that only goes one way, as the song strip and the mixer do, goes that way with the wheel alone. Over a knob, a fader or a stepper the wheel changes its value, and nowhere else does it change one. A view that scrolls has a thin bar on the side it scrolls along, which can be dragged.
+
+Wherever there can be one more of something, a `+` stands after the last one.
 
 ### Songs
 
-Along the top is the song as a strip of blocks, one for each pattern in its `order`, with the notes drawn small. A click on a block shows that pattern underneath. A block is dragged to another place in the order, and with Ctrl held it is copied there as a new pattern. The right button on a block opens a menu: play its pattern again after it, copy it as a new pattern, put an empty pattern after it, rename it, set its length in bars, or take the block out of the order.
+The heading has `NOTES`, `MIXER` and `LAYERS`, which choose what the main area shows, and `CHORDS`, which lists the chords of the project: a `+` makes one from a root and a kind, and the menu of a chord renames it, changes it or removes it.
 
-`NOTES`, `MIXER` and `LAYERS` choose what stands under the strip.
+Under the heading is the song as a strip of blocks, one for each pattern in its `order`, with the notes drawn small. A click on a block shows that pattern. A block is dragged to another place in the order, and with Ctrl held it is copied there as a new pattern. The menu of a block plays its pattern again after it, copies it, puts an empty pattern after it, renames it, sets its length in bars, or takes the block out of the order.
 
-`NOTES` has the channels at the left, the tuned ones and the drum channels apart, and at the right the picked channel in the picked pattern. Over the notes are the channel's instrument, level, pan and echo. The right button on a channel renames it, moves it up or down, makes a new channel or removes it.
+The bar has the picked channel's `INSTRUMENT`, `VOLUME`, `PAN` and `ECHO` with its `TIME` and `AMOUNT`. At its right end are `TEMPO`, `GRID` and `KEY`. `TEMPO` steps through the tempos a song can have: a row lasts a whole number of ticks, so at four rows to a beat they are 900 over that number. `GRID` is the rows of a beat, and offers only the grids at which the song sounds the same and every note stays on a row. The two buttons of `KEY` move every tuned note a semitone down or up.
 
-- A tuned channel is a piano roll. A click on the grid places a note. A note is dragged to move it, dragged by its right end to make it longer or shorter, and removed with the right button. Shift and a drag draw a box that picks notes, and Ctrl and a click add a note to the picked ones. The lane under the grid holds the level of each note. A channel plays one note at a time, so a note placed where another still sounds cuts that one short. The wheel moves along the keys, with Shift along the rows, and with Ctrl it zooms. `GHOSTS` draws the notes of the other channels dim behind, and `FOLLOW` has the pattern that is shown go along with the playing.
-- A drum channel is a grid of steps: a lane for each drum and a square for each row, with all the drum channels of the pattern together. A click puts a hit or takes one away, a drag does so along the lane, and the wheel on a hit sets its level.
-- Over the piano roll a strip names the chord of each bar, and the keys of that chord are lit across the bar. A click on a bar picks its chord from those of the project, or makes a new one from a root and a kind. A note that the `chords` rule would find is outlined in red, also while it is still being dragged.
+`NOTES` has the channels at the side, the tuned ones and the drum channels apart, and beside them the picked channel in the picked pattern.
 
-The grid is the rows. A pattern with a note that starts or ends between two rows, as a triplet does, is shown and is not changed here.
+- A tuned channel is a piano roll. A channel plays one note at a time, so a note placed where another still sounds cuts that one short. Under the grid is the velocity of each note as a bar to drag. Over it a strip names the chord of each bar, and the keys of that chord are lit across the bar; a click on a bar picks its chord. A note that the `chords` rule would find is outlined in red, also while it is dragged. `GHOSTS` draws the notes of the other channels dim behind, and `FOLLOW` has the pattern that is shown go along with the playing.
+- A drum channel is a grid of steps: a lane for each drum with its name at the side, and a square for each row, with all the drum channels of the pattern together. A press puts a hit or takes one away, and a drag does so along the lane. The velocity lane has the hits of the lane pressed in last. The `+` under the last lane adds a drum to the song under a letter, and the menu of a lane sets its `Instrument`, its `Note...`, its `Length...` and its `Velocity...`.
+- The menu of a channel also moves it up or down and makes a tuned channel a drum channel or back, while it has no notes.
 
-`MIXER` has every channel side by side: a fader and a meter each, `M` to mute it and `S` to solo it, and a fader for the whole song. A mute or a solo is a way of listening. It is not written to the file, and it is not a step that is taken back.
+The grid is the rows. A pattern with a note that starts or ends between two rows, as a triplet does at four rows to a beat, is shown and is not changed here.
 
-`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade. The right button on a version renames it, removes it, or has it premixed in a key. A press on the field of the keys opens a menu to hear the song in one of them. With more groups or versions than fit, the wheel moves along the groups, and over the headings along the versions.
+`MIXER` has every channel side by side: a fader for its volume and a meter each, `M` to mute it and `S` to solo it, and a fader for the whole song. A mute or a solo is a way of listening. It is not written to the file, and it is not a step that is taken back.
 
-`TEMPO` steps through the tempos a song can have. A row lasts a whole number of ticks, so at four rows to a beat they are 900 over that number, from 40 to 300 beats a minute. The two buttons of `KEY` move every tuned note of the song a semitone down or up.
+`LAYERS` has the groups of the song against its versions as a table of switches, a button on each version to hear it alone, the keys, and the intro with its patterns, its tail and its fade. A press on the field of the keys opens a list to hear the song in one of them or to remove one. The menu of a version also has it premixed in a key.
 
 ### Instruments
 
-An instrument has its wave as a row of buttons, its step tables as bars and its numbers as knobs. A table is drawn with the mouse: a press or a drag sets every step it passes, the right button sets them to zero, the handle after the last bar makes the table longer or shorter, and the bracket under the bars is its loop. A knob is dragged up and down, a tenth as fast with Shift held, or turned with the wheel, and a right click puts it back to what the engine takes when the file has no value.
+The heading has the wave as a row of buttons. The bar has every knob of the instrument: `VOLUME`, `RELEASE`, `GATE`, `SLIDE`, the vibrato's `DEPTH`, `DELAY` and `RATE`, `RESONANCE`, `KEY TRACKING` and the switch `SHORT NOISE`. A knob is dragged up and down, a tenth as fast with Shift held, or turned with the wheel, and a right press puts it back to what the engine takes when the file has no value.
 
-A song's own instruments stand in the list after the project's, each with the name of its song beside it, and are changed in the same way. The right button on one deletes it or makes it shared, which moves it to the instruments of the project.
+The main area has the step tables as bars, each beside its name: `VOLUME SHAPE`, `PULSE WIDTH`, `ARPEGGIO`, `PITCH` and `CUTOFF`. A table is drawn with the mouse: a press or a drag sets every step it passes, a right press puts a step back to zero, the handle after the last bar makes the table longer or shorter, and the bracket under the bars is its loop.
 
-With the FM wave the eight wirings are pictures to click, and each of the four operators has its envelope as a line with points to drag, and knobs of its own.
+With the FM wave the main area has the eight wirings as pictures to click, and under them the four operators, each with `RATIO`, `DETUNE`, `VOLUME` and its envelope as a line with points to drag. The bar then has `FEEDBACK` as well.
 
 At the foot is a keyboard of two octaves to try the instrument on. Beside it a scope shows a few cycles of the note played last, and a spectrum where its energy sits from low to high. The spectrum has a line at 4 kHz and the share of the energy above it, which is what the `bright` rule goes by.
 
+A song's own instruments stand in the list after the project's, each with the name of its song beside it, and are changed in the same way. The menu of a project's instrument copies it into the song as its own, and the menu of an own one renames it, removes it or makes it shared, which moves it to the instruments of the project.
+
 ### Sounds
 
-A sound is a timeline in seconds: its notes as bars, each voice in a colour of its own, and under them the wave of the sound on the same clock. Notes are placed, moved, stretched and removed as in the piano roll, on a grid of ticks. Over the timeline are the voices, to pick the one a new note goes into and to add or remove one, then the instrument of the picked voice, the level of the sound, and its echo. Each return of the echo is drawn as a fainter copy of the bars, as much later as it is heard.
+A sound is laid out as a channel of a song is: a keyboard and a grid, here on a clock of seconds, with the velocity of the notes and the wave of the sound at the foot on the same clock. Notes are placed, moved, stretched and rubbed out as in the piano roll, on a grid of ticks, and the keyboard scrolls and zooms as it does there. With the mouse on the wave, the status line says the pitch that is heard at that moment.
 
-The variants of a sound lie one after the other on the timeline, and a click on one plays it. The parts of a sound lie where they start. A held sound has its start, its loop and its end as three tinted zones, and a `HOLD` button: the sound is held for as long as the button is kept pressed, and its end is heard when the button is let go.
+The bar has the voices as tabs with a `+` after the last, then the `INSTRUMENT` of the picked voice, the `VOLUME` of the sound, and its `ECHO` with `TIME`, `AMOUNT`, `REPEATS` and `TONE`. Each return of the echo is drawn as a fainter copy of the notes, as much later as it is heard. A voice whose instrument is written in place in the file shows `its own`, and the list beside it has `Make shared...`, which gives the instrument a name among the project's.
 
-The button in the heading that reads `ONE`, `VARIANTS`, `PARTS` or `HELD` is the kind of the sound. Its menu makes the sound another kind, and each item says what the sound would lose by it. A part has a numbered tab on the clock: the tab is dragged to move where the part starts. The `+` after the last one adds a part, or a variant to a sound of variants. The right button on a tab removes the part, copies it as a new one or sets its level, and on a variant it removes the variant or moves it a place. The two borders of a held sound are dragged along the clock, and `JOIN` and `LET GO` are knobs beside its level.
+The heading has four buttons.
 
-`LIMITS` has what the checks hold the sound to: how long it may last, how far off zero and how bright it may be. The longest time is also a red line on the clock, set with the right button on the ruler and dragged from there.
+- The first reads `SINGLE`, `VARIANTS`, `PARTS` or `HELD`: the kind of the sound. Its list makes the sound another kind, and each item says what the sound would lose by it. Variants lie one after the other on the clock. A part has a numbered tab on the ruler, which is dragged to move where the part starts, and the `+` after the last one adds a part or a variant. The menu of a variant plays it, moves it a place or removes it, and the menu of a part copies it, sets its level or removes it.
+- `LIMITS` has what the checks hold the sound to: how long it may last, how far off zero and how bright it may be. The longest time is also a red line on the clock, set from the menu of the ruler and dragged from there.
+- `NOTES` has the remarks the file keeps with the sound, each a name and a text.
+- `HOLD` is there for a held sound, which has its start, its loop and its end as three tinted zones with borders to drag: the sound is held for as long as the button is kept pressed, and its end is heard when the button is let go. The bar then has `CROSSFADE` and `RELEASE` for its loop.
+
+The menu of the ruler also has `Expect a note here...`. It puts a flag on the ruler for a note the sound should play at that moment, which the checks then hold it to.
 
 ### The FILE menu
 
@@ -412,6 +443,7 @@ The button in the heading that reads `ONE`, `VARIANTS`, `PARTS` or `HELD` is the
 | `Open...` | Opens another project file in the window |
 | `Save a copy as...` | Writes the project as it is to another file. The open file stays the open one |
 | `Export...` | Opens a window with three tabs, for what `render`, `build` and `page` do: the picked sound or song as a WAV file (one variant of a sound, or one part of a held sound, where it has them), the songs for a player, or the listen page. It lists the files it will write, with their sizes where those are known and a mark on each that takes the place of a file that is there, and writes none of them until `WRITE` is pressed |
+| `Measure a WAV file...` | Asks for a WAV file and shows its numbers, the ones `measure` prints for it |
 | The files opened last | Eight at the most, each opened with a click. One that is no longer there is dim |
 | `Close` | Closes the project and shows the first screen |
 
@@ -449,7 +481,7 @@ A file that cannot be read just then, half written or no JSON, changes nothing i
 | Enter | Takes what is typed in a box, and the lit row of a menu |
 | `Z S X D C V G B H N J M` | The twelve notes from c, as on a piano. `Q 2 W 3 E R 5 T 6 Y 7 U` are the octave above, and `I 9 O 0 P` go on from there |
 
-The keys that change notes go to the piano roll or to the timeline of a sound, whichever was clicked in last. The piano keys play the channel of the piano roll, or the instrument that is shown, once it has been clicked in. In a list, Up, Down, Home and End move the pick.
+The keys that change notes go to the piano roll or to the notes of a sound, whichever was clicked in last. The piano keys play the channel of the piano roll, the picked voice of a sound, or the instrument that is shown, once it has been clicked in. In a list, Up, Down, Home and End move the pick.
 
 ## Commands
 
