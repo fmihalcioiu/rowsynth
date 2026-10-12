@@ -560,6 +560,21 @@ class Picks(unittest.TestCase):
             self.assertEqual(moved(self.NOTES, chosen, by, TABLE, 32.0), (self.NOTES, chosen))
         self.assertEqual(self.hits(moved(self.NOTES, {("kick", "k", 8)}, 23, TABLE, 32.0)[0])["kick"][-1],
                          ("k", 31.0, 7))
+
+    def test_moved_over_what_their_channel_plays_the_picked_hits_take_its_place(self) -> None:
+        # The hat goes to the row of the kick of its channel, which gives way to it. The other channel is as it was.
+        made, picks = moved(self.NOTES, {("tops", "H", 2)}, 2, TABLE, 32.0, over=True)
+        self.assertEqual((self.hits(made), picks),
+                         ({"kick": [("k", 0.0, 15), ("k", 1.0, 9), ("k", 8.0, 7)],
+                           "tops": [("H", 4.0, 15), ("s", 5.0, 12)]}, {("tops", "H", 4)}))
+        # Two that move together: one lands on a hit of its own letter, and that is one hit then, at its level.
+        made, picks = moved(self.NOTES, {("kick", "k", 0), ("tops", "k", 4)}, 1, TABLE, 32.0, over=True)
+        self.assertEqual((self.hits(made), picks),
+                         ({"kick": [("k", 1.0, 15), ("k", 8.0, 7)], "tops": [("H", 2.0, 15), ("k", 5.0, 9)]},
+                          {("kick", "k", 1), ("tops", "k", 5)}))
+        # None leaves the pattern, with it or without.
+        chosen = {("kick", "k", 0)}
+        self.assertEqual(moved(self.NOTES, chosen, -1, TABLE, 32.0, over=True), (self.NOTES, chosen))
         # A hit the notes do not have is not picked, and moves nothing.
         self.assertEqual(moved(self.NOTES, {("kick", "k", 3), ("kick", "s", 0), ("snare", "s", 0)}, 1, TABLE, 32.0),
                          (self.NOTES, frozenset()))
@@ -758,7 +773,7 @@ class Editing(unittest.TestCase):
         self.assertEqual([(note.drum, note.row) for note in notes],
                          [("k", 0.0), ("k", 1.0), ("H", 2.0), ("k", 3.0), ("k", 4.0)])
 
-    def test_a_hit_that_is_dragged_is_moved_along_its_lane_at_its_level_and_not_onto_what_its_channel_plays(
+    def test_a_hit_that_is_dragged_is_moved_along_its_lane_at_its_level_and_takes_the_place_of_what_it_lands_on(
             self) -> None:
         self.mouse("down", 0, 8, 1)
         self.mouse("move", 0, 12)
@@ -774,12 +789,19 @@ class Editing(unittest.TestCase):
         self.mouse("move", 2, 10)
         self.mouse("up", 2, 10, 1)
         self.assertEqual(len(self.told), 1)
-        # Taken to the row of the snare, which its channel plays, it stays where it is, and nothing is told.
+        # Taken over the row of the snare, which its channel plays, and on: the snare is passed, and is there.
         self.mouse("down", 0, 0, 1)
         self.mouse("move", 0, 4)
-        self.assertEqual(self.steps.notes("kit"), KIT)
+        self.mouse("move", 0, 5)
+        self.assertEqual([(note.drum, note.row) for note in self.steps.notes("kit")],
+                         [("s", 4.0), ("k", 5.0), ("k", 8.0), ("H", 10.0)])
+        # Let go on the row of the snare, the kick takes its place there.
+        self.mouse("move", 0, 4)
+        seen = self.steps.notes("kit")
+        self.assertEqual([(note.drum, note.row, note.level) for note in seen],
+                         [("k", 4.0, 15), ("k", 8.0, 7), ("H", 10.0, 12)])
         self.mouse("up", 0, 4, 1)
-        self.assertEqual((len(self.told), self.steps.picks), (1, {("kit", "k", 0)}))
+        self.assertEqual(self.told[1:], [("kit", seen, "hit moved")])
 
     def test_a_drag_on_a_picked_hit_moves_the_picked_hits_along_their_lanes_or_none_of_them(self) -> None:
         self.owned()
@@ -793,12 +815,14 @@ class Editing(unittest.TestCase):
         self.mouse("up", 2, 12, 1)
         self.assertEqual((self.told, self.steps.picks),
                          ([("kit", seen, "2 hits moved")], {("kit", "k", 2), ("kit", "H", 12)}))
-        # Two squares on, the kick would be on the row of the snare, and three back it would leave the pattern:
-        # neither of the two moves. One square back both do.
+        # Three squares back the kick would leave the pattern: neither of the two moves. Two squares on, the
+        # kick is on the row of the snare, which gives way while it is there. One square back both are free.
         self.mouse("down", 2, 12, 1)
-        for row in (14, 9):
-            self.mouse("move", 2, row)
-            self.assertEqual(self.steps.notes("kit"), seen)
+        self.mouse("move", 2, 9)
+        self.assertEqual(self.steps.notes("kit"), seen)
+        self.mouse("move", 2, 14)
+        self.assertEqual([(note.drum, note.row) for note in self.steps.notes("kit")],
+                         [("k", 4.0), ("k", 8.0), ("H", 14.0)])
         self.mouse("move", 2, 11)
         self.mouse("up", 2, 11, 1)
         self.assertEqual(([label for _, _, label in self.told], self.steps.picks),

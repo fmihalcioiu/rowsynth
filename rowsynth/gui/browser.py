@@ -35,6 +35,7 @@ LIST_HELP = f"what the project holds   {told(right=RIGHT, wheel=WHEEL)}"
 #: What the first of the ready instruments reads, which is none of them, and the two things the menu of an
 #: instrument has that no other menu has.
 EMPTY = "Empty"
+EMPTY_OWN = "Empty in this song"
 MAKE_SHARED = "Make shared"
 INTO_SONG = "Copy into this song"
 
@@ -129,9 +130,10 @@ class Browser(Panel):
     A click on one picks it in the session. What the session has picked is the picked row, whoever picked it.
 
     After the last thing of each section stands a row that makes one more, with its button in `plus` by the
-    kind of thing: a new song, a new sound, and for an instrument a short list to choose from, `Empty` and the
-    ready instruments of `projectedit.STARTERS` by name. A ready one comes under its own name, or the next
-    free one after it.
+    kind of thing: a new song, a new sound, and for an instrument a short list to choose from, `Empty`,
+    `Empty in this song` and the ready instruments of `projectedit.STARTERS` by name. A ready one comes under
+    its own name, or the next free one after it. `Empty in this song` makes an instrument of a song's own:
+    of the song that is picked, or was picked last, and with no such song the item is dim.
 
     The right button on a thing opens its menu at the mouse, as `kit.thing_menu` orders it: to give it another
     name, to copy it and to remove it. A double press on a thing opens the box for its name as well. On a
@@ -208,7 +210,9 @@ class Browser(Panel):
             self._add(kind)
             return
         x, y, _, h = self.list.row_rect((NEW, kind)) or self.list.rect
-        items = [Item(EMPTY, lambda: self._add(kind)), None,
+        into = self._target()
+        items = [Item(EMPTY, lambda: self._add(kind)),
+                 Item(EMPTY_OWN, lambda: self._own(into), enabled=into is not None), None,
                  *(Item(name, lambda name=name: self._start(name)) for name in projectedit.STARTERS)]
         self.ui.open(Menu(items, (x, y + h), chosen=lambda act: act()))
 
@@ -273,6 +277,13 @@ class Browser(Panel):
         name = projectedit.free(data, kind, like)
         self._do(lambda: projectedit.added(data, kind, name, like),
                  f"new {kind} {name}" if like is None else f"{kind} {like} copied as {name}", (kind, name))
+
+    def _own(self, song: str) -> None:
+        """Make a new instrument of a song's own, the smallest that is heard, under a free name, and pick it."""
+        data = self._data()
+        name = projectedit.own_free(data, song)
+        self._do(lambda: projectedit.own_added(data, song, name), f"new instrument {name} of {song}",
+                 ("instrument", f"{song}.{name}"))
 
     def _start(self, starter: str) -> None:
         """Make a new instrument that is a copy of a ready one, under its name or the next free one, and pick it."""

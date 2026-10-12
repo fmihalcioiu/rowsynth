@@ -411,19 +411,20 @@ def removed(notes: Mapping[str, Notes], picked: Iterable[Hit], drums: dict | Non
 
 
 def moved(notes: Mapping[str, Notes], picked: Iterable[Hit], by: int, drums: dict | None, rows: float,
-          rows_per_beat: int = 4) -> Edit:
+          rows_per_beat: int = 4, over: bool = False) -> Edit:
     """The picked hits moved so many rows along their lanes, at the levels they have, and the same hits picked.
 
-    Nothing moves where one of them would leave the pattern, or land on a row at which its channel plays
-    something that is not moved with it. The rest is as `removed` takes it.
+    Nothing moves where one of them would leave the pattern. Where one would land on a row at which its channel
+    plays something that is not moved with it, nothing moves either, unless `over`: that then gives way to
+    the hit, as it does to one that is put there. The rest is as `removed` takes it.
     """
     chosen = _live(notes, picked)
     made = dict(notes)
     for channel in sorted({hit[0] for hit in chosen} if by else ()):
         mine = sorted(row for name, _, row in chosen if name == channel)
         # What moves makes room: only what stays is in the way.
-        if any(not 0 <= row + by < rows or (row + by not in mine and _there(notes[channel], row + by) is not None)
-               for row in mine):
+        taken = (row + by for row in mine if row + by not in mine and _there(notes[channel], row + by) is not None)
+        if any(not 0 <= row + by < rows for row in mine) or (not over and any(taken)):
             return dict(notes), chosen
         taken = [_there(notes[channel], row) for row in mine]
         kept = notes[channel]
@@ -1165,13 +1166,14 @@ class Steps(Widget):
     def _try(self) -> None:
         """Work out what the gesture under way would give, and which hits it would leave picked, and show that.
 
-        A move gives what `moved` makes of the picked hits, and a box the hits it touches. The hits a put has
-        put are the picked ones, and after a take that took a hit away none is.
+        A move gives what `moved` makes of the picked hits, with what they land on giving way to them: it is
+        worked out from the notes as the drag began, so what is only passed is left. A box gives the hits it
+        touches. The hits a put has put are the picked ones, and after a take that took a hit away none is.
         """
         doing, notes = self._gesture, self._notes
         rules = (self._drums, self._rows, self._grid.beat_rows)
         if doing.kind == MOVE:
-            self._given, self._glow = moved(notes, doing.picked, doing.by, *rules)
+            self._given, self._glow = moved(notes, doing.picked, doing.by, *rules, over=True)
         elif doing.kind == BOX:
             found = boxed(self.grid, self._hits, doing.start, doing.end)
             self._given, self._glow = {}, frozenset(self._hit(square) for square in found)

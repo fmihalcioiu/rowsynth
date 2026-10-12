@@ -12,7 +12,8 @@ import numpy as np
 from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING, delete_in, set_in
 from rowsynth.errors import RowSynthError
-from rowsynth.gui.projectedit import (STARTERS, Change, added, allowed, free, fresh, own_copied, own_renamed, removed,
+from rowsynth.gui.projectedit import (STARTERS, Change, added, allowed, free, fresh, own_added, own_copied, own_free,
+                                      own_renamed, removed,
                                       renamed, shared, started, uses)
 from rowsynth.project import Project
 from rowsynth.song import render_loop
@@ -248,6 +249,32 @@ class Owned(unittest.TestCase):
         ):
             with self.subTest(message=message):
                 self.assertEqual(refusal(own_copied, *given), message)
+
+    def test_a_song_gets_a_new_instrument_of_its_own_under_a_name_neither_it_nor_the_project_has(self) -> None:
+        began = copy.deepcopy(DATA)
+        # A song with no instruments of its own gets the table with it, and one that has some gets it at its place.
+        self.assertEqual(own_added(DATA, "tune"), [("songs.tune.instruments", {"instrument": {"wave": "pulse"}})])
+        self.assertEqual(own_added(DATA, "own"), [("songs.own.instruments.instrument", {"wave": "pulse"})])
+        self.assertEqual(DATA, began)
+        # The name is one that neither the song nor the project has, so the song sounds as it did.
+        named = copy.deepcopy(DATA)
+        named["instruments"]["instrument"] = {"wave": "tri"}
+        named["songs"]["own"]["instruments"]["instrument2"] = {"wave": "saw"}
+        self.assertEqual((own_free(DATA, "own"), own_free(named, "tune"), own_free(named, "own")),
+                         ("instrument", "instrument2", "instrument3"))
+        made = applied(named, own_added(named, "own"))
+        self.assertEqual(list(made["songs"]["own"]["instruments"]), ["lead", "soft", "instrument2", "instrument3"])
+        np.testing.assert_array_equal(heard(made, "song", "own"), heard(named, "song", "own"))
+        # What is made holds: the project is one that loads.
+        Project.from_dict(made)
+        for given, message in (
+            ((DATA, "own", "lead"), "the song 'own' has an instrument called 'lead' already"),
+            ((DATA, "own", "a.b"), "an instrument cannot be called 'a.b': a name cannot hold '.'"),
+            ((DATA, "march"), "the project has no song called 'march'"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(refusal(own_added, *given), message)
+        self.assertEqual(refusal(own_free, DATA, "march"), "the project has no song called 'march'")
 
     def test_an_own_instrument_is_renamed_in_its_song_where_the_song_names_it_and_nowhere_else(self) -> None:
         data = with_buzz()

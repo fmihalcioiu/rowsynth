@@ -801,7 +801,8 @@ class Changing(unittest.TestCase):
         for text in ("bass", "bass", "Empty"):
             click(self.ui, middle(button.rect))
             menu = self.ui.modal
-            self.assertEqual([item and item.text for item in menu.items], ["Empty", None, *projectedit.STARTERS])
+            self.assertEqual([item and item.text for item in menu.items],
+                             ["Empty", "Empty in this song", None, *projectedit.STARTERS])
             # The list opens under the row of the button.
             self.assertEqual(menu.rect[1], button.rect[1] + theme.LIST_ROW_H)
             self.choose(text)
@@ -816,6 +817,34 @@ class Changing(unittest.TestCase):
         # Each is one step: taken back, the project has the instruments it had before it.
         self.assertTrue(self.session.undo() and self.session.undo())
         self.assertEqual(list(self.held()["instruments"]), ["beep", "bass"])
+
+    def test_empty_in_this_song_makes_an_instrument_of_the_song_s_own_that_was_picked_last(self) -> None:
+        button = self.side.plus["instrument"]
+        self.assertEqual(self.session.model.picked, ("song", "tune"))
+        made = []
+        for _ in range(2):
+            click(self.ui, middle(button.rect))
+            self.choose("Empty in this song")
+            self.side.update()
+            made.append((self.session.undo_label, self.session.model.picked, self.side.list.picked))
+        # The second is made with an instrument picked: it is still the song that was picked last.
+        self.assertEqual(made, [("new instrument instrument of tune", ("instrument", "tune.instrument"),
+                                 ("instrument", "tune.instrument")),
+                                ("new instrument instrument2 of tune", ("instrument", "tune.instrument2"),
+                                 ("instrument", "tune.instrument2"))])
+        held = self.held()
+        self.assertEqual([held["songs"]["tune"]["instruments"], held["instruments"]],
+                         [{"instrument": {"wave": "pulse"}, "instrument2": {"wave": "pulse"}}, THINGS["instruments"]])
+        self.assertIn(Row(("instrument", "tune.instrument"), "instrument", tag="tune"), self.side.list.rows)
+        # Each is one step that is taken back.
+        self.assertTrue(self.session.undo())
+        self.assertEqual(list(self.held()["songs"]["tune"]["instruments"]), ["instrument"])
+        # A project with no such song has none to give it to: the item is dim, and is not left out.
+        self.assertTrue(self.session.change_many(projectedit.removed(self.held(), "song", "tune"), "song removed"))
+        self.side.update()
+        click(self.ui, middle(button.rect))
+        self.assertEqual([(item.text, item.enabled) for item in self.ui.modal.items[:2]],
+                         [("Empty", True), ("Empty in this song", False)])
 
     def test_the_right_button_on_a_heading_or_under_the_rows_makes_a_new_thing_of_each_kind_and_picks_it(self) -> None:
         for key, kind in (("songs", "song"), (None, "sound"), (None, "instrument")):

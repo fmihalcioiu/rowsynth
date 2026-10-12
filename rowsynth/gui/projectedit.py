@@ -305,6 +305,34 @@ def own_copied(data: dict, song: str, name: str) -> list[Change]:
     return [(f"songs.{song}.instruments", {name: inst})]
 
 
+def own_free(data: dict, song: str) -> str:
+    """A name for a new instrument of a song's own, which neither the song nor the project has for one yet.
+
+    It is `instrument`, and where that is taken the next free one after it, as `free` counts them. A name of
+    the project's is left alone as well: under it the new instrument would be played wherever the song plays
+    the project's. A song the project does not have is refused.
+    """
+    taken = {*_table(data, "instrument"), *_known(data, "song", song).get("instruments", {})}
+    name, number = "instrument", 1
+    while name in taken:
+        number += 1
+        name = f"instrument{number}"
+    return name
+
+
+def own_added(data: dict, song: str, name: str | None = None) -> list[Change]:
+    """The change that gives a song a new instrument of its own: the smallest that is heard, of one plain wave.
+
+    Its name is `name`, held to what `allowed` allows an instrument of that song's own, and with none given
+    the one `own_free` finds. Nothing plays it yet. A song with no instruments of its own gets the table with
+    it. Refused are a song the project does not have, and a name the song has for an instrument already.
+    """
+    name = allowed(data, "instrument", own_free(data, song) if name is None else name, song)
+    if "instruments" in data["songs"][song]:
+        return [(inst_place(song, name), dict(INSTRUMENT))]
+    return [(f"songs.{song}.instruments", {name: dict(INSTRUMENT)})]
+
+
 def _switched(text: str, old: str, new: str, words: str) -> str:
     """The text of a channel with every switch to one instrument made a switch to another, and all else as it was.
 
