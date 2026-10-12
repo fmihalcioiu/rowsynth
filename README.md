@@ -16,7 +16,7 @@ It is made so that a program, or a person who cannot listen while writing, can s
 
 It also has a window, `rowsynth gui`: the same files as a piano roll, drum steps, knobs and a mixer, with every change written to the file as it is made.
 
-Some of the example can be heard in a browser: [its six sound effects and its layered tune](https://fmihalcioiu.github.io/rowsynth/), and [its longest song](https://fmihalcioiu.github.io/rowsynth/piece/).
+The example can be heard in a browser: [its six sound effects and its three songs](https://fmihalcioiu.github.io/rowsynth/).
 
 ## Running it
 
@@ -976,11 +976,10 @@ A sound has a row for each of its variants, and a held sound one each for its st
 
 The audio is WAV unless `--format` says `mp3` or `opus`. MP3 is written at a variable bit rate and Opus at about 96 kbit/s, both without tags, so the same samples make the same bytes from run to run. The numbers in the rows are read before a file is encoded, so they are the same in every format. Opus is held to the same rates as in a build.
 
-The two pages linked at the top of this file are in `docs`. They are listen pages as MP3 of the two projects the example was put together from, which the tests keep in `tests/data`, made with:
+The page linked at the top of this file is in `docs`. It is the listen page of the example as MP3, made with:
 
 ```
-python -m rowsynth page tests/data/arcade.json --out docs --format mp3
-python -m rowsynth page tests/data/piece.json --out docs/piece --format mp3
+python -m rowsynth page examples/demo.json --out docs --format mp3
 ```
 
 ## From Python
