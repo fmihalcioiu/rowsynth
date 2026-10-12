@@ -21,7 +21,9 @@ sys.path.insert(0, str(ROOT))
 #: made of: a whole number of times that sprite's side, so that no pixel of it is smoothed.
 SIDES = ((16, "small"), (32, "icon"), (48, "small"), (64, "icon"), (128, "icon"), (256, "icon"))
 #: What goes in the folder beside the two programs, each as (where it is in the repo, where it goes).
-BESIDE = (("examples", "examples"), ("skills/rowsynth", "skill"), ("LICENSE", "LICENSE.txt"), ("README.md", "README.md"))
+BESIDE = (("examples", "examples"), ("skills/rowsynth", "skill"), ("LICENSE", "LICENSE.txt"), ("README.md", "README.md"),
+          # The picture the README shows, where the README looks for it.
+          ("docs/window.png", "docs/window.png"))
 #: What the systems are called in the name of the zip.
 SYSTEMS = {"Windows": "windows", "Darwin": "macos", "Linux": "linux"}
 
@@ -66,6 +68,7 @@ def build() -> dict:
         if here.is_dir():
             shutil.copytree(here, there, dirs_exist_ok=True)
         else:
+            there.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(here, there)
     system = SYSTEMS.get(platform.system(), platform.system().lower())
     packed = shutil.make_archive(str(ROOT / "dist" / f"rowsynth-{version()}-{system}"), "zip", folder.parent,
