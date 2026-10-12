@@ -789,8 +789,11 @@ class InTheApp(unittest.TestCase):
         app.handle(pygame.event.Event(pygame.MOUSEBUTTONUP, pos=at, button=1))
         self.assertEqual((named(), shown.fits, shown.panels["sound"].heading), (True, "sound", ("SOUND", "powerup")))
         self.assertEqual([widget for widget in shown.panels["song"].widgets if widget.visible], [])
-        # The list has the focus and has no use for the space bar: the sound that waits to be heard is stopped.
-        self.assertEqual((app.ui.focus, app.session.playing), (rows, True))
+        # A pick plays nothing. The list has the focus and has no use for the space bar: it plays the sound that
+        # is picked, and stops it.
+        self.assertEqual((app.ui.focus, app.session.playing), (rows, False))
+        self.space(app)
+        self.assertTrue(app.session.playing)
         self.space(app)
         self.assertFalse(app.session.playing)
 

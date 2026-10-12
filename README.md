@@ -357,7 +357,7 @@ It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of 
 | Part | What it is for |
 |---|---|
 | Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end how many findings `check` has for the project |
-| The list on the left | The songs, the sounds and the instruments. A click picks one, and a sound or an instrument is played as it is picked. The right button on one renames it, copies it or deletes it, and anywhere else in the list it makes a new one |
+| The list on the left | The songs, the sounds and the instruments. A click picks one, and Space plays what is picked. The right button on one renames it, copies it or deletes it, and anywhere else in the list it makes a new one |
 | The middle | What is picked, to change: a song, an instrument or a sound, each as below |
 | The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in. A finding with one sure repair has a `FIX` button: a channel that is short of its pattern, a song or a sound that is too loud, a group that a version names twice. `FIX ALL` makes all of them as one step |
 | Status line | One line of help for whatever the mouse is on, and what the window has to say. At its right end is what is picked |

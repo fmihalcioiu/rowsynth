@@ -111,8 +111,9 @@ class Session:
         """`player` is what the sound goes out through, or None for no sound. `clock` gives the time in seconds."""
         self.model = model
         self.player = player
-        # Whether picking a sound or an instrument plays it.
-        self.audition = True
+        # Whether picking a sound or an instrument plays it, and a change to a sound plays the sound. It is
+        # off: a thing plays when it is asked to, and a note that is placed is heard by itself.
+        self.audition = False
         self._clock = clock
         self._loop = True
         # The last thing there was to say, and how many times there has been something to say.
@@ -279,7 +280,7 @@ class Session:
     def pick(self, kind: str, name: str) -> None:
         """Picks a song, a sound or an instrument and starts its render. What was playing stops.
 
-        A sound or an instrument is played once as soon as its render is ready, unless `audition` is off. What
+        Where `audition` is on, a sound or an instrument is played once as soon as its render is ready. What
         the project does not have is refused, and then nothing changes. Another thing than the one that was
         picked has nothing muted and nothing soloed, and is heard as it is written.
         """

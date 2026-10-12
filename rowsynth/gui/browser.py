@@ -56,7 +56,7 @@ def row_help(row: Row, shared: Container[str] = ()) -> str:
     kind, name = row.key
     song, name = own(name, shared) if kind == "instrument" else (None, name)
     said = f"{kind} {name}" + (f" of {song}" if song else "")
-    return f"click to show {said}{'' if kind == 'song' else ' and hear it'}, {MORE}"
+    return f"click to show {said}, {MORE}"
 
 
 def in_name(char: str) -> bool:

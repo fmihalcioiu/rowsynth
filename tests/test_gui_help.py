@@ -53,8 +53,8 @@ HUM = {"held": {"note": {"voices": [{"inst": "bass", "notes": [[0, "c3", 60]]}]}
 KINDS: dict[str, tuple[str, ...]] = {
     "the left list, a heading": ("click to fold the songs away or bring them back",),
     "the left list, a song": ("click to show song tune, ",),
-    "the left list, a sound": ("click to show sound coin and hear it, ",),
-    "the left list, an instrument": ("click to show instrument lead and hear it, ",),
+    "the left list, a sound": ("click to show sound coin, ",),
+    "the left list, an instrument": ("click to show instrument lead, ",),
     "the left list, under its rows": (browser.LIST_HELP,),
     "the strip, a block": ("drag to move a, ",),
     "the strip, off its blocks": ("the patterns in the order they play",),
@@ -457,7 +457,7 @@ class Walked(unittest.TestCase):
         self.assertEqual(wrong, {})
         # An instrument of a song's own is named with its song, as the status bar names what is picked.
         self.assertEqual(browser.row_help(Row(("instrument", "tune.soft"), "soft", tag="tune"), ("lead",)),
-                         "click to show instrument soft of tune and hear it, or press the right button for more")
+                         "click to show instrument soft of tune, or press the right button for more")
 
     def test_no_line_is_wider_than_the_room_the_status_bar_has_in_the_smallest_window(self) -> None:
         # At the right end of the bar stands what is picked: the longest that the two examples can have there.

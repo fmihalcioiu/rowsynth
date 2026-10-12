@@ -323,6 +323,7 @@ class PlayTest(SessionCase):
         self.assert_played((tune, False))
         session.pick("sound", "zap")
         zap = session.model.render()
+        session.play()
         session.tick()
         session.loop = True
         self.assertEqual(self.speaker.did("loop"), [(True,), (False,)])
@@ -474,8 +475,20 @@ class PianoTest(unittest.TestCase):
 
 
 class PickTest(SessionCase):
-    def test_picking_a_sound_or_an_instrument_plays_it_once_as_soon_as_its_render_is_ready(self):
+    def test_picking_a_sound_or_an_instrument_plays_nothing_until_it_is_asked_to(self):
         session = self.opened()
+        session.pick("sound", "zap")
+        zap = session.model.render()
+        session.tick()
+        self.assertEqual([session.model.picked, session.playing, self.speaker.did("play")],
+                         [("sound", "zap"), False, []])
+        session.play()
+        session.tick()
+        self.assert_played((zap, False))
+
+    def test_with_audition_on_picking_a_sound_or_an_instrument_plays_it_once_as_soon_as_its_render_is_ready(self):
+        session = self.opened()
+        session.audition = True
         go = self.held()
         session.pick("sound", "zap")
         session.tick()

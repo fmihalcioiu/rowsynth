@@ -7,7 +7,7 @@
 | Part | Holds |
 |---|---|
 | Top bar | `FILE`, the name of the file, undo and redo, play, stop and loop, the time, a meter, and at the right end the count of findings: a green tick with 0, or a red sign with how many |
-| The list on the left | `SONGS`, `SOUNDS` and `INSTRUMENTS` by name. A click picks one, and a sound or an instrument is played as it is picked |
+| The list on the left | `SONGS`, `SOUNDS` and `INSTRUMENTS` by name. A click picks one, and Space plays what is picked |
 | The middle | What is picked. A song is a strip of blocks along the top, one for each pattern in its order, and under it `NOTES`, `MIXER` or `LAYERS`. A sound is its notes on a timeline over its wave. An instrument is its wave, its tables as bars, its knobs and a keyboard |
 | The inspector on the right | `MEASURED`: the figures of what is picked, as `LENGTH`, `PEAK`, `LOUDNESS`, `OFFSET`, `CLIPPED`, `START`, `END`, `HIGHS` and `BRIGHTNESS`, with one that breaks a rule in red. `FOUND`: the findings of `check` in words |
 | Status line | What the window has to say, and help for whatever the mouse is on. At its right end is what is picked, as in `SONG tune` |
