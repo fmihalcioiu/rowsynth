@@ -176,6 +176,7 @@ class App:
         self.borders = {}
         self.first = None
         self.title = self.ui.add(Title((0, 0, 0, 0), "", self.frame_do, self._grab)) if self.screen.frameless else None
+        self.screen.asked = self._asked
         self._own, self._owns = "", 0
         self._said, self._age = 0, MESSAGE_TIME
 
@@ -454,22 +455,39 @@ class App:
         pressed, self._row_pressed = self._row_pressed, False
         return pressed
 
+    def _asked(self, pos: Pos) -> str:
+        """What the window has at a position of it, for a system that moves the window itself.
+
+        It is "caption" on the title row, where a press moves the window, "button" on one of the row's three
+        buttons, which are the window's own to press, and "" anywhere else.
+        """
+        if self.title is None:
+            return ""
+        at = self.screen.to_art(pos)
+        if not inside(self.title.rect, at):
+            return ""
+        return "button" if self.title.at(at) is not None else "caption"
+
     def _grip(self, pos: Pos) -> str:
         """The edge or corner of the window that a position of the window takes hold of, and "" for none.
 
-        There is none with the system's frame, none while the window fills the desktop or a widget is held,
+        There is none where the system sizes the window itself, none with the system's frame, none while the
+        window fills the desktop or a widget is held,
         and none on a button of the title row.
         """
         screen = self.screen
-        if not screen.frameless or screen.big or self.ui.held is not None:
+        if not screen.frameless or screen.frame is not None or screen.big or self.ui.held is not None:
             return ""
         if self.title is not None and self.title.at(screen.to_art(pos)) is not None:
             return ""
         return layout.grip(screen.window.get_size(), pos)
 
     def _grab(self) -> None:
-        """Begin to move the window with the mouse: the title row was pressed. One that fills the desktop stays."""
-        if not self.screen.big:
+        """Begin to move the window with the mouse: the title row was pressed. One that fills the desktop stays.
+
+        Where the system moves the window itself, the press never comes here, and there is nothing to begin.
+        """
+        if self.screen.frame is None and not self.screen.big:
             self._begin(layout.MOVE)
 
     def _begin(self, grip: str) -> None:

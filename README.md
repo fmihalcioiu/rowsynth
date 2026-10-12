@@ -352,7 +352,7 @@ The window shows a project file as something to click on. Notes are placed with 
 
 It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels: the largest square at which the screen still has room for the whole of it.
 
-The window has a title row of its own in place of the system's: the name of the file, and buttons to minimise, to maximise and to close. A drag on the row moves the window, a double press on it maximises, and the edges and corners resize. Where that cannot be set up, the window opens with the frame of the system.
+The window has a title row of its own in place of the system's: the name of the file, and buttons to minimise, to maximise and to close. A drag on the row moves the window, a double press on it maximises, and the edges and corners resize. On Windows it is the system that does all of this, so the window snaps to the sides of the screen and answers the keys of the system as any other does. Where none of it can be set up, the window opens with the frame of the system.
 
 ### The parts of the screen
 

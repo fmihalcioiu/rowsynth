@@ -8,7 +8,7 @@ import warnings
 import pygame
 
 from ..errors import RowSynthError
-from . import layout, theme
+from . import layout, theme, winframe
 from .layout import Rect
 
 #: What pygame's own handle of a window has to have for a window with no frame of the system's: the way to it,
@@ -118,9 +118,12 @@ def work_area(at: tuple[int, int], desktop: tuple[int, int]) -> Rect:
 class Screen:
     """The window and the art surface. Everything is drawn on the art surface, in art pixels.
 
-    `frameless` is whether the window has no frame of the system's: it is then moved, sized, taken off the
-    screen and made to fill the desktop from here, and whoever draws in it draws a title row of its own. Where
-    the running pygame cannot do that, the window keeps the system's frame, and none of those does anything.
+    `frameless` is whether the window shows no frame of the system's, and whoever draws in it draws a title row
+    of its own. On Windows the system still moves, sizes and snaps such a window, as it does any other: `frame`
+    is the hold on the window by which it is told where the title row and the edges are, and `asked` is what
+    it asks for a position of the window ("caption", "button" or "", which the owner of the title row sets).
+    Anywhere else `frame` is None, and the window is moved, sized, taken off the screen and made to fill the
+    desktop from here. Where the running pygame cannot do that either, the window keeps the system's frame.
     `kept` is where a window that fills the desktop stood before, and None for one that does not fill it.
     """
 
@@ -139,6 +142,8 @@ class Screen:
             size = opening(pygame.display.get_desktop_sizes()[0], scale)
         pygame.display.set_caption("rowsynth")
         self.frameless = False
+        self.frame: winframe.Frame | None = None
+        self.asked = lambda pos: ""
         self.kept: Rect | None = None
         self._shape = ""
         self.window = self._open(size)
@@ -152,6 +157,9 @@ class Screen:
         A window that came out with no frame and cannot be reached after all is opened again with the frame:
         it is never left as one that cannot be moved or closed.
         """
+        window = self._native(size)
+        if window is not None:
+            return window
         if own_frame() is not None:
             try:
                 window = pygame.display.set_mode(size, pygame.RESIZABLE | pygame.NOFRAME)
@@ -167,6 +175,29 @@ class Screen:
             pygame.display.init()
             pygame.display.set_caption("rowsynth")
         return pygame.display.set_mode(size, pygame.RESIZABLE)
+
+    def _native(self, size: tuple[int, int]) -> pygame.Surface | None:
+        """Open the window as one the system itself moves and sizes, with no frame to be seen. None where it cannot.
+
+        That is on Windows, with its own video driver. The window is opened with the system's frame and then
+        covers all of it with its picture, so it is made as big as it was asked to be once more.
+        """
+        if sys.platform != "win32" or pygame.display.get_driver() != "windows":
+            return None
+        try:
+            pygame.display.set_mode(size, pygame.RESIZABLE)
+            self.frame = winframe.Frame(pygame.display.get_wm_info()["window"], lambda pos: self.asked(pos))
+            self.frame.fit(size)
+            pygame.event.pump()
+        except Exception:
+            # Whatever the system refused: the window is opened again in one of the other ways.
+            self.frame = None
+            pygame.display.quit()
+            pygame.display.init()
+            pygame.display.set_caption("rowsynth")
+            return None
+        self.frameless = True
+        return pygame.display.get_surface()
 
     @staticmethod
     def _reach() -> object:
@@ -186,8 +217,8 @@ class Screen:
 
     @property
     def big(self) -> bool:
-        """Whether the window was made to fill the desktop, and was not put back since."""
-        return self.kept is not None
+        """Whether the window fills the desktop: as the system has it, or as it was made to here and not put back."""
+        return self.frame.big if self.frame is not None else self.kept is not None
 
     def stand(self) -> Rect | None:
         """Where the window stands on the desktop and how big it is, as (x, y, w, h). None with the system's frame."""
@@ -214,7 +245,9 @@ class Screen:
 
     def minimise(self) -> None:
         """Take the window off the screen, down to where the system keeps the windows that are open."""
-        if self.frameless:
+        if self.frame is not None:
+            self.frame.minimise()
+        elif self.frameless:
             try:
                 self._reach().minimize()
             except pygame.error:
@@ -222,6 +255,9 @@ class Screen:
 
     def fill(self) -> None:
         """Have the window fill the part of its display that a window may fill, or put it back where it stood."""
+        if self.frame is not None:
+            self.frame.fill()
+            return
         stand = self.stand()
         if stand is not None:
             middle = (stand[0] + stand[2] // 2, stand[1] + stand[3] // 2)
@@ -271,4 +307,7 @@ class Screen:
 
     def close(self) -> None:
         """Close the window."""
+        if self.frame is not None:
+            self.frame.release()
+            self.frame = None
         pygame.display.quit()

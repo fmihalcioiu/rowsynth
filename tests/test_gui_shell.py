@@ -1078,6 +1078,15 @@ class InTheApp(unittest.TestCase):
         self.mouse(app, up, at)
         self.assertTrue(app.closed)
 
+    def test_the_app_says_for_a_place_of_the_window_whether_the_title_row_or_one_of_its_buttons_is_there(self) -> None:
+        self.held()
+        app = self.silent()
+        scale = app.screen.scale
+        close = tuple(part * scale for part in middle(title_parts(app.title.rect)[CLOSE]))
+        self.assertEqual([app._asked(pos) for pos in ((300, 10), close, (300, 200))], ["caption", "button", ""])
+        # The dummy driver has no window of the system's to take hold of, so the window is moved from here.
+        self.assertEqual((app.screen.frame, app.screen.frameless), (None, True))
+
     def test_with_the_frame_of_the_system_kept_there_is_no_title_row_and_the_system_names_the_file(self) -> None:
         self.held()
         with mock.patch("rowsynth.gui.screen.own_frame", return_value=None):
