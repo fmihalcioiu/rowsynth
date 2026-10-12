@@ -92,6 +92,10 @@ class Row:
     `square` and `dim` are of a row that is no heading. `square` is a colour of its own for its square, and for
     its strip when it is picked: with None they have the heading's. A `dim` row has its text in `theme.DIM`, its
     tag dimmer still, and its square mixed towards the panel.
+
+    A row that is a `plus` stands after the last row under a heading, for one more to be made there. It cannot
+    be picked, and a press on it is told to the owner of the list. Its text is dim, and the room of its square
+    is left free: that is where its owner puts the button that adds.
     """
 
     key: Hashable
@@ -102,6 +106,7 @@ class Row:
     indent: int = 0
     square: Colour | None = None
     dim: bool = False
+    plus: bool = False
 
 
 class Place(NamedTuple):
@@ -162,8 +167,9 @@ class List(Widget):
     A click on a row picks it, and `changed` is called with its key, also when it was picked already. A click on a
     heading folds the rows under it away, and another brings them back: a picked row that is folded away stays
     picked. The up, down, home and end keys move the pick, past headings and folded rows, and past dim rows as
-    well where `skips_dim` is set. The wheel scrolls, and so does the bar that stands at the right edge while the
-    rows do not fit.
+    well where `skips_dim` is set. The wheel scrolls, as `kit.wheel` reads it: a list goes one way, so it is the
+    wheel alone that moves it, and with shift or ctrl the wheel is left to what lies under the list. The bar that
+    stands at the right edge while the rows do not fit scrolls too.
 
     `rows` can be set at any time: the pick stays when its key is still there, and headings stay folded by their
     key. `glow` is from a key to a strength from 0 to 1, for the owner to set: the background of such a row has
@@ -172,6 +178,10 @@ class List(Widget):
     A press of the right button on a row that is no heading calls `asked` with the key of the row and the
     position, and picks nothing: the owner can open a menu there. `name_rect` is where the text of a row is
     drawn, for a box that is typed into to be put over. The list opens nothing itself.
+
+    A row that is a `plus` is passed by the keys and picked by no press. A press of the left button on it calls
+    `added` with its key, which is for the owner to set, and `row_rect` is where the row stands, for the button
+    its owner puts there.
 
     `told` is for the owner to set: it is given the row the mouse is on, and gives the line of help of that row.
     Where it gives none, and off the rows, the line is the one the list was made with.
@@ -185,6 +195,7 @@ class List(Widget):
         self.changed = changed
         self.asked = asked
         self.told: Callable[[Row], str] | None = None
+        self.added: Callable[[Hashable], object] | None = None
         self.skips_dim = False
         self.glow: dict[Hashable, float] = {}
         self.scroll = Scroll()
@@ -213,7 +224,7 @@ class List(Widget):
     @rows.setter
     def rows(self, rows: Iterable[Row]) -> None:
         self._rows = tuple(rows)
-        if all(row.head or row.key != self.picked for row in self._rows):
+        if all(row.head or row.plus or row.key != self.picked for row in self._rows):
             self.picked = None
         self._settle()
 
@@ -246,18 +257,26 @@ class List(Widget):
         down = pos[1] - self.rect[1] + self.scroll.offset
         return next((place.row for place in self._placed if place.top <= down < place.top + theme.LIST_ROW_H), None)
 
-    def name_rect(self, key: Hashable) -> Rect | None:
-        """The rectangle the text of the row of a key is drawn in, as the list is scrolled now.
+    def row_rect(self, key: Hashable) -> Rect | None:
+        """The rectangle of the row of a key, as the list is scrolled now: it can lie outside that of the list.
 
         None for a key that no row has, and for a row that is folded away.
         """
         self._settle()
         x, y, w, _ = self._across()
-        for place in self._placed:
-            if place.row.key == key:
-                marked = place.row.square is not None or place.colour is not None
-                return text_room(place.row, (x, y + place.top - self.scroll.offset, w, theme.LIST_ROW_H), marked)
-        return None
+        top = next((place.top for place in self._placed if place.row.key == key), None)
+        return None if top is None else (x, y + top - self.scroll.offset, w, theme.LIST_ROW_H)
+
+    def name_rect(self, key: Hashable) -> Rect | None:
+        """The rectangle the text of the row of a key is drawn in, as the list is scrolled now.
+
+        None for a key that no row has, and for a row that is folded away.
+        """
+        rect = self.row_rect(key)
+        if rect is None:
+            return None
+        place = next(place for place in self._placed if place.row.key == key)
+        return text_room(place.row, rect, _marked(place))
 
     def _pick(self, key: Hashable) -> None:
         """Pick the row of a key, scroll it into view, and tell."""
@@ -277,11 +296,16 @@ class List(Widget):
             return self._key(event)
         self._mouse = event.pos
         if event.kind == "wheel":
-            self.scroll.by(-theme.LIST_WHEEL * event.wheel)
-            return True
+            # The kit is built on this module, so it is asked for here and not at the top.
+            from .kit import ALONG, wheel
+
+            way, steps = wheel(event)
+            if way == ALONG:
+                self.scroll.by(-theme.LIST_WHEEL * steps)
+            return way == ALONG
         if event.kind == "down" and event.button == 3:
             row = self.at(event.pos)
-            if row is None or row.head or self.asked is None:
+            if row is None or row.head or row.plus or self.asked is None:
                 return False
             self.asked(row.key, event.pos)
             return True
@@ -298,7 +322,10 @@ class List(Widget):
         return True
 
     def _press(self, pos: Pos) -> None:
-        """Take hold of the thumb, scroll a view's worth from the track beside it, fold a heading or pick a row."""
+        """Take hold of the thumb, scroll a view's worth from the track beside it, fold a heading or pick a row.
+
+        A press on a row that is a plus picks nothing, and is told to `added`.
+        """
         bar = self._bar()
         if bar is not None and inside(bar[0], pos):
             _, top, _, length = bar[1]
@@ -311,6 +338,9 @@ class List(Widget):
         if row is not None and row.head:
             self._folded ^= {row.key}
             self._settle()
+        elif row is not None and row.plus:
+            if self.added is not None:
+                self.added(row.key)
         elif row is not None:
             self._pick(row.key)
 
@@ -320,7 +350,7 @@ class List(Widget):
         A pick that is folded away moves from where it would stand. With nothing picked, down goes to the first row
         and up to the last. The keys are not used while there is no row to pick.
         """
-        keys = [row.key for row in self._rows if not row.head]
+        keys = [row.key for row in self._rows if not (row.head or row.plus)]
         shown = {place.row.key for place in self._placed
                  if not place.row.head and not (self.skips_dim and place.row.dim)}
         if event.mods or event.key not in KEYS or not shown:
@@ -359,12 +389,13 @@ class List(Widget):
         """Draw one row: its background, what stands before its text, its tag at the right, and its text between.
 
         The square of a row, and its strip when it is picked, are in the row's own colour where it has one, and
-        in its heading's where it has none. A dim row is drawn dim.
+        in its heading's where it has none. A dim row is drawn dim. A row that is a plus has its text dim, and
+        nothing where its square would be.
         """
         row, _, colour = place
         x, y, w, h = rect
-        picked = not row.head and row.key == self.picked
-        dim = row.dim and not row.head
+        picked = not (row.head or row.plus) and row.key == self.picked
+        dim = (row.dim or row.plus) and not row.head
         ground = theme.LIT if picked else theme.RAISED if lit else theme.PANEL
         canvas.box(rect, mix(ground, theme.ACTIVE, self.glow.get(row.key, 0)))
         if not row.head and row.square is not None:
@@ -376,14 +407,19 @@ class List(Widget):
         left = x + theme.LIST_PAD + row.indent * theme.LIST_INDENT
         if row.head:
             _mark(canvas, left, y, row.key in self._folded, row.colour)
-        elif colour is not None:
+        elif colour is not None and not row.plus:
             canvas.box((left, y + (h - theme.LIST_SQUARE) // 2, theme.LIST_SQUARE, theme.LIST_SQUARE), colour)
         if row.tag:
             width = Font.width(row.tag)
             canvas.text_in(row.tag, (x + w - theme.LIST_PAD - width, y, width, h), theme.LINE if dim else theme.DIM)
         # A text too long for the room between is cut there, as `font.fit` cuts it.
         ink = row.colour if row.head else theme.DIM if dim else theme.TEXT
-        canvas.text_in(row.text, text_room(row, rect, colour is not None), ink)
+        canvas.text_in(row.text, text_room(row, rect, _marked(place)), ink)
+
+
+def _marked(place: Place) -> bool:
+    """Whether the text of a row that is shown stands after the room of a square: that of a row, or of a button."""
+    return place.row.plus or place.row.square is not None or place.colour is not None
 
 
 def _mark(canvas: Canvas, x: int, y: int, folded: bool, colour: Colour) -> None:

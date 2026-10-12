@@ -201,6 +201,19 @@ def version_added(song: dict, name: str | None = None) -> dict:
     return made
 
 
+def version_copied(song: dict, name: str) -> dict:
+    """A song with one more version, the last of them, which has the groups one of its versions has.
+
+    It is called as that one is, with the first number from 2 after it that no version has yet: `full2`. What
+    was to be mixed ahead of the one is not mixed ahead of its copy.
+    """
+    _known(song, "version", name)
+    made = copy.deepcopy(song)
+    versions = made["layers"]["versions"]
+    versions[allowed(song, "version", _free(versions, name))] = list(versions[name])
+    return made
+
+
 def version_renamed(song: dict, old: str, new: str) -> dict:
     """A song with one of its versions under another name, in its place among them and where it is mixed ahead."""
     _known(song, "version", old)

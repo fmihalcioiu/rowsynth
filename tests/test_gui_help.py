@@ -51,10 +51,12 @@ HUM = {"held": {"note": {"voices": [{"inst": "bass", "notes": [[0, "c3", 60]]}]}
 #: The things of the widgets that draw several, each with how a line begins that is said on a thing of that kind:
 #: at the places the layout of its widget gives for it, every one of the beginnings is that of a line.
 KINDS: dict[str, tuple[str, ...]] = {
-    "the left list, a heading": ("click to fold the songs away or bring them back",),
-    "the left list, a song": ("click to show song tune, ",),
-    "the left list, a sound": ("click to show sound coin, ",),
-    "the left list, an instrument": ("click to show instrument lead, ",),
+    "the left list, a heading": ("press: fold the songs away or bring them back   right press: a new song, sound",),
+    "the left list, a song": ("press: show song tune, twice to rename it   right press: its menu   wheel: along",),
+    "the left list, a sound": ("press: show sound coin, twice to rename it   right press: its menu",),
+    "the left list, an instrument": ("press: show instrument lead, twice to rename it   right press: its menu",),
+    "the left list, a row that adds": ("press: a new song   right press: ",
+                                       "press: a new instrument, empty or one of the ready ones"),
     "the left list, under its rows": (browser.LIST_HELP,),
     "the strip, a block": ("drag to move a, ",),
     "the strip, off its blocks": ("the patterns in the order they play",),
@@ -70,13 +72,17 @@ KINDS: dict[str, tuple[str, ...]] = {
     "the roll, the velocity lane": (VELOCITY_HELP,),
     "the steps, the squares": ("take the hit away: ", "put a hit: "),
     "the steps, the names of the drums": (songpanel.STEPS_HELP,),
-    "the mixer, the name of a channel": ("lead, lead: a click shows its notes",),
+    "the mixer, the name of a channel": ("channel lead, lead   press: show its notes",),
+    "the mixer, a fader and its toggles": ("press: drag up or down for the volume of the channel, slower with shift   "
+                                           "right press: back to 1   wheel: steps it",
+                                           "press: mute the channel", "press: solo the channel"),
     "the mixer, between its strips": (mixer.DESK_HELP,),
-    "the layers, a switch": ("group rhythm in version beat: ",),
-    "the layers, a group": ("group rhythm: ",),
-    "the layers, a version": ("version beat", "hear version beat alone"),
-    "the layers, the buttons that add": ("a new version", "a new group"),
-    "the layers, off all of them": ("the groups of channels down the side",),
+    "the layers, a switch": ("press: take group rhythm out of version beat   wheel: along the groups, shift",),
+    "the layers, a group": ("press: twice to rename group rhythm   right press: its menu   wheel: along",),
+    "the layers, a version": ("press: twice to rename version beat   right press: its menu   wheel: along",
+                              "press: hear version beat alone   right press: its menu   wheel: along"),
+    "the layers, the buttons that add": ("press: a new version", "press: a new group", "press: one more key"),
+    "the layers, off all of them": (layerview.TABLE_HELP,),
     "a sound, a note": ("move ", "stretch "),
     "a sound, empty grid": ("place a note at ",),
     "a sound, the ruler": ("press the right button to set the longest time the sound may last",),
@@ -300,6 +306,8 @@ class Walked(unittest.TestCase):
         cls.at("the left list, a song", app, [spot(things, ("song", "tune"))])
         cls.at("the left list, a sound", app, [spot(things, ("sound", "coin"))])
         cls.at("the left list, an instrument", app, [spot(things, ("instrument", "lead"))])
+        cls.at("the left list, a row that adds", app, [spot(things, ("new", "song")),
+                                                       middle(app.panels["left"].plus["instrument"].rect)])
         cls.at("the left list, under its rows", app, [under(things)])
         seen = song.strip.map
         cls.at("the strip, a block", app, [middle(seen.block(0))])
@@ -317,8 +325,10 @@ class Walked(unittest.TestCase):
         cls.at("the steps, the names of the drums", app, [(song.steps.rect[0] + 2, grid.y(0) + 2)])
         song.choice.pick(1)
         cls.walk(app, "the song, its mixer")
-        name = song.mixer.strips[0].name
-        cls.at("the mixer, the name of a channel", app, [middle(name.rect)])
+        strip = song.mixer.strips[0]
+        cls.at("the mixer, the name of a channel", app, [middle(strip.name.rect)])
+        cls.at("the mixer, a fader and its toggles", app, [middle(strip.fader.rect), middle(strip.mute.rect),
+                                                           middle(strip.solo.rect)])
         cls.at("the mixer, between its strips", app, [next(pos for pos in across(song.mixer.desk.rect, 1)
                                                           if over(ui, pos) is song.mixer.desk)])
         cls.change(app, "songs.tune.intro", {"order": ["a"]})
@@ -330,7 +340,8 @@ class Walked(unittest.TestCase):
         cls.at("the layers, a switch", app, [middle(layerview.cell(laid, 0, 0))])
         cls.at("the layers, a group", app, [middle(laid.rows[0])])
         cls.at("the layers, a version", app, [middle(version), middle(button)])
-        cls.at("the layers, the buttons that add", app, [middle(laid.add_version), middle(laid.add_group)])
+        cls.at("the layers, the buttons that add", app, [middle(laid.add_version), middle(laid.add_group),
+                                                         middle(song.layers.key_add.rect)])
         cls.at("the layers, off all of them", app, [next(pos for pos in across(table.rect, 1)[::-1]
                                                         if layerview.hit(laid, pos) is None)])
         cls.sounds(app)
@@ -464,7 +475,8 @@ class Walked(unittest.TestCase):
         self.assertEqual(wrong, {})
         # An instrument of a song's own is named with its song, as the status bar names what is picked.
         self.assertEqual(browser.row_help(Row(("instrument", "tune.soft"), "soft", tag="tune"), ("lead",)),
-                         "click to show instrument soft of tune, or press the right button for more")
+                         "press: show instrument soft of tune, twice to rename it   right press: its menu   wheel: "
+                         "along the list")
 
     def test_no_line_is_wider_than_the_room_the_status_bar_has_in_the_smallest_window(self) -> None:
         # At the right end of the bar stands what is picked: the longest that the two examples can have there.

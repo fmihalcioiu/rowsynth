@@ -580,7 +580,7 @@ class Shown(unittest.TestCase):
         self.assertEqual((theme.HEAD_H, theme.BAR_H, theme.SIDE_W, theme.FOOT_H), (17, 40, 124, 72))
         # Every widget is the panel's, the fourteen of the layers and then those of the mixer the last: its
         # desk, five of the song's strip, and six for each of four channels.
-        self.assertEqual((self.ui.widgets, panel.widgets[-44:-30], panel.widgets[-30:]),
+        self.assertEqual((self.ui.widgets, panel.widgets[-47:-30], panel.widgets[-30:]),
                          (panel.widgets, panel.layers.widgets, panel.mixer.widgets))
         # The choice stands at the right end of the heading, as wide as its three words need.
         self.assertEqual((panel.heading.rect, panel.choice.rect, panel.choice.options, panel.mixing, panel.layering),
@@ -1177,7 +1177,7 @@ class Mixed(Opened):
         x, y, w, h = fader.handle()
         self.drag((x + w // 2, y + h // 2 - 1), (x + w // 2, y + h // 2 - 1 + round(fader.travel() / 10)))
         self.assertEqual((self.data()["songs"]["walk"]["channels"]["air"]["gain"], self.session.undo_label),
-                         (0.9, "air: level 0.9"))
+                         (0.9, "air: volume 0.9"))
         panel.update()
         choose(self.ui, panel, NOTES)
         self.assertEqual((level.visible, level.value, level.show(level.value)), (True, 0.9, "0.9"))

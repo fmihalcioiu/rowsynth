@@ -12,7 +12,8 @@ import numpy as np
 from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING, delete_in, set_in
 from rowsynth.errors import RowSynthError
-from rowsynth.gui.projectedit import Change, added, allowed, free, removed, renamed, shared, uses
+from rowsynth.gui.projectedit import (STARTERS, Change, added, allowed, free, fresh, own_copied, own_renamed, removed,
+                                      renamed, shared, started, uses)
 from rowsynth.project import Project
 from rowsynth.song import render_loop
 
@@ -224,6 +225,70 @@ class Owned(unittest.TestCase):
         self.assertEqual([list(left.songs["own"]["instruments"]), list(left.instruments)],
                          [["lead", "soft", "buzz"], ["lead", "lead2", "thud"]])
 
+    def test_an_instrument_of_the_project_is_copied_into_a_song_as_its_own_under_the_name_it_has(self) -> None:
+        began = copy.deepcopy(DATA)
+        # A song with no instruments of its own gets the table with it, and one that has some gets it at its place.
+        changes = own_copied(DATA, "tune", "lead")
+        self.assertEqual((DATA, changes), (began, [("songs.tune.instruments", {"lead": DATA["instruments"]["lead"]})]))
+        self.assertIsNot(changes[0][1]["lead"], DATA["instruments"]["lead"])
+        self.assertEqual(own_copied(DATA, "own", "thud"), [("songs.own.instruments.thud", {"wave": "noise"})])
+        # The song plays its own copy from then on, which sounds as the project's did, and nothing else is changed.
+        made = applied(DATA, changes)
+        self.assertEqual({key: made[key] for key in ("instruments", "sounds")},
+                         {key: DATA[key] for key in ("instruments", "sounds")})
+        np.testing.assert_array_equal(heard(made, "song", "tune"), heard(DATA, "song", "tune"))
+        named = copy.deepcopy(DATA)
+        named["instruments"]["soft"] = {"wave": "tri"}
+        for given, message in (
+            ((DATA, "own", "lead"), "the song 'own' has an instrument called 'lead' already"),
+            # A name the song gives to an instrument of the project is taken as well.
+            ((named, "own", "soft"), "the song 'own' has an instrument called 'soft' already"),
+            ((DATA, "own", "soft"), "the project has no instrument called 'soft'"),
+            ((DATA, "march", "lead"), "the project has no song called 'march'"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(refusal(own_copied, *given), message)
+
+    def test_an_own_instrument_is_renamed_in_its_song_where_the_song_names_it_and_nowhere_else(self) -> None:
+        data = with_buzz()
+        began = copy.deepcopy(data)
+        changes = own_renamed(data, "own", "buzz", "hum")
+        self.assertEqual((data, [where for where, _ in changes]), (began, ["songs.own"]))
+        made = applied(data, changes)
+        song = made["songs"]["own"]
+        # It keeps its place in the table, and the channel and the text that named it name it anew.
+        self.assertEqual([list(song["instruments"]), song["channels"]["z"]["inst"], song["patterns"]["a"]],
+                         [["lead", "soft", "hum", "spare"], "hum", {"x": "o4 c1", "y": "o3 e2 @hum e2", "z": "o2 c1"}])
+        self.assertEqual([made["instruments"], made["sounds"], made["songs"]["tune"]],
+                         [data["instruments"], data["sounds"], data["songs"]["tune"]])
+        np.testing.assert_array_equal(heard(made, "song", "own"), heard(data, "song", "own"))
+        # The song's own lead is not the project's: the name the song gives to that one stays as it is.
+        song = applied(data, own_renamed(data, "own", "lead", "main"))["songs"]["own"]
+        self.assertEqual([list(song["instruments"]), song["instruments"]["soft"], song["channels"]["x"]["inst"]],
+                         [["main", "soft", "buzz", "spare"], "lead", "main"])
+        # A name the project has for an instrument the song does not play can be given: the song's own is over it.
+        Project.from_dict(applied(data, own_renamed(data, "own", "spare", "lead2")))
+
+    def test_a_name_an_own_instrument_cannot_be_given_is_refused_and_the_refusal_says_why(self) -> None:
+        data = with_buzz()
+        for given, message in (
+            ((data, "own", "buzz", "spare"), "the song 'own' has an instrument called 'spare' already"),
+            ((data, "own", "buzz", "soft"), "the song 'own' has an instrument called 'soft' already"),
+            ((data, "own", "buzz", ""), "an instrument needs a name, and '' is none"),
+            ((data, "own", "buzz", "a.b"), "an instrument cannot be called 'a.b': a name cannot hold '.'"),
+            ((data, "own", "buzz", "my hum"),
+             "the channel y in the pattern a of own switches to the instrument as @buzz, and a name written so holds "
+             "only letters, digits and _, which 'my hum' does not"),
+            # The song plays the project's thud by that name, and would play its own in its place.
+            ((DATA, "own", "lead", "thud"), "the channel z of own plays the instrument 'thud' of the project, and "
+                                            "would play this one in place of that"),
+            ((data, "own", "soft", "calm"), "the song 'own' has no instrument of its own called 'soft'"),
+            ((data, "tune", "lead", "calm"), "the song 'tune' has no instrument of its own called 'lead'"),
+            ((data, "march", "lead", "calm"), "the project has no song called 'march'"),
+        ):
+            with self.subTest(message=message):
+                self.assertEqual(refusal(own_renamed, *given), message)
+
 
 class Adding(unittest.TestCase):
     def test_a_new_thing_of_each_kind_is_accepted_by_the_project_and_can_be_heard(self) -> None:
@@ -252,6 +317,35 @@ class Adding(unittest.TestCase):
                 self.assertEqual({key: made[f"{kind}s"][key] for key in DATA[f"{kind}s"]}, DATA[f"{kind}s"])
                 np.testing.assert_array_equal(heard(made, kind, new), heard(DATA, kind, name))
         self.assertEqual(refusal(added, DATA, "song", like="march"), "the project has no song called 'march'")
+
+    def test_the_ready_instruments_are_those_of_the_two_examples_and_each_is_accepted_and_can_be_heard(self) -> None:
+        arcade, piece = (json.loads((EXAMPLES / name).read_text(encoding="utf-8"))["instruments"]
+                         for name in ("arcade.json", "piece.json"))
+        ready = {**{name: arcade[name] for name in ("pluck", "bass", "kick", "snare", "hat", "chime")},
+                 **{name: piece[name] for name in ("fmbrass", "fmpad", "sub")}}
+        # They are in the order they are offered, each as its example holds it, key for key.
+        self.assertEqual(json.dumps(STARTERS), json.dumps(ready))
+        for name in STARTERS:
+            with self.subTest(name=name):
+                made = applied(DATA, started(DATA, name))
+                self.assertEqual(list(made["instruments"]), [*DATA["instruments"], name])
+                self.assertGreater(float(np.abs(heard(made, "instrument", name)).max()), 0.01)
+
+    def test_a_ready_instrument_comes_under_its_own_name_or_the_next_free_one_and_shares_nothing(self) -> None:
+        # A project with no table of instruments gets the table with it.
+        first = started({}, "bass")
+        self.assertEqual(first, [("instruments", {"bass": STARTERS["bass"]})])
+        taken = applied({}, first)
+        again = started(taken, "bass")
+        self.assertEqual(again, [("instruments.bass2", STARTERS["bass"])])
+        self.assertIsNot(again[0][1]["vol"], STARTERS["bass"]["vol"])
+        self.assertEqual([fresh(taken, "instrument", "bass"), fresh(taken, "instrument", "kick"),
+                          fresh(applied(taken, again), "instrument", "bass")], ["bass2", "kick", "bass3"])
+        # A name that is given is held to what any name is held to.
+        self.assertEqual(started(taken, "kick", "deep"), [("instruments.deep", STARTERS["kick"])])
+        self.assertEqual([refusal(started, taken, "kick", "bass"), refusal(started, DATA, "organ")],
+                         ["the project has an instrument called 'bass' already",
+                          "there is no ready instrument called 'organ'"])
 
 
 if __name__ == "__main__":

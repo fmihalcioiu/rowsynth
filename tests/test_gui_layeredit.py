@@ -76,6 +76,20 @@ class Rules(unittest.TestCase):
                          (TUNE, TUNE))
         self.assertEqual(self.layers(layeredit.switched(TUNE, "top", "beat"))["versions"]["beat"], ["rhythm", "top"])
 
+    def test_the_copy_of_a_version_is_the_last_of_them_with_its_groups_and_the_next_free_name(self) -> None:
+        mixed = {**TUNE, "layers": {**TUNE["layers"], "premix": [{"version": "thin", "key": 0}]}}
+        once = layeredit.version_copied(mixed, "thin")
+        twice = self.layers(layeredit.version_copied(once, "thin"))
+        self.assertEqual((list(twice["versions"]), twice["versions"]["thin2"], twice["versions"]["thin3"]),
+                         (["beat", "thin", "most", "full", "thin2", "thin3"], ["rhythm", "low"], ["rhythm", "low"]))
+        # The copy shares nothing with the version it was made of, and is not mixed ahead as that one is.
+        self.assertIsNot(once["layers"]["versions"]["thin2"], once["layers"]["versions"]["thin"])
+        self.assertEqual((twice["premix"], mixed["layers"]["versions"]), (mixed["layers"]["premix"],
+                                                                          TUNE["layers"]["versions"]))
+        with self.assertRaises(RowSynthError) as refused:
+            layeredit.version_copied(TUNE, "calm")
+        self.assertEqual(str(refused.exception), "the layers have no version called 'calm'")
+
     def test_a_key_is_added_and_removed_with_what_was_mixed_ahead_in_it(self) -> None:
         mixed = {**TUNE, "layers": {**TUNE["layers"], "premix": [{"version": "thin", "key": 0},
                                                                  {"version": "full", "key": 2}]}}

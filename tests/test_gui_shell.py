@@ -20,7 +20,8 @@ from rowsynth import checks
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import inspector, layout, popups, run, soundpanel, sprites, start, theme
 from rowsynth.gui import model as gui_model
-from rowsynth.gui.browser import Browser, rows_of
+from rowsynth.gui import projectedit
+from rowsynth.gui.browser import Browser, plus_rect, rows_of
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.dials import bars
 from rowsynth.gui.font import Font
@@ -212,12 +213,16 @@ class Rows(unittest.TestCase):
         self.assertEqual(rows_of(listing), [
             Row("songs", "SONGS", head=True, colour=theme.SONG),
             Row(("song", "tune"), "tune"),
+            # After the last thing of a section stands the row that makes one more.
+            Row(("new", "song"), "new", plus=True),
             Row("sounds", "SOUNDS", head=True, colour=theme.SOUND),
             Row(("sound", "coin"), "coin"),
             Row(("sound", "blip"), "blip", tag="3"),
             Row(("sound", "boom"), "boom", tag="parts"),
-            # A section that holds nothing has its heading all the same.
+            Row(("new", "sound"), "new", plus=True),
+            # A section that holds nothing has its heading all the same, and its row that adds.
             Row("instruments", "INSTRUMENTS", head=True, colour=theme.INSTRUMENT),
+            Row(("new", "instrument"), "new", plus=True),
         ])
 
 
@@ -501,10 +506,32 @@ class Left(unittest.TestCase):
         self.assertEqual(side.list.rect, (2, 26, 119, 498))
         for rect in (SIDE, SMALL_SIDE, (0, 22, 3, 2)):
             side.place(rect)
-            self.assertEqual(ui.widgets, [side.list])
-            self.assertTrue(lies_in(side.list.rect, rect), rect)
+            # Over the list stand the buttons of the rows that add.
+            self.assertEqual(ui.widgets, [side.list, *side.plus.values()])
+            self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
         side.place(SMALL_SIDE)
         self.assertEqual(side.list.rect, (42, 36, 55, 24))
+
+    def test_the_button_of_a_row_that_adds_stands_in_its_row_while_all_of_the_row_is_in_view(self) -> None:
+        _, ui, side = side_on()
+        self.assertEqual(list(side.plus), ["song", "sound", "instrument"])
+        for kind, button in side.plus.items():
+            row = side.list.row_rect(("new", kind))
+            self.assertEqual((button.visible, button.rect, side.list.at(middle(button.rect)).key),
+                             (True, plus_rect(row), ("new", kind)))
+            self.assertTrue(lies_in(button.rect, row))
+        # The wheel on a button is the list's, and the mouse on it is told what a press there makes.
+        ui.handle(Event("move", middle(side.plus["sound"].rect)))
+        self.assertEqual(ui.help, "press: a new sound")
+        # A row that is folded away has no button, and neither has one that is not all in view.
+        click(ui, spot(side.list, "sounds"))
+        side.update()
+        self.assertEqual([button.visible for button in side.plus.values()], [True, False, True])
+        side.place((0, 22, 124, theme.BROWSER_TOP + theme.BROWSER_PAD + 3 * theme.LIST_ROW_H + theme.LIST_ROW_H // 2))
+        self.assertEqual([button.visible for button in side.plus.values()], [True, False, False])
+        self.assertTrue(ui.handle(Event("wheel", middle(side.plus["song"].rect), wheel=-1)))
+        side.update()
+        self.assertEqual(side.plus["song"].visible, False)
 
 
 class Changing(unittest.TestCase):
@@ -553,7 +580,11 @@ class Changing(unittest.TestCase):
         self.side.update()
 
     def test_rename_opens_a_box_over_the_name_and_enter_gives_the_instrument_its_new_name_everywhere(self) -> None:
-        self.assertEqual(self.menu(("instrument", "beep")), ["Rename...", "Copy", None, "Delete"])
+        # The menu of a thing is in the order every such menu has, and only an instrument has more than the three.
+        self.assertEqual(self.menu(("song", "tune")), ["Rename...", "Copy", None, "Remove"])
+        self.ui.handle(Event("key", key="escape"))
+        self.assertEqual(self.menu(("instrument", "beep")),
+                         ["Rename...", "Copy", "Copy into this song", None, "Remove"])
         self.choose("Rename...")
         box = self.ui.modal
         self.assertEqual((box.text, box.picked), ("beep", (0, 4)))
@@ -600,19 +631,87 @@ class Changing(unittest.TestCase):
         self.assertEqual([self.session.undo_label, self.side.list.picked],
                          ["song tune copied as tune2", ("song", "tune2")])
 
-    def test_delete_takes_a_thing_out_and_an_instrument_that_is_still_used_is_refused_and_said(self) -> None:
+    def test_remove_takes_a_thing_out_and_an_instrument_that_is_still_used_is_refused_and_said(self) -> None:
         written = self.path.read_bytes()
         self.menu(("instrument", "beep"))
-        self.choose("Delete")
+        self.choose("Remove")
         self.assertEqual(self.session.message,
                          "instrument 'beep' is still used by the channel tune of tune, the channel tune in the "
                          "pattern a of tune, the sound zap")
         self.assertEqual([self.path.read_bytes(), self.session.can_undo], [written, False])
-        # The picked thing deleted, the first thing there is takes its place.
+        # The picked thing removed, the first thing there is takes its place.
         self.menu(("song", "tune"))
-        self.choose("Delete")
+        self.choose("Remove")
         self.assertEqual([self.held()["songs"], self.session.undo_label, self.side.list.picked],
-                         [{}, "song tune deleted", ("sound", "zap")])
+                         [{}, "song tune removed", ("sound", "zap")])
+
+    def test_copy_into_this_song_gives_the_song_that_was_picked_last_the_instrument_as_one_of_its_own(self) -> None:
+        self.assertEqual(self.session.model.picked, ("song", "tune"))
+        self.menu(("instrument", "beep"))
+        self.choose("Copy into this song")
+        held = self.held()
+        # The song has a copy under the same name, which it plays from now on, and the project's is as it was.
+        self.assertEqual([held["songs"]["tune"]["instruments"], held["instruments"], held["songs"]["tune"]["channels"]],
+                         [THINGS["instruments"], THINGS["instruments"], THINGS["songs"]["tune"]["channels"]])
+        self.assertEqual([self.session.undo_label, self.session.model.picked, self.side.list.picked],
+                         ["instrument beep copied into tune", ("instrument", "tune.beep"), ("instrument", "tune.beep")])
+        self.assertIn(Row(("instrument", "tune.beep"), "beep", tag="tune"), self.side.list.rows)
+        # With an instrument picked it is still the song that was picked last, which has one of that name now.
+        self.menu(("instrument", "beep"))
+        self.choose("Copy into this song")
+        self.assertEqual([self.session.message, self.session.undo_label],
+                         ["the song 'tune' has an instrument called 'beep' already",
+                          "instrument beep copied into tune"])
+        # A project with no such song has nothing to copy into: the item is dim, and is not left out.
+        self.assertTrue(self.session.change_many(projectedit.removed(self.held(), "song", "tune"), "song removed"))
+        self.side.update()
+        self.assertEqual(self.menu(("instrument", "beep")),
+                         ["Rename...", "Copy", "Copy into this song", None, "Remove"])
+        self.assertEqual([item.enabled for item in self.ui.modal.items if item], [True, True, False, True])
+
+    def test_the_row_after_the_last_thing_of_a_section_and_its_button_make_one_more_of_that_kind(self) -> None:
+        # A press on the row itself, and one on the button that stands in it.
+        x, y, w, h = self.side.list.row_rect(("new", "song"))
+        click(self.ui, (x + w // 2, y + h // 2))
+        self.side.update()
+        self.assertEqual([list(self.held()["songs"]), self.session.undo_label, self.side.list.picked],
+                         [["tune", "song"], "new song song", ("song", "song")])
+        click(self.ui, middle(self.side.plus["sound"].rect))
+        self.side.update()
+        self.assertEqual([list(self.held()["sounds"]), self.session.undo_label, self.side.list.picked],
+                         [["zap", "sound"], "new sound sound", ("sound", "sound")])
+        # The row is no thing: the keys pass it, and the right button on it is the one on no thing.
+        click(self.ui, spot(self.side.list, ("sound", "sound")))
+        self.ui.handle(Event("key", key="down"))
+        self.side.update()
+        self.assertEqual(self.side.list.picked, ("instrument", "beep"))
+        pos = middle(self.side.list.name_rect(("new", "sound")))
+        self.ui.handle(Event("down", pos, button=3))
+        self.ui.handle(Event("up", pos, button=3))
+        self.assertEqual([item.text for item in self.ui.modal.items], ["New song", "New sound", "New instrument"])
+
+    def test_the_plus_of_the_instruments_opens_the_ready_ones_and_one_comes_under_its_name_or_the_next_free(
+            self) -> None:
+        button = self.side.plus["instrument"]
+        made = []
+        for text in ("bass", "bass", "Empty"):
+            click(self.ui, middle(button.rect))
+            menu = self.ui.modal
+            self.assertEqual([item and item.text for item in menu.items], ["Empty", None, *projectedit.STARTERS])
+            # The list opens under the row of the button.
+            self.assertEqual(menu.rect[1], button.rect[1] + theme.LIST_ROW_H)
+            self.choose(text)
+            made.append((self.session.undo_label, self.side.list.picked))
+        self.assertEqual(made, [("new instrument bass", ("instrument", "bass")),
+                                ("new instrument bass2", ("instrument", "bass2")),
+                                ("new instrument instrument", ("instrument", "instrument"))])
+        held = self.held()["instruments"]
+        self.assertEqual([list(held), held["bass"], held["bass2"], held["instrument"]],
+                         [["beep", "bass", "bass2", "instrument"], projectedit.STARTERS["bass"],
+                          projectedit.STARTERS["bass"], {"wave": "pulse"}])
+        # Each is one step: taken back, the project has the instruments it had before it.
+        self.assertTrue(self.session.undo() and self.session.undo())
+        self.assertEqual(list(self.held()["instruments"]), ["beep", "bass"])
 
     def test_the_right_button_on_a_heading_or_under_the_rows_makes_a_new_thing_of_each_kind_and_picks_it(self) -> None:
         for key, kind in (("songs", "song"), (None, "sound"), (None, "instrument")):

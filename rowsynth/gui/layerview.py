@@ -14,6 +14,7 @@ from . import layeredit, songview, theme
 from .channelbar import BUTTON_H, HEIGHT, SPACE, tidy
 from .dials import Knob, Stepper, knob_parts, plain
 from .font import Font
+from .kit import ACROSS, ALONG, Plus, ScrollBar, thing_menu, told, wheel
 from .layout import Rect
 from .panels import within
 from .popups import Item, Menu, ask
@@ -35,6 +36,14 @@ TAIL = "TAIL"
 FADE = "FADE"
 #: What is said of layers to a song that has none.
 ABOUT = "layers let a program fade between a calm and a full version of the same song"
+#: What the wheel does over the table, as the help line says it, and what the table says of itself where the
+#: mouse is on none of its parts.
+WHEEL = "along the groups, shift along the versions"
+TABLE_HELP = f"the groups of channels down the side, the versions along the top   {told(wheel=WHEEL)}"
+#: What the things read that only the menu of a group has, and the menu of the keys for each key.
+CHANNELS = "Channels..."
+HEAR = "hear in"
+REMOVE_KEY = "Remove"
 
 #: How high a row of the table is: its headings, each group, and the button that adds a group.
 ROW_H = BUTTON_H + 1
@@ -42,7 +51,7 @@ ROW_H = BUTTON_H + 1
 LEFT_LEAST = 96
 #: How wide the column of a version is: as wide as fits, from the most down to the least. Columns that do not
 #: fit at the least width are not all in view, and neither are groups for which the table is not high enough:
-#: the table then shows them from a first one on, and a small arrow marks each way in which there are more.
+#: the table then shows them from a first one on, and a scroll bar stands along each side it has more on.
 COL_MOST = 64
 COL_LEAST = 30
 #: How wide the field of the keys is, that of the patterns an intro plays, and a knob of the intro with its two
@@ -95,8 +104,11 @@ class Laid(NamedTuple):
 
     `left` is how wide the room is the groups are named in, and `wide` the column of a version. `heads` has the
     heading of each version in view and `rows` the room each group in view is named in. `add_version` is the
-    button after the last heading, and `add_group` the one under the last group. `first_group` and
-    `first_version` are the places of the first group and of the first version in view, among all there are.
+    room of the button after the last heading, and `add_group` that of the one under the last group.
+    `first_group` and `first_version` are the places of the first group and of the first version in view,
+    among all there are. `along` is the room of the scroll bar that goes along the groups, which stands after
+    the last column, and `across` that of the one that goes along the versions, under the last row: each is
+    None while all the groups, or all the versions, are in view.
     """
 
     left: int
@@ -107,6 +119,8 @@ class Laid(NamedTuple):
     add_group: Rect
     first_group: int = 0
     first_version: int = 0
+    along: Rect | None = None
+    across: Rect | None = None
 
 
 def kept(first: int, count: int, fit: int) -> int:
@@ -124,12 +138,14 @@ def lay(rect: Rect, groups: int, versions: int, label: int = 0, first_group: int
     The headings of the versions run along the top, and under them is a row for each group. A row begins with
     the room the group is named in, `label` wide where the table has that much, and never under `LEFT_LEAST`.
     After it the versions have a column each, as wide as fits from `COL_MOST` down to `COL_LEAST`. A small
-    button stands after the last heading and another under the last row. A rectangle too small for a heading
-    with one column and a row under it has no table in it.
+    button has its room after the last heading and another under the last row. A rectangle too small for a
+    heading with one column and a row under it has no table in it.
 
     Where not every group or not every version fits, those in view are the ones from `first_group` and from
     `first_version` on, each kept in range as `kept` keeps it. The rows and the headings stand where they
-    stand for a table that shows its first ones.
+    stand for a table that shows its first ones. A scroll bar then has its room along the side there are more
+    on: after the last column for the groups, under the button after the last heading, and under the last
+    row for the versions, beside the button under the last group.
     """
     x, y, w, h = rect
     room = w - LEFT_LEAST - BUTTON_H
@@ -139,12 +155,14 @@ def lay(rect: Rect, groups: int, versions: int, label: int = 0, first_group: int
     seen = min(versions, room // wide)
     left = max(LEFT_LEAST, min(label, w - BUTTON_H - seen * wide))
     shown = min(groups, h // ROW_H - 2)
+    right, foot = x + left + seen * wide, y + (shown + 1) * ROW_H
     return Laid(left, wide,
                 tuple((x + left + at * wide, y, wide, ROW_H) for at in range(seen)),
                 tuple((x, y + (at + 1) * ROW_H, left, ROW_H) for at in range(shown)),
-                (x + left + seen * wide, y, BUTTON_H, BUTTON_H),
-                (x, y + (shown + 1) * ROW_H, BUTTON_H, BUTTON_H),
-                kept(first_group, groups, shown), kept(first_version, versions, seen))
+                (right, y, BUTTON_H, BUTTON_H), (x, foot, BUTTON_H, BUTTON_H),
+                kept(first_group, groups, shown), kept(first_version, versions, seen),
+                (right + theme.SCROLL_GAP, y + ROW_H, theme.SCROLL_W, shown * ROW_H) if shown < groups else None,
+                (x + left, foot + theme.SCROLL_GAP, seen * wide, theme.SCROLL_W) if seen < versions else None)
 
 
 def head_parts(head: Rect) -> tuple[Rect, Rect]:
@@ -164,8 +182,8 @@ def hit(laid: Laid, pos: Pos) -> tuple | None:
 
     ("play", version) is the button that plays a version and ("version", version) the rest of its heading,
     ("group", group) the room a group is named in and ("cell", group, version) the switch of the two, each by
-    its place among all the groups or the versions there are, in view or not. ("add", "version") and
-    ("add", "group") are the two buttons that add one.
+    its place among all the groups or the versions there are, in view or not. The buttons that add and the
+    scroll bars are widgets of their own, and no part of the table.
     """
     for at, head in enumerate(laid.heads, laid.first_version):
         if inside(head, pos):
@@ -176,35 +194,13 @@ def hit(laid: Laid, pos: Pos) -> tuple | None:
         for to, head in enumerate(laid.heads, laid.first_version):
             if inside((head[0], row[1], head[2], row[3]), pos):
                 return "cell", at, to
-    for kind in ("version", "group"):
-        if inside(laid.add_version if kind == "version" else laid.add_group, pos):
-            return "add", kind
     return None
 
 
-def more(laid: Laid, groups: int, versions: int) -> dict[str, Pos]:
-    """Where the marks go that say a table of so many groups and versions has some out of view, each by its way.
-
-    A mark is a small arrow that points the way there are more, and what is given for it is its tip. "left" is
-    for versions before the first in view: it stands before the first heading, in the corner over the groups.
-    "right" is for versions after the last in view, and stands after the last switch of the first row. "up" is
-    for groups above the first in view, in that corner as well, and "down" for groups under the last, beside
-    the button that adds one. A way in which nothing is out of view has no mark, and neither has a rectangle
-    with no table in it.
-    """
-    if not laid.wide:
-        return {}
-    (right, top), (x, foot) = laid.add_version[:2], laid.add_group[:2]
-    middle, air = BUTTON_H // 2, (BUTTON_H - theme.ARROW) // 2
-    tips = {
-        "left": (laid.first_version > 0, (x + laid.left - theme.PAD - theme.ARROW, top + middle)),
-        "right": (laid.first_version + len(laid.heads) < versions,
-                  (right + theme.PAD + theme.ARROW - 1, top + ROW_H + middle)),
-        "up": (laid.first_group > 0, (x + theme.PAD + theme.ARROW - 1, top + air)),
-        "down": (laid.first_group + len(laid.rows) < groups,
-                 (x + BUTTON_H + theme.PAD + theme.ARROW - 1, foot + air + theme.ARROW - 1)),
-    }
-    return {way: tip for way, (out, tip) in tips.items() if out}
+def nearest(pixels: int, step: int) -> int:
+    """How many whole steps of so many pixels each a length in pixels is nearest to. A step is 1 at the least."""
+    step = max(1, step)
+    return (2 * pixels + step) // (2 * step)
 
 
 def picture(rect: Rect, intro: Sequence[float], first: float, tail: float) -> tuple[list[Rect], Rect, Rect]:
@@ -237,22 +233,24 @@ class Table(Widget):
     just now, which the owner sets: their buttons are lit. A group is named with its channels after its name,
     each a small square in the channel's colour and the channel's name. The table saves nothing and plays
     nothing: it tells its owner what the hand asked for, each group and version by its name. A click on a
-    switch calls `flipped(group, version)`, one on the button of a heading `played(version)`, and one on a
-    button that adds `added(kind)`, the kind "group" or "version". The right button on a group or on a heading
-    calls `asked(kind, name, pos)`. The help line says what is under the mouse.
+    switch calls `flipped(group, version)`, and one on the button of a heading `played(version)`. The right
+    button on a group or on a heading calls `asked(kind, name, pos)`, the kind "group" or "version", and a
+    double press of the left one on the name of either calls `named(kind, name)`. The help line says what the
+    left press, the right press and the wheel do on what is under the mouse.
 
     A table too small for all its groups or all its versions shows them from `first_group` and from
-    `first_version` on, which are places among all there are. The wheel over the headings moves the versions
-    by a column a step, and anywhere else on the table the groups by a row. A small arrow marks each way in
-    which there are more, as `more` has them. What is not in view cannot be pressed. `to_last` brings the last
-    group or the last version into view, for the owner to call when one was added.
+    `first_version` on, which are places among all there are. The wheel is read by `kit.wheel`: it goes along
+    the groups by a row a step, and with shift along the versions by a column. What is not in view cannot be
+    pressed. `go` has a group or a version be the first in view, for the scroll bars of the owner, and
+    `to_last` brings the last group or the last version into view, for the owner to call when one was added.
     """
 
     def __init__(self, rect: Rect, flipped: Callable[[str, str], object] | None = None,
-                 played: Callable[[str], object] | None = None, added: Callable[[str], object] | None = None,
-                 asked: Callable[[str, str, Pos], object] | None = None) -> None:
-        super().__init__(rect)
-        self.flipped, self.played, self.added, self.asked = flipped, played, added, asked
+                 played: Callable[[str], object] | None = None,
+                 asked: Callable[[str, str, Pos], object] | None = None,
+                 named: Callable[[str, str], object] | None = None) -> None:
+        super().__init__(rect, TABLE_HELP)
+        self.flipped, self.played, self.asked, self.named = flipped, played, asked, named
         self.groups: tuple[Group, ...] = ()
         self.versions: tuple[Version, ...] = ()
         self.heard: frozenset[str] = frozenset()
@@ -296,6 +294,14 @@ class Table(Widget):
             self.first_version = len(self.versions)
         self._settle()
 
+    def go(self, group: int | None = None, version: int | None = None) -> None:
+        """Have a group, or a version, be the first in view, by its place among all there are, kept in range."""
+        if group is not None:
+            self.first_group = group
+        if version is not None:
+            self.first_version = version
+        self._settle()
+
     def _place(self, kind: str, name: str) -> int | None:
         """The place a group or a version in view has among all there are, by its name. None for one not in view."""
         laid = self.laid
@@ -324,44 +330,51 @@ class Table(Widget):
         return x + theme.PAD, y, self._name_w, ROW_H - 1
 
     def _words(self, found: tuple | None) -> str:
-        """The help line for what the mouse is on."""
+        """The help line for what the mouse is on: what the left press, the right press and the wheel do there.
+
+        On the heading of a version that is premixed it says first in which keys, and leaves the wheel out.
+        """
         if found is None:
-            return "the groups of channels down the side, the versions along the top: a switch is a group in a version"
-        if found[0] == "add":
-            return f"a new {found[1]}"
+            return TABLE_HELP
         if found[0] == "group":
-            return f"group {self.groups[found[1]].name}: the right button renames it, removes it or picks its channels"
-        version, _, ahead = self.versions[found[-1]]
+            return told(f"twice to rename group {self.groups[found[1]].name}", "its menu", WHEEL)
+        version, groups, ahead = self.versions[found[-1]]
         if found[0] == "play":
-            return f"hear version {version} alone: the channels of its groups and no others"
+            return told(f"hear version {version} alone", "its menu", WHEEL)
         if found[0] == "version":
-            mixed = f", premixed in {', '.join(map(key_text, ahead))}" if ahead else ""
-            return f"version {version}{mixed}: the right button renames or removes it, or premixes it in a key"
-        return f"group {self.groups[found[1]].name} in version {version}: a click puts it in or takes it out"
+            press = f"twice to rename version {version}"
+            if ahead:
+                return f"premixed in {', '.join(map(key_text, ahead))}   {told(press, 'its menu')}"
+            return told(press, "its menu", WHEEL)
+        group = self.groups[found[1]].name
+        return told(f"take group {group} out of version {version}" if group in groups
+                    else f"put group {group} in version {version}", wheel=WHEEL)
 
     def _wheel(self, event: Event) -> bool:
         """Move what is in view by the steps of the wheel, up being towards the first. Whether there was a use for it.
 
-        Over the headings it is the versions that move, by a column a step, and anywhere else the groups, by a
-        row. Where all of them are in view the wheel is not used, and is left to what lies under the table.
+        The wheel alone moves the groups, by a row a step, and with shift the versions, by a column. With
+        ctrl, and where all of them are in view, the wheel is not used, and is left to what lies under the
+        table.
         """
+        way, steps = wheel(event)
         laid = self.laid
-        x, y, w, _ = self.rect
-        across = inside((x, y, w, ROW_H), event.pos)
-        count, seen = (len(self.versions), len(laid.heads)) if across else (len(self.groups), len(laid.rows))
+        if way not in (ALONG, ACROSS):
+            return False
+        count, seen = (len(self.groups), len(laid.rows)) if way == ALONG else (len(self.versions), len(laid.heads))
         if seen >= count:
             return False
-        if across:
-            self.first_version = laid.first_version - event.wheel
+        if way == ALONG:
+            self.go(group=laid.first_group - steps)
         else:
-            self.first_group = laid.first_group - event.wheel
-        self._settle()
+            self.go(version=laid.first_version - steps)
         return True
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use the wheel, a press of the left button on a switch or a button, and of the right one on a name.
+        """Use the wheel, a press of the left button on a switch, a button or a name, and of the right one on a name.
 
-        The name is that of a group, or the heading of a version.
+        The name is that of a group, or the heading of a version. The second of two presses of the left
+        button on it is told as a name to give anew.
         """
         if event.kind in ("key", "text"):
             return False
@@ -370,12 +383,18 @@ class Table(Widget):
         self.help = self._words(found)
         if event.kind == "wheel":
             return moved
+        # The group or the version whose name, or whose button, the mouse is on: its kind and its name.
+        kind = None if found is None or found[0] == "cell" else "group" if found[0] == "group" else "version"
+        name = "" if kind is None else (self.groups if kind == "group" else self.versions)[found[1]].name
         if event.kind == "down" and event.button == 3:
-            named = found is not None and found[0] in ("group", "version", "play")
-            if named and self.asked is not None:
-                kind = "group" if found[0] == "group" else "version"
-                self.asked(kind, (self.groups if kind == "group" else self.versions)[found[1]].name, event.pos)
-            return named
+            if kind is not None and self.asked is not None:
+                self.asked(kind, name, event.pos)
+            return kind is not None
+        if event.kind == "down" and event.button == 1 and event.double and found is not None and found[0] == kind:
+            self._pressed = None
+            if self.named is not None:
+                self.named(kind, name)
+            return True
         if event.kind == "down":
             self._pressed = found if event.button == 1 else None
             return self._pressed is not None
@@ -386,20 +405,14 @@ class Table(Widget):
         return False
 
     def _act(self, found: tuple) -> None:
-        """Tell the owner what a click was on."""
-        told = {"cell": self.flipped, "play": self.played, "add": self.added}.get(found[0])
-        if told is None:
-            return
-        if found[0] == "cell":
-            told(self.groups[found[1]].name, self.versions[found[2]].name)
-        else:
-            told(found[1] if found[0] == "add" else self.versions[found[1]].name)
+        """Tell the owner what a click was on: a switch, or the button that plays a version."""
+        if found[0] == "cell" and self.flipped is not None:
+            self.flipped(self.groups[found[1]].name, self.versions[found[2]].name)
+        elif found[0] == "play" and self.played is not None:
+            self.played(self.versions[found[1]].name)
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the headings with their buttons, the groups with their channels, the switches and the two buttons.
-
-        They are those in view. Each way in which there are more has its small arrow.
-        """
+        """Draw the headings with their buttons, the groups with their channels, and the switches: those in view."""
         laid = self.laid
         over = self._over if self.hot else None
         down = over if self.held and over == self._pressed else None
@@ -430,17 +443,6 @@ class Table(Widget):
                     box = cell(laid, at, to)
                     canvas.box(box, theme.ACTIVE if group.name in version.groups else theme.BACKGROUND)
                     canvas.frame(box, theme.TEXT if over == ("cell", at, to) else theme.LINE)
-            for kind, button in (("version", laid.add_version), ("group", laid.add_group)):
-                if button[2] > 0:
-                    draw_button(canvas, button, icon="plus", hot=over == ("add", kind), pressed=down == ("add", kind))
-            for way, (x, y) in more(laid, len(self.groups), len(self.versions)).items():
-                # The arrow widens from its tip, against the way it points.
-                back = -1 if way in ("right", "down") else 1
-                for step in range(theme.ARROW):
-                    if way in ("left", "right"):
-                        canvas.vline(x + back * step, y - step, 2 * step + 1, theme.DIM)
-                    else:
-                        canvas.hline(x - step, y + back * step, 2 * step + 1, theme.DIM)
 
 
 class Keys(Stepper):
@@ -509,10 +511,10 @@ def arrange(rect: Rect, groups: int | None) -> dict[str, Rect]:
     """Where the parts of the layers go in their rectangle, each by what it is called, and each cut to it.
 
     `groups` is how many groups the song's layers have, and None for a song with none. Along the top stand
-    "use", the switch of the layers, then "all", and after a gap "keys_word", "keys", "key_add" and "key_drop".
-    Under the switch "about" is the line a song with no layers has, and "table" is the table of one that has
-    them, as high as its groups need and no higher than leaves the intro its room. "intro" is the room of the
-    intro, under whichever of the two there is.
+    "use", the switch of the layers, then "all", and after a gap "keys_word", "keys" and "key_add", the button
+    after the keys. Under the switch "about" is the line a song with no layers has, and "table" is the table
+    of one that has them, as high as its groups need and no higher than leaves the intro its room. "intro" is
+    the room of the intro, under whichever of the two there is.
     """
     x, y, w, h = rect
     use, every, word = (Font.width(text) + 2 * theme.PAD for text in (USE, ALL, KEYS))
@@ -525,7 +527,6 @@ def arrange(rect: Rect, groups: int | None) -> dict[str, Rect]:
         "keys_word": (at, y, word, BUTTON_H),
         "keys": (at + word, y, KEYS_W, BUTTON_H),
         "key_add": (at + word + KEYS_W + theme.BUTTON_GAP, y, BUTTON_H, BUTTON_H),
-        "key_drop": (at + word + KEYS_W + 2 * theme.BUTTON_GAP + BUTTON_H, y, BUTTON_H, BUTTON_H),
         "about": (x, top, w, Font.LINE),
         "table": (x, top, w, high),
         "intro": (x, top + high + APART, w, HEIGHT),
@@ -562,25 +563,29 @@ class Layers:
     layers are for: switched on, the song has one group with all its channels and one version of that group.
     Switched off, all of the layers go.
 
-    A song with layers has `table`: its groups against its versions, with a switch for each pair. The buttons
-    after the last heading and under the last group add a version and a group. The right button on either
-    opens a menu to name it anew or remove it, and for a group to pick its channels from those of the song: a
-    channel is in one group, so one that is picked leaves the group it was in. The menu of a version has each
-    key of the song as well, to have the version premixed in it: one more file at the build. Groups and
-    versions the table has no room for are brought into view by the wheel, and one that is added is brought
-    into view as it is added. Another song is seen from its first group and its first version.
+    A song with layers has `table`: its groups against its versions, with a switch for each pair. After the
+    last heading stands `version_add` and under the last group `group_add`, which add a version and a group.
+    The right button on a group or a version opens its menu, as `kit.thing_menu` orders it: to name it anew,
+    to copy it and to remove it, and a double press on its name opens the box for the name as well. The copy
+    of a version has its groups. A group cannot be copied, since a channel is in one group, and its menu has
+    `Channels...` to pick its channels from those of the song: one that is picked leaves the group it was in.
+    The menu of a version has each key of the song as well, to have the version premixed in it: one more file
+    at the build. Groups and versions the table has no room for are brought into view by the wheel, and by
+    the scroll bars `along` and `across`, which are seen while there are more than fit. One that is added is
+    brought into view as it is added. Another song is seen from its first group and its first version.
 
     The button in the heading of a version has that version heard alone: the channels of its groups are the
     soloed channels of the session, so it is the sound the solos of the mixer give, with nothing rendered
     again, and the song plays if it did not. The button of another version changes over as the song plays, and
     `all` has every channel heard again. Neither changes the key the song is heard in.
 
-    `keys` shows the keys the song is built in, one at a time, `key_add` adds one that is typed, and `key_drop`
-    removes the one that is shown. A press on `keys` opens a menu with an item for each key, to hear the song
-    in it, with a tick before the one it is heard in: the session has the song rendered in that key as the
-    build renders it, and a loop that plays goes on in it. The key that is chosen is the one shown, and while
-    it is another than the first key it stays the one shown, whatever the wheel or a new key would show. A key
-    that goes from the song while the song is heard in it gives way to the first key.
+    `keys` shows the keys the song is built in, one at a time, and `key_add` after it adds one that is typed.
+    A press on `keys` opens a menu with two items for each key. The first is to hear the song in it, with a
+    tick before the one it is heard in: the session has the song rendered in that key as the build renders
+    it, and a loop that plays goes on in it. The key that is chosen is the one shown, and while it is another
+    than the first key it stays the one shown, whatever the wheel or a new key would show. The second removes
+    the key from the song, and is dim for the only key there is. A key that goes from the song while the song
+    is heard in it gives way to the first key.
 
     `intro` is the switch of the intro, with or without layers. While it is on, `order` shows the patterns it
     plays and opens a menu to add one or take the last out, `tail` and `fade` are its two lengths, and
@@ -598,28 +603,39 @@ class Layers:
         self.session = panel.session
         self._ui = panel.ui
         add, nowhere = panel.add, (0, 0, 0, 0)
-        self.use = add(Toggle(nowhere, USE, changed=self._use,
-                              help="the channels sorted into groups, and versions that are each a choice of groups"))
+        self.use = add(Toggle(nowhere, USE, changed=self._use, help=told(
+            "switch the layers on or off: groups of channels, and versions that are each a choice of groups")))
         self.about = add(Label(nowhere, ABOUT))
-        self.all = add(Button(nowhere, ALL, action=self._all, help="hear every channel again, and no version alone"))
+        self.all = add(Button(nowhere, ALL, action=self._all,
+                              help=told("hear every channel again, and no version alone")))
         self.keys_word = add(Label(nowhere, KEYS))
-        self.keys = add(Keys(nowhere, self._ask_heard, help="the keys the song is built in, as semitones up: a "
-                                                            "press opens them, to hear the song in one"))
-        self.key_add = add(Button(nowhere, icon="plus", action=self._ask_key,
-                                  help="one more key: type how many semitones up the song is built as well"))
-        self.key_drop = add(Button(nowhere, icon="minus", action=self._drop_key))
-        self.table = add(Table(nowhere, self._flip, self._play, self._add, self._ask))
-        self.intro = add(Toggle(nowhere, INTRO, changed=self._switch,
-                                help="patterns that are played once before the song goes round"))
+        self.keys = add(Keys(nowhere, self._ask_heard, help=told(
+            "open the keys the song is built in, as semitones up, to hear it in one or to remove one",
+            wheel="shows the next key")))
+        self.key_add = add(Plus(nowhere, self._ask_key, told(
+            "one more key: type how many semitones up the song is built as well")))
+        self.table = add(Table(nowhere, self._flip, self._play, self._ask, self._rename))
+        # What stands on the table is added after it, so that it is drawn over it and has the mouse first.
+        self.group_add = add(Plus(nowhere, lambda: self._add("group"), told("a new group")))
+        self.version_add = add(Plus(nowhere, lambda: self._add("version"), told("a new version")))
+        self.along = add(ScrollBar(nowhere, lambda offset: self.table.go(group=nearest(offset, ROW_H)), told(
+            "drag the bar to go along the groups, or press beside it to jump", wheel=WHEEL)))
+        self.across = add(ScrollBar(
+            nowhere, lambda offset: self.table.go(version=nearest(offset, self.table.laid.wide)), told(
+                "drag the bar to go along the versions, or press beside it to jump", wheel=WHEEL)))
+        self.intro = add(Toggle(nowhere, INTRO, changed=self._switch, help=told(
+            "switch the intro on or off: patterns that are played once before the song goes round")))
         self.heading = add(Label(nowhere, PLAYS, align="centre"))
-        self.order = add(Button(nowhere, action=self._ask_order,
-                                help="the patterns the intro plays, in turn: a click adds one or takes the last out"))
+        self.order = add(Button(nowhere, action=self._ask_order, help=told(
+            "open the patterns the intro plays, in turn, to add one or take the last out")))
         self.tail = add(Knob(nowhere, _TAIL, 0.0, _TAIL, default=_TAIL, text=TAIL, show=seconds_text, clock=clock,
-                             help="how long the intro rings on past its last pattern: a bar of the song at the most",
+                             help=told("drag up or down for how long the intro rings on, slower with shift",
+                                       "back to the usual", "steps it"),
                              settled=lambda value: self._put(layeredit.intro_tail, "tail", value)))
         low, high, steps = FADES
         self.fade = add(Knob(nowhere, _FADE, low, high, default=_FADE, steps=steps, text=FADE, show=seconds_text,
-                             clock=clock, help="how long the very end of the intro takes to fall away to nothing",
+                             clock=clock, help=told("drag up or down for the fade at the very end, slower with shift",
+                                                    f"back to {seconds_text(_FADE)}", "steps it"),
                              settled=lambda value: self._put(layeredit.intro_fade, "fade", value)))
         self.picture = add(Picture(nowhere))
         #: The name of the song that is shown.
@@ -637,8 +653,9 @@ class Layers:
     @property
     def widgets(self) -> list[Widget]:
         """Every widget of the part, in the order they were added."""
-        return [self.use, self.about, self.all, self.keys_word, self.keys, self.key_add, self.key_drop, self.table,
-                self.intro, self.heading, self.order, self.tail, self.fade, self.picture]
+        return [self.use, self.about, self.all, self.keys_word, self.keys, self.key_add, self.table, self.group_add,
+                self.version_add, self.along, self.across, self.intro, self.heading, self.order, self.tail,
+                self.fade, self.picture]
 
     @property
     def busy(self) -> bool:
@@ -678,12 +695,14 @@ class Layers:
 
         The frame of a knob ends a run of the wheel whose time is up, which saves it. While a knob is under the
         hand nothing is read. The button of a version is lit while the channels that are heard are its own, and
-        the key the song is heard in is the one shown while it is another than the first.
+        the key the song is heard in is the one shown while it is another than the first. The scroll bars are
+        shown where the table is seen from, which the wheel may have changed.
         """
         self.tail.update()
         self.fade.update()
         if not self.busy and self.session.model.project is not self._project:
             self._read()
+        self._sync()
         key = self.session.model.shift
         if key in self._keys[1:]:
             self.keys.picked = self._keys.index(key)
@@ -722,9 +741,6 @@ class Layers:
         self.keys.picked = self._keys.index(shown) if shown in self._keys else 0
         if among and self.session.model.shift not in self._keys:
             self.session.key(self._keys[0])
-        self.key_drop.enabled = len(self._keys) > 1
-        self.key_drop.help = ("the song is no longer built in the key that is shown" if self.key_drop.enabled
-                              else "the only key of a song stays")
         if intro is not None:
             self._read_intro(song, intro)
         self._lay()
@@ -753,23 +769,40 @@ class Layers:
         """Give each widget its rectangle, and have it seen by whether the part is on the window and what there is.
 
         The switches are seen with any song. A song with no layers has the line that says what they are for,
-        and one with layers the table and what stands beside the switch. The settings of the intro and its
-        picture are seen while the intro is on. A widget the part has no room for is not seen.
+        and one with layers the table and what stands beside the switch. The two buttons that add stand where
+        the table has their room, and each scroll bar where the table has its room: one that has none, since
+        all is in view that way, is not seen. The settings of the intro and its picture are seen while the
+        intro is on. A widget the part has no room for is not seen.
         """
         song = self._on and self._song is not None
         layered, intro = song and self.use.is_on, song and self.intro.is_on
         parts = arrange(self._rect, len(self.table.groups) if self.use.is_on else None)
         inner = intro_parts(parts["intro"])
+        self.table.rect = parts["table"]
+        laid, nowhere = self.table.laid, (self._rect[0], self._rect[1], 0, 0)
         placed = [(self.use, parts["use"], song), (self.about, parts["about"], song and not layered),
                   (self.intro, inner["switch"], song)]
         placed += [(widget, parts[part], layered) for part, widget in (
             ("all", self.all), ("keys_word", self.keys_word), ("keys", self.keys), ("key_add", self.key_add),
-            ("key_drop", self.key_drop), ("table", self.table))]
+            ("table", self.table))]
+        placed += [(widget, within(rect or nowhere, parts["table"]), layered) for widget, rect in (
+            (self.group_add, laid.add_group), (self.version_add, laid.add_version), (self.along, laid.along),
+            (self.across, laid.across))]
         placed += [(widget, inner[part], intro) for part, widget in (
             ("heading", self.heading), ("order", self.order), ("tail", self.tail), ("fade", self.fade),
             ("picture", self.picture))]
         for widget, rect, on in placed:
             widget.rect, widget.visible = rect, bool(on) and rect[2] > 0 and rect[3] > 0
+        self._sync()
+
+    def _sync(self) -> None:
+        """Show each scroll bar how much of the table is in view its way, and how much lies before the view.
+
+        The bars count in pixels: a group as the height of its row, and a version as the width of its column.
+        """
+        table, laid = self.table, self.table.laid
+        self.along.show(len(table.groups) * ROW_H, len(laid.rows) * ROW_H, laid.first_group * ROW_H)
+        self.across.show(len(table.versions) * laid.wide, len(laid.heads) * laid.wide, laid.first_version * laid.wide)
 
     def _change(self, make: Callable[[dict], dict], label: str | Callable[[dict], str]) -> bool:
         """Save the song as a rule of `layeredit` leaves it, as one step, and show what the file then holds.
@@ -843,23 +876,36 @@ class Layers:
         self._ui.open(Menu(items, at, chosen=lambda act: act()))
 
     def _ask(self, kind: str, name: str, at: Pos) -> None:
-        """Open the menu of a group or of a version, at the mouse. The only one of its kind cannot be removed.
+        """Open the menu of a group or of a version, at the mouse, in the order every such menu has.
 
-        The menu of a version has an item for each key of the song after that, with a tick before it where
-        the version is premixed in that key: the build then writes one more file, that version in that key
-        already mixed. One that is chosen is put in where it was out, and taken out where it was in.
+        The only one of its kind cannot be removed, and a group cannot be copied: those items are dim. Between
+        them a group has what opens the list of its channels. A version has an item for each key of the song
+        there, with a tick before it where the version is premixed in that key: the build then writes one
+        more file, that version in that key already mixed. One that is chosen is put in where it was out, and
+        taken out where it was in.
         """
+        def rename() -> None:
+            self._rename(kind, name)
+
+        def remove() -> None:
+            self._change(lambda song: _REMOVED[kind](song, name), f"{kind} {name} removed")
+
         several = len(self.table.groups if kind == "group" else self.table.versions) > 1
-        items: list[Item | None] = [Item("Rename...", lambda: self._rename(kind, name))]
         if kind == "group":
-            items.append(Item("Channels...", lambda: self._pick(name, at)))
-        items += [None, Item("Remove", lambda: self._change(lambda song: _REMOVED[kind](song, name),
-                                                            f"{kind} {name} removed"), enabled=several)]
-        if kind == "version":
+            items = thing_menu(rename, None, [Item(CHANNELS, lambda: self._pick(name, at))],
+                               remove if several else None)
+        else:
             ahead = next((version.premix for version in self.table.versions if version.name == name), ())
-            items += [None, *(Item(f"premix in {key_text(key)}", lambda key=key: self._premix(name, key),
-                                   "tick" if key in ahead else "") for key in self._keys)]
+            premix = [Item(f"premix in {key_text(key)}", lambda key=key: self._premix(name, key),
+                           "tick" if key in ahead else "") for key in self._keys]
+            items = thing_menu(rename, lambda: self._copy(name), premix, remove if several else None)
         self._menu(items, at)
+
+    def _copy(self, version: str) -> None:
+        """Save the song with a copy of a version, which has the next free name and is brought into view."""
+        if self._change(lambda song: layeredit.version_copied(song, version),
+                        lambda made: f"version {version} copied as {list(made['layers']['versions'])[-1]}"):
+            self.table.to_last("version")
 
     def _premix(self, version: str, key: int) -> None:
         """Save the song with a version premixed in a key where the file has it not, and not where it has it."""
@@ -905,14 +951,17 @@ class Layers:
             self._menu(items, at)
 
     def _ask_heard(self) -> None:
-        """Open the menu of the song's keys under their field: one that is chosen is the key the song is heard in.
+        """Open the menu of the song's keys under their field: to hear the song in one of them, or to remove one.
 
-        The key it is heard in now has a tick before it.
+        The key the song is heard in now has a tick before it. After the keys to hear it in stand the same
+        keys to remove: the only key there is cannot go, and is dim there.
         """
-        heard = self.session.model.shift
+        heard, several = self.session.model.shift, len(self._keys) > 1
         x, y, _, h = self.keys.rect
-        self._menu([Item(f"hear in {key_text(key)}", lambda key=key: self._hear(key), "tick" if key == heard else "")
-                    for key in self._keys], (x, y + h))
+        self._menu([*(Item(f"{HEAR} {key_text(key)}", lambda key=key: self._hear(key), "tick" if key == heard else "")
+                      for key in self._keys), None,
+                    *(Item(f"{REMOVE_KEY} {key_text(key)}", lambda key=key: self._drop_key(key), enabled=several)
+                      for key in self._keys)], (x, y + h))
 
     def _hear(self, key: int) -> None:
         """Have the song heard in one of its keys, which is then the one shown. What plays goes on in it."""
@@ -933,9 +982,8 @@ class Layers:
         ask(self._ui, self.keys.rect, "", done, allowed="+-0123456789".__contains__, most=3,
             help="how many semitones up the song is built as well, or down with a minus: enter adds the key")
 
-    def _drop_key(self) -> None:
-        """Save the song without the key that is shown."""
-        key = self._keys[self.keys.picked]
+    def _drop_key(self, key: int) -> None:
+        """Save the song without one of its keys."""
         self._change(lambda song: layeredit.key_removed(song, key), f"key {key_text(key)} removed")
 
     def _ask_order(self) -> None:

@@ -10,9 +10,10 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 
 from rowsynth.gui import dials, layout, theme
+from rowsynth.gui.kit import ScrollBar
 from rowsynth.gui.lists import DIMMED, mix
-from rowsynth.gui.mixer import (APART, FADER_LEAST, HIGH_LEAST, SONG_METER_W, WIDE_LEAST, Laid, Mixer, lay, ordered,
-                                strip_parts, thumb)
+from rowsynth.gui.mixer import (APART, BAR_HELP, DESK_HELP, FADER_LEAST, HIGH_LEAST, SONG_METER_W, WIDE_LEAST, Laid,
+                                Mixer, along, lay, ordered, strip_parts)
 from rowsynth.gui.model import Model
 from rowsynth.gui.panels import Panel
 from rowsynth.gui.session import POLL_EVERY, Session
@@ -155,7 +156,9 @@ class Sums(unittest.TestCase):
         laid = lay((0, 0, 628, 200), 10, 8)
         # The last does not fit whole, so it is not in view, and the strips are less high by the bar under them.
         self.assertEqual((laid.wide, laid.most, laid.bar, list(laid.strips), laid.strips[16], laid.song),
-                         (32, 1, (0, 197, 583, 3), list(range(17)), (520, 0, 32, 195), (592, 0, 36, 195)))
+                         (32, 1, (0, 196, 583, 4), list(range(17)), (520, 0, 32, 195), (592, 0, 36, 195)))
+        # The bar is as thick as the scroll bar of any view, and keeps as far from the strips.
+        self.assertEqual((laid.bar[3], laid.bar[1] - 195), (theme.SCROLL_W, theme.SCROLL_GAP))
 
     def test_a_mixer_that_scrolls_shows_whole_strips_from_the_first_in_view_and_the_gap_between_two_of_them(
             self) -> None:
@@ -179,12 +182,22 @@ class Sums(unittest.TestCase):
                           for laid in (lay((0, 0, 141, 200), 10, 8, first) for first in (9, 10))],
                          [(15, {9: 0, 10: 40}), (15, {10: 0, 11: 32, 12: 64})])
 
-    def test_the_thumb_of_the_bar_is_to_the_bar_what_the_strips_in_view_are_to_them_all(self) -> None:
-        # Thirteen of eighteen strips are in view: the thumb is 13 eighteenths of the 441 pixels of the bar.
-        bars = [(laid.bar, thumb(laid, 18)) for laid in (lay(SMALL, 10, 8, first) for first in (0, 2, 5))]
-        self.assertEqual(bars, [((131, 312, 441, 3), (131, 312, 319, 3)), ((131, 312, 441, 3), (180, 312, 319, 3)),
-                                ((131, 312, 441, 3), (253, 312, 319, 3))])
-        self.assertIsNone(thumb(lay(DESK, 10, 8), 18))
+    def test_the_scroll_bar_is_shown_the_strips_in_pixels_so_its_thumb_is_what_those_in_view_are_of_them_all(
+            self) -> None:
+        # Thirteen of eighteen strips of 32 pixels are in view: the thumb is 13 eighteenths of the bar.
+        seen = [lay(SMALL, 10, 8, first) for first in (0, 2, 5)]
+        self.assertEqual([(laid.bar, along(laid, 18)) for laid in seen],
+                         [((131, 311, 441, 4), (576, 416, 0)), ((131, 311, 441, 4), (576, 416, 64)),
+                          ((131, 311, 441, 4), (576, 416, 160))])
+        bar = ScrollBar(seen[0].bar)
+        thumbs = []
+        for laid in seen:
+            bar.show(*along(laid, 18))
+            thumbs.append(bar.thumb())
+        self.assertEqual(thumbs, [(131, 311, 319, 4), (180, 311, 319, 4), (253, 311, 319, 4)])
+        # With every strip in view all of them are in view, and there is no thumb.
+        bar.show(*along(lay(DESK, 10, 8), 18))
+        self.assertEqual((along(lay(DESK, 10, 8), 18), bar.thumb()), ((594, 594, 0), None))
 
     def test_a_rectangle_too_small_for_a_strip_beside_the_song_or_for_a_fader_has_no_strip_in_it(self) -> None:
         nothing = Laid(0, 0, 0, {}, (5, 7, 0, 0), None)
@@ -295,7 +308,7 @@ class Shown(Opened):
             self) -> None:
         self.ui.handle(Event("move", middle(self.long.name.rect)))
         self.assertEqual((self.long.name.text, self.ui.help),
-                         ("a_long_name", "a_long_name, tone: a click shows its notes"))
+                         ("a_long_name", "channel a_long_name, tone   press: show its notes"))
         click(self.ui, middle(self.long.name.rect))
         click(self.ui, middle(self.kit.name.rect))
         self.assertEqual(self.picks, ["a_long_name", "kit"])
@@ -375,7 +388,12 @@ class Heard(Opened):
             enabled.append(clear.enabled)
         self.assertEqual(enabled, [True, False, True, True])
         self.ui.handle(Event("move", middle(clear.rect)))
-        self.assertEqual((clear.enabled, self.ui.help), (True, "hear every channel again: no mute and no solo"))
+        self.assertEqual((clear.enabled, self.ui.help),
+                         (True, "press: hear every channel again: no mute and no solo"))
+        # The two toggles of a strip say what a press on them does.
+        for toggle, begins in ((self.low.mute, "press: mute the channel"), (self.low.solo, "press: solo the channel")):
+            self.ui.handle(Event("move", middle(toggle.rect)))
+            self.assertTrue(self.ui.help.startswith(begins), self.ui.help)
         click(self.ui, middle(clear.rect))
         self.assertEqual((self.session.muted, self.session.soloed, self.session.model.heard, self.dim(), clear.enabled),
                          (frozenset(), frozenset(), None, [], False))
@@ -433,7 +451,7 @@ class Saved(Opened):
         self.assertEqual(differing(before, self.data()), ["songs.walk.channels.lead.gain"])
         self.assertEqual((self.song()["channels"]["lead"]["gain"], fader.value, self.mixer.busy), (0.9, 0.9, False))
         # It is one step, called as the knob of the bar calls it, and taken back the fader shows that.
-        self.assertEqual(self.session.undo_label, "lead: level 0.9")
+        self.assertEqual(self.session.undo_label, "lead: volume 0.9")
         self.assertTrue(self.session.undo())
         self.mixer.update()
         self.assertEqual((self.data(), fader.value, self.lead.number.text, self.session.can_undo),
@@ -442,14 +460,14 @@ class Saved(Opened):
     def test_a_level_put_back_to_what_the_engine_takes_without_it_is_taken_out_of_the_file(self) -> None:
         click(self.ui, middle(self.lead.fader.rect), button=3)
         self.assertEqual((self.song()["channels"]["lead"], self.session.undo_label, self.lead.fader.value),
-                         ({"inst": "tone"}, "lead: level 1", 1))
+                         ({"inst": "tone"}, "lead: volume 1", 1))
         # A channel that said none gets one when its fader is moved, and loses it when the fader is put back.
         self.drag(self.low.fader, -20)
         self.assertEqual((self.song()["channels"]["low"], self.session.undo_label),
-                         ({"inst": "buzz", "gain": 0.8}, "low: level 0.8"))
+                         ({"inst": "buzz", "gain": 0.8}, "low: volume 0.8"))
         self.drag(self.low.fader, 20)
         self.assertEqual((self.song()["channels"]["low"], self.session.undo_label, self.low.number.text),
-                         ({"inst": "buzz"}, "low: level 1", "1"))
+                         ({"inst": "buzz"}, "low: volume 1", "1"))
 
     def test_the_fader_of_the_song_saves_the_level_of_the_song_which_is_not_written_at_what_the_engine_takes(
             self) -> None:
@@ -460,10 +478,10 @@ class Saved(Opened):
         self.ui.handle(Event("up", mouse, button=1))
         self.assertEqual(differing(before, self.data()), ["songs.walk.gain"])
         self.assertEqual((self.song()["gain"], mixer.fader.value, self.session.undo_label),
-                         (0.5, 0.5, "walk: level 0.5"))
+                         (0.5, 0.5, "walk: volume 0.5"))
         click(self.ui, middle(mixer.fader.rect), button=3)
         self.assertEqual(("gain" in self.song(), mixer.fader.value, mixer.number.text, self.session.undo_label),
-                         (False, 0.35, "0.35", "walk: level 0.35"))
+                         (False, 0.35, "0.35", "walk: volume 0.35"))
         self.outside(lambda song: song.update(gain=0.2))
         mixer.update()
         self.assertEqual((mixer.fader.value, mixer.number.text), (0.2, "0.2"))
@@ -490,7 +508,7 @@ class Saved(Opened):
         self.assertEqual(([self.song()["channels"][name].get("gain") for name in ORDER], self.song()["gain"]),
                          ([0.25, None, 0.5, 0.7], 0.2))
         self.assertEqual((self.kit.fader.value, self.session.undo_label, self.session.message),
-                         (0.7, "kit: level 0.7", ""))
+                         (0.7, "kit: volume 0.7", ""))
 
     def test_a_fader_whose_strip_another_channel_takes_is_let_go_of_and_nothing_is_saved(self) -> None:
         def gone(song: dict) -> None:
@@ -517,7 +535,11 @@ class Saved(Opened):
         self.now += dials.WHEEL_WAIT
         self.mixer.update()
         self.assertEqual((self.mixer.busy, self.song()["channels"]["lead"]["gain"], self.session.undo_label),
-                         (False, 0.83, "lead: level 0.83"))
+                         (False, 0.83, "lead: volume 0.83"))
+        # The fader says what the left press, the right press and the wheel do on it, in the word for how loud.
+        self.ui.handle(Event("move", middle(fader.rect)))
+        self.assertEqual(self.ui.help, "press: drag up or down for the volume of the channel, slower with shift   "
+                                       "right press: back to 1   wheel: steps it")
 
 
 class Scrolled(Opened):
@@ -525,26 +547,35 @@ class Scrolled(Opened):
         mixer, desk = self.mixer, self.mixer.desk
         over = middle(self.lead.number.rect)
         self.assertFalse(self.ui.handle(Event("wheel", over, wheel=-1)))
-        self.assertEqual((mixer.first, self.seen(), desk.bar, desk.thumb), (0, ORDER, None, None))
+        self.assertEqual((mixer.first, self.seen(), desk.bar.visible, desk.bar.thumb()), (0, ORDER, False, None))
         # In a room for two strips beside the song's, a step of the wheel is two strips.
         mixer.place(NARROW)
-        self.assertEqual((mixer.laid.most, self.seen(), desk.bar), (3, ["lead", "low"], (131, 366, 64, 3)))
-        self.assertEqual((desk.thumb, mixer.number.visible, mixer.fader.rect[3]), ((131, 366, 16, 3), True, 201))
+        self.assertEqual((mixer.laid.most, self.seen(), desk.bar.visible, desk.bar.rect),
+                         (3, ["lead", "low"], True, (131, 365, 64, 4)))
+        self.assertEqual((desk.bar.thumb(), mixer.number.visible, mixer.fader.rect[3]), ((131, 365, 16, 4), True, 201))
         seen = []
         for wheel in (-1, -1, -1, 1, 5):
             self.assertTrue(self.ui.handle(Event("wheel", over, wheel=wheel)))
-            seen.append((mixer.first, self.seen(), desk.thumb[0]))
+            seen.append((mixer.first, self.seen(), desk.bar.thumb()[0]))
         # The third channel has no room for the drum channel after it, which stands apart.
         self.assertEqual(seen, [(2, ["a_long_name"], 163), (3, ["kit"], 179), (3, ["kit"], 179),
                                 (1, ["low", "a_long_name"], 147), (0, ["lead", "low"], 131)])
         # A strip out of view has no widget on the window, and one in view has all of its own.
         self.assertEqual([widget.visible for strip in (self.lead, self.kit) for widget in strip.parts().values()],
                          [True] * 6 + [False] * 6)
-        # While the mixer scrolls, the wheel on a fader moves the view too, and sets no level.
+        # The mixer goes one way, so with shift the wheel moves along the strips as well. With ctrl it is not used.
+        self.assertTrue(self.ui.handle(Event("wheel", over, wheel=-1, mods=frozenset({"shift"}))))
+        self.assertFalse(self.ui.handle(Event("wheel", over, wheel=-1, mods=frozenset({"ctrl"}))))
+        self.assertEqual(mixer.first, 2)
+        self.ui.handle(Event("wheel", over, wheel=1))
+        # The wheel on a fader sets its volume in a mixer that scrolls too, and moves no view.
         for fader in (self.lead.fader, mixer.fader):
             self.assertTrue(self.ui.handle(Event("wheel", middle(fader.rect), wheel=-1)))
-            self.ui.handle(Event("wheel", over, wheel=1))
-        self.assertEqual((mixer.first, mixer.busy, self.lead.fader.value, mixer.fader.value), (0, False, 0.8, 0.4))
+        self.assertEqual((mixer.first, mixer.busy, self.lead.fader.value, mixer.fader.value), (0, True, 0.79, 0.39))
+        self.now += dials.WHEEL_WAIT
+        mixer.update()
+        self.assertEqual((mixer.busy, self.song()["channels"]["lead"]["gain"], self.song()["gain"]),
+                         (False, 0.79, 0.39))
         # The song that is shown keeps its view, and another starts at its first strip, scrolling or not.
         self.ui.handle(Event("wheel", over, wheel=-1))
         mixer.show("walk", "kit")
@@ -552,7 +583,37 @@ class Scrolled(Opened):
         mixer.show("trio")
         self.assertEqual((mixer.first, mixer.laid.most, self.seen()), (0, 1, ["one", "two"]))
         mixer.show("plain")
-        self.assertEqual((mixer.first, self.seen(), desk.bar), (0, ["air"], None))
+        self.assertEqual((mixer.first, self.seen(), desk.bar.visible), (0, ["air"], False))
+
+    def test_the_scroll_bar_under_the_strips_is_dragged_by_its_thumb_and_pressed_beside_it_and_says_its_line(
+            self) -> None:
+        mixer, bar = self.mixer, self.mixer.desk.bar
+        self.ui.handle(Event("move", middle(self.lead.number.rect)))
+        self.assertEqual((self.ui.help, DESK_HELP),
+                         (DESK_HELP, "a strip for each channel, and at the right the whole song   wheel: along the "
+                                     "strips"))
+        mixer.place(NARROW)
+        x, y, w, _ = bar.thumb()
+        self.ui.handle(Event("move", (x + 2, y + 1)))
+        self.assertEqual((self.ui.help, BAR_HELP),
+                         (BAR_HELP, "press: drag the bar to go along the strips, or press beside it to jump   wheel: "
+                                    "along the strips"))
+        # The thumb has 48 pixels of way for the three strips that are out of view: 16 pixels a strip.
+        self.ui.handle(Event("down", (x + 2, y + 1), button=1))
+        seen = []
+        for moved in (16, 30, 48, 100, -40):
+            self.ui.handle(Event("move", (x + 2 + moved, y + 30)))
+            seen.append((mixer.first, bar.busy, self.seen()))
+        self.assertEqual(seen, [(1, True, ["low", "a_long_name"]), (2, True, ["a_long_name"]), (3, True, ["kit"]),
+                                (3, True, ["kit"]), (0, True, ["lead", "low"])])
+        self.ui.handle(Event("up", (x + 2, y + 30), button=1))
+        self.ui.handle(Event("move", (x + 40, y + 1)))
+        self.assertEqual((mixer.first, bar.busy), (0, False))
+        # A press beside the thumb moves the view by what is in view, which is one strip here.
+        click(self.ui, (x + w + 20, y + 1))
+        self.assertEqual((mixer.first, bar.thumb()[0]), (1, x + 16))
+        click(self.ui, (x + 2, y + 1))
+        self.assertEqual((mixer.first, bar.thumb()[0], self.data(), self.session.can_undo), (0, x, PROJECT, False))
 
 
 if __name__ == "__main__":

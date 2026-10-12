@@ -224,6 +224,55 @@ class Picking(unittest.TestCase):
         self.assertFalse(ui.handle(Event("wheel", (5, 25), wheel=-1)))
         self.assertEqual((rows.scroll.offset, rows.picked, told), (0, None, []))
 
+    def test_a_list_goes_one_way_so_the_wheel_with_shift_or_ctrl_is_not_used_and_scrolls_nothing(self) -> None:
+        ui, rows, _ = made(SHORT, FLAT)
+        for mods in ({"shift"}, {"ctrl"}, {"ctrl", "shift"}):
+            self.assertFalse(ui.handle(Event("wheel", (15, 25), wheel=-1, mods=frozenset(mods))))
+        self.assertEqual(rows.scroll.offset, 0)
+        # Alt is none of the keys the wheel is read by.
+        self.assertTrue(ui.handle(Event("wheel", (15, 25), wheel=-1, mods=frozenset({"alt"}))))
+        self.assertEqual(rows.scroll.offset, 3 * ROW)
+
+    def test_a_row_that_is_a_plus_is_told_of_when_it_is_pressed_and_is_picked_by_no_press_and_no_key(self) -> None:
+        plus = Row(("new", "SOUNDS"), "new", plus=True)
+        ui, rows, told = made(TALL, (*TREE[:5], plus, *TREE[5:]), "jump")
+        added: list[Hashable] = []
+        rows.added = added.append
+        self.assertTrue(click(ui, spot(rows, plus.key)))
+        self.assertEqual((added, rows.picked, told), ([plus.key], "jump", []))
+        # The keys go from the row before it to the row after it, and back.
+        for key, picked in (("down", "lead"), ("up", "jump"), ("end", "lead")):
+            press(ui, key)
+            self.assertEqual(rows.picked, picked)
+        # The right button on it is not used, and it cannot be the picked row: it is folded away with the others.
+        asked: list[tuple] = []
+        rows.asked = lambda *what: asked.append(what)
+        self.assertFalse(click(ui, spot(rows, plus.key), button=3))
+        rows.picked = plus.key
+        rows.rows = rows.rows
+        self.assertEqual((asked, rows.picked, added), ([], None, [plus.key]))
+        click(ui, spot(rows, "SOUNDS"))
+        self.assertEqual((seen(rows), rows.row_rect(plus.key)),
+                         (["SONGS", "tune", "SOUNDS", "INSTRUMENTS", "lead"], None))
+        # With no owner to tell, a press on it does nothing.
+        other, bare, said = made(TALL, (plus,))
+        self.assertTrue(click(other, (15, 25)))
+        self.assertEqual((bare.picked, said), (None, []))
+
+    def test_the_rectangle_of_a_row_is_all_of_its_row_as_the_list_is_scrolled_in_view_or_not(self) -> None:
+        ui, rows, _ = made(SHORT, FLAT)
+        # The bar takes its room from the rows.
+        self.assertEqual([rows.row_rect(key) for key in (0, 2, 9, 10)],
+                         [(10, 20, 80 - BAR, ROW), (10, 20 + 2 * ROW, 80 - BAR, ROW), (10, 20 + 9 * ROW, 80 - BAR, ROW),
+                          None])
+        rows.scroll.to(ROW // 2)
+        self.assertEqual(rows.row_rect(0), (10, 20 - ROW // 2, 80 - BAR, ROW))
+        # The name of a row that is a plus stands after the room of a square, also under no heading.
+        rows.rows = (Row("more", "new", plus=True),)
+        self.assertEqual((rows.row_rect("more"), rows.name_rect("more")),
+                         ((10, 20, 80, ROW), (10 + PAD + theme.LIST_SQUARE + theme.LIST_SPACE, 20,
+                                              80 - 2 * PAD - theme.LIST_SQUARE - theme.LIST_SPACE, ROW)))
+
     def test_the_keys_move_the_pick_past_a_heading_and_stop_at_both_ends(self) -> None:
         ui, rows, told = made(TALL, TREE)
         # A press under its last row gives the list the focus, and picks nothing.
@@ -389,6 +438,14 @@ class Drawn(unittest.TestCase):
     def band(self, rows: List, key: Hashable) -> layout.Rect:
         """The rectangle of the row of a key in a list with no bar."""
         return *spot(rows, key), rows.rect[2], ROW
+
+    def test_a_row_that_is_a_plus_has_its_text_dim_and_nothing_where_its_square_would_be(self) -> None:
+        rows = self.ui.add(List(self.RECT, (*TREE[:2], Row("more", "new", plus=True)), "more"))
+        self.draw()
+        # It is not the picked row, whatever the list was told, and the room before its text is left to a button.
+        self.assertEqual((rows.picked, self.colours(self.band(rows, "more")), self.colours(self.band(rows, "tune"))),
+                         (None, {theme.PANEL, theme.DIM}, {theme.PANEL, theme.SONG, theme.TEXT}))
+        self.assertEqual(self.ink((10, 34, PAD + theme.LIST_SQUARE + theme.LIST_SPACE, ROW), theme.DIM), set())
 
     def test_the_picked_row_is_on_a_lit_background_and_the_row_under_the_mouse_on_one_lit_less(self) -> None:
         rows = self.ui.add(List(self.RECT, TREE, "tune"))

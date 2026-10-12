@@ -10,10 +10,11 @@ from . import theme
 from .channelbar import ABSENT, BUTTON_H, LEVELS, save, tidy
 from .dials import Meter, Slider, plain
 from .font import Font
+from .kit import ZOOM, ScrollBar, told, wheel
 from .layout import Rect
-from .lists import DIMMED, Scroll, mix
+from .lists import DIMMED, mix
 from .theme import Colour
-from .ui import Button, Event, Label, Toggle, Ui, Widget
+from .ui import NOWHERE, Button, Event, Label, Pos, Toggle, Ui, Widget, inside
 
 if TYPE_CHECKING:
     from ..project import Project
@@ -38,20 +39,20 @@ PAIR_GAP = 3
 TOGGLE_W = 13
 #: From one part of a strip to the part under it.
 SPACE = 2
-#: How high the bar under the strips is that shows where the view is, and what is left free over it.
-BAR_H = 3
-BAR_GAP = 2
+#: What the scroll bar under the strips takes of the height of a mixer that scrolls: the bar, and what is left
+#: free over it.
+BAR_ROOM = theme.SCROLL_GAP + theme.SCROLL_W
 #: The least height of a fader, and with it the least height of a mixer: the parts of a strip one under the other,
 #: and the bar under them. A mixer lower than that, or too narrow for one channel beside the song, shows nothing.
 FADER_LEAST = 24
-HIGH_LEAST = 2 * Font.LINE + BUTTON_H + FADER_LEAST + 3 * SPACE + BAR_GAP + BAR_H
+HIGH_LEAST = 2 * Font.LINE + BUTTON_H + FADER_LEAST + 3 * SPACE + BAR_ROOM
 WIDE_LEAST = STRIP_LEAST + APART + SONG_W
 #: How many strips one step of the wheel moves a mixer that scrolls.
 WHEEL_STRIPS = 2
 
-#: The level the engine takes for a song that says none, which is not written, and the travel of the song's fader:
-#: its lowest value, its highest, and the steps between them. A project may hold any number, so the travel is
-#: chosen here: in hundredths up to 1.
+#: The volume the engine takes for a song that says none, which is not written, and the travel of the song's
+#: fader: its lowest value, its highest, and the steps between them. A project may hold any number, so the
+#: travel is chosen here: in hundredths up to 1.
 SONG_ABSENT = 0.35
 SONG_LEVELS = (0.0, 1.0, 100)
 
@@ -59,9 +60,11 @@ SONG_LEVELS = (0.0, 1.0, 100)
 MUTE = "M"
 SOLO = "S"
 ALL = "ALL"
-#: What the mixer says of itself where the mouse is on none of its controls.
-DESK_HELP = ("a strip for each channel, and at the right the whole song: the wheel moves along them where they do "
-             "not fit")
+#: What the wheel does over the mixer, as the help line says it. What the mixer says of itself where the mouse
+#: is on none of its controls, and what the bar under its strips says.
+WHEEL = "along the strips"
+DESK_HELP = f"a strip for each channel, and at the right the whole song   {told(wheel=WHEEL)}"
+BAR_HELP = told("drag the bar to go along the strips, or press beside it to jump", wheel=WHEEL)
 #: The parts of a strip, as `strip_parts` calls them.
 PARTS = ("number", "meter", "fader", "mute", "solo", "both", "name")
 
@@ -88,8 +91,8 @@ class Laid(NamedTuple):
 
     `wide` is the width of a channel's strip. `first` is the first channel in view, and `most` the furthest that
     can be: 0 while every strip is in view. `strips` has the rectangle of each channel in view, by its place
-    among the channels. `song` is the strip of the whole song. `bar` is the track of the bar under the strips,
-    or None while every strip is in view.
+    among the channels. `song` is the strip of the whole song. `bar` is the room of the scroll bar under the
+    strips, or None while every strip is in view.
     """
 
     wide: int
@@ -119,7 +122,7 @@ def lay(rect: Rect, tuned: int, drums: int, first: int = 0) -> Laid:
     wide = min(STRIP_MOST, (room - (GROUP_GAP if tuned and drums else 0)) // max(1, count))
     most, high = 0, h
     if wide < STRIP_LEAST:
-        wide, high = STRIP_LEAST, h - BAR_GAP - BAR_H
+        wide, high = STRIP_LEAST, h - BAR_ROOM
         most = next(start for start in range(count) if span(start, count - 1, tuned, wide) <= room)
     first = min(max(0, first), most)
     strips: dict[int, Rect] = {}
@@ -131,16 +134,16 @@ def lay(rect: Rect, tuned: int, drums: int, first: int = 0) -> Laid:
         strips[index] = (at, y, wide, high)
         at += wide
     return Laid(wide, first, most, strips, (x + w - SONG_W, y, SONG_W, high),
-                (x, y + h - BAR_H, room, BAR_H) if most else None)
+                (x, y + h - theme.SCROLL_W, room, theme.SCROLL_W) if most else None)
 
 
-def thumb(laid: Laid, count: int) -> Rect | None:
-    """The thumb on the bar under the strips of `count` channels: where the view is among them. None with no bar."""
-    if laid.bar is None:
-        return None
-    x, y, w, h = laid.bar
-    start, length = Scroll(count, count - laid.most, laid.first, 1).thumb(w)
-    return x + start, y, length, h
+def along(laid: Laid, count: int) -> tuple[int, int, int]:
+    """What the scroll bar under the strips of `count` channels is shown, in pixels, a strip counted as its width.
+
+    They are how long all the strips are, how much of that is in view, and how much lies before the view:
+    the bar is to its thumb what the strips are to those in view.
+    """
+    return count * laid.wide, (count - laid.most) * laid.wide, laid.first * laid.wide
 
 
 def strip_parts(rect: Rect, meter: int = METER_W) -> dict[str, Rect]:
@@ -189,51 +192,68 @@ class Name(Button):
 
 
 class Fader(Slider):
-    """The slider of a strip. While `scrolls` says that the mixer scrolls, the wheel on it is left to the mixer.
+    """The slider of a strip, which sets a volume. The wheel on it changes it, as on any slider."""
 
-    So a turn of the wheel that moves the view sets no level, whatever the strips have brought under the mouse.
-    """
-
-    def __init__(self, rect: Rect, value: float, travel: tuple[float, float, int], scrolls: Callable[[], bool],
+    def __init__(self, rect: Rect, value: float, travel: tuple[float, float, int],
                  changed: Callable[[float], object], settled: Callable[[float], object], colour: Colour,
                  clock: Callable[[], float], help: str) -> None:
-        """`travel` is the lowest value, the highest, and the steps between them. A right click is `value` again."""
+        """`travel` is the lowest value, the highest, and the steps between them. A right press is `value` again."""
         low, high, steps = travel
         super().__init__(rect, value, low, high, changed, value, steps, colour, help, settled, clock)
-        self.scrolls = scrolls
-
-    def on(self, event: Event, ui: Ui) -> bool:
-        """Take what a slider takes, but for the wheel while the mixer scrolls: that goes on to the desk."""
-        if event.kind == "wheel" and self.scrolls():
-            return False
-        return super().on(event, ui)
 
 
 class Desk(Widget):
-    """What the strips of a mixer stand on: it takes the wheel for the mixer, and draws what is no strip.
+    """What the strips of a mixer stand on: it takes the wheel for the mixer, and has what is no strip.
 
-    `wheel` is called with the steps of the wheel, and answers whether they were used. `line` is the line
-    before the strip of the whole song. `bar` and `thumb` are the bar under the strips and the thumb on it, or
-    None while every strip is in view. The mixer sets the three.
+    The wheel is read by `kit.wheel`. The mixer goes one way, so the wheel alone moves along the strips, and so
+    it does with shift: `wheel` is called with its steps, and answers whether they were used. With ctrl it is
+    not used. `line` is the line before the strip of the whole song, which the mixer sets.
+
+    `bar` is the scroll bar under the strips, a part of the desk: the desk draws it, hands it what the mouse
+    does on it, and says its line of help there. The mixer gives it its rectangle, and has it seen only while
+    not every strip is in view.
     """
 
-    def __init__(self, rect: Rect, wheel: Callable[[int], bool], help: str = "") -> None:
+    def __init__(self, rect: Rect, wheel: Callable[[int], bool], moved: Callable[[int], object] | None = None,
+                 help: str = "") -> None:
+        self.bar = ScrollBar((0, 0, 0, 0), moved, BAR_HELP)
+        self.bar.visible = False
+        self._mouse: Pos = NOWHERE
         super().__init__(rect, help)
         self.wheel = wheel
         self.line: Rect = (0, 0, 0, 0)
-        self.bar: Rect | None = None
-        self.thumb: Rect | None = None
+
+    @property
+    def help(self) -> str:
+        """What the bar says while the mouse is on it, and anywhere else the line the desk was made with."""
+        return self.bar.help if self._on_bar(self._mouse) else self._help
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
+
+    def _on_bar(self, pos: Pos) -> bool:
+        """Whether a position is on the bar, while there is one."""
+        return self.bar.visible and inside(self.bar.rect, pos)
 
     def on(self, event: Event, ui: Ui) -> bool:
-        """Use the wheel where the mixer has a use for it, and nothing else."""
-        return event.kind == "wheel" and self.wheel(event.wheel)
+        """Use the wheel where the mixer has a use for it, and hand the bar a press on it and the drag after it."""
+        if event.kind in ("key", "text"):
+            return False
+        self._mouse = event.pos
+        if event.kind == "wheel":
+            way, steps = wheel(event)
+            return way != ZOOM and self.wheel(steps)
+        if self.bar.busy or (event.kind == "down" and self._on_bar(event.pos)):
+            return self.bar.on(event, ui)
+        return False
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the line before the strip of the song, and the bar with its thumb while the mixer scrolls."""
+        """Draw the line before the strip of the song, and the bar while the mixer scrolls."""
         canvas.box(self.line, theme.LINE)
-        if self.bar is not None and self.thumb is not None:
-            canvas.box(self.bar, theme.BACKGROUND)
-            canvas.box(self.thumb, theme.LINE)
+        if self.bar.visible:
+            self.bar.hot = self.hot and self._on_bar(self._mouse)
+            self.bar.draw(canvas)
 
 
 @dataclass
@@ -261,20 +281,21 @@ class Strip:
 
 
 class Mixer:
-    """Every channel of a song side by side, to set their levels against each other and to hear some alone.
+    """Every channel of a song side by side, to set their volumes against each other and to hear some alone.
 
     It is no panel of the frame. A song panel owns it, adds its widgets through itself, gives it a rectangle
     with `place`, a song with `show` and a frame with `update`, and says with `seen` whether it is on the
     window. `strips` has a strip for each channel, the tuned ones and then the drum channels, as `ordered` has
     them: more are made as a song needs them, and those a song has no channel for show none. A strip has, from
-    the top, the channel's level as a number, a meter beside the fader of that level, the toggles of its mute
+    the top, the channel's volume as a number, a meter beside the fader of that volume, the toggles of its mute
     and its solo, and its name in its colour: a press on the name calls `picked` with it. At the right end
     stands the strip of the whole song: `number`, `meter`, `fader` and `name`, and `clear`, which takes every
-    mute and every solo off. Strips that do not fit are scrolled by the wheel, `first` being the first in view:
-    the wheel then moves the view wherever it is on the mixer, and sets a fader only in a mixer that shows all.
+    mute and every solo off. Strips that do not fit are scrolled, `first` being the first in view: by the
+    wheel anywhere on the mixer but on a fader, and by the scroll bar that then lies under the strips, which
+    is the desk's. The wheel on a fader changes its volume, in a mixer that scrolls as in one that shows all.
 
-    A fader shows its level as it is moved, and is saved when the hand has let go of it, as a knob of the
-    channel's bar is: one change to the file, and one step that can be taken back. A level put back to what
+    A fader shows its volume as it is moved, and is saved when the hand has let go of it, as a knob of the
+    channel's bar is: one change to the file, and one step that can be taken back. A volume put back to what
     the engine takes when there is none is taken out of the file. After each change, and whenever the model
     has loaded the file again, the faders show what the file holds, but for one that is under the hand: that
     one shows it when the hand has let go.
@@ -291,14 +312,15 @@ class Mixer:
         self.picked = picked
         self._panel, self._clock = panel, clock
         nowhere = (0, 0, 0, 0)
-        self.desk = panel.add(Desk(nowhere, self._wheel, DESK_HELP))
+        self.desk = panel.add(Desk(nowhere, self._wheel, self._go, DESK_HELP))
         self.strips: list[Strip] = []
         self.number = panel.add(Label(nowhere, "", theme.TEXT, "centre"))
         self.meter = panel.add(Meter(nowhere))
         self.meter.levels = (0.0, 0.0)
         self.fader = panel.add(Fader(
-            nowhere, SONG_ABSENT, SONG_LEVELS, self._scrolls, lambda value: self._tell(), self._put_song,
-            theme.TEXT, clock, f"how loud the whole song is: a right click is {plain(SONG_ABSENT)} again"))
+            nowhere, SONG_ABSENT, SONG_LEVELS, lambda value: self._tell(), self._put_song, theme.TEXT, clock,
+            told("drag up or down for the volume of the whole song, slower with shift",
+                 f"back to {plain(SONG_ABSENT)}", "steps it")))
         self.clear = panel.add(Button(nowhere, icon="speaker", action=self._clear))
         self.name = panel.add(Label(nowhere, ALL, theme.TEXT, "centre"))
         #: The names of the song that is shown and of its picked channel, and the first strip in view.
@@ -381,13 +403,14 @@ class Mixer:
         add, nowhere = self._panel.add, (0, 0, 0, 0)
         strip = Strip(
             add(Label(nowhere, "", theme.TEXT, "centre")), add(Meter(nowhere)),
-            add(Fader(nowhere, ABSENT["gain"], LEVELS, self._scrolls, lambda value: self._paint(strip),
+            add(Fader(nowhere, ABSENT["gain"], LEVELS, lambda value: self._paint(strip),
                       lambda value: self._put(strip, value), theme.TEXT, self._clock,
-                      f"how loud the channel is in the mix: a right click is {plain(ABSENT['gain'])} again")),
+                      told("drag up or down for the volume of the channel, slower with shift",
+                           f"back to {plain(ABSENT['gain'])}", "steps it"))),
             add(Toggle(nowhere, MUTE, colour=theme.MUSTARD, changed=lambda on: self._press(strip, False),
-                       help="mute: the channel is not heard")),
+                       help=told("mute the channel, or hear it again"))),
             add(Toggle(nowhere, SOLO, colour=theme.GOOD, changed=lambda on: self._press(strip, True),
-                       help="solo: only the soloed channels are heard")),
+                       help=told("solo the channel, so that only the soloed ones are heard, or take its solo off"))),
             add(Name(nowhere, lambda: self._name(strip))))
         return strip
 
@@ -412,7 +435,7 @@ class Mixer:
             if not strip.fader.busy:
                 strip.fader.value = channels[name].get("gain", ABSENT["gain"])
             strip.name.text, strip.name.picked = name, name == self.channel
-            strip.name.help = f"{name}, {channels[name]['inst']}: a click shows its notes"
+            strip.name.help = f"channel {name}, {channels[name]['inst']}   {told('show its notes')}"
             self._paint(strip)
         for strip in self.strips[len(found):]:
             strip.fader.drop()
@@ -423,11 +446,11 @@ class Mixer:
         self._lay()
 
     def _tell(self) -> None:
-        """Have the strip of the whole song show its level as a number."""
+        """Have the strip of the whole song show its volume as a number."""
         self.number.text = plain(self.fader.value)
 
     def _paint(self, strip: Strip) -> None:
-        """Have a strip show its level as a number, and be in its channel's colour, or dim where it is not heard."""
+        """Have a strip show its volume as a number, and be in its channel's colour, or dim where it is not heard."""
         colour = mix(theme.PANEL, strip.colour, DIMMED) if strip.dim else strip.colour
         strip.fader.colour = strip.name.colour = colour
         strip.number.text, strip.number.colour = plain(strip.fader.value), theme.DIM if strip.dim else theme.TEXT
@@ -448,7 +471,9 @@ class Mixer:
         x, y, w, h = laid.song
         self.desk.rect, self.desk.visible = self._rect, self._on
         self.desk.line = (x - APART // 2 - 1, y, 1, h) if w else nowhere
-        self.desk.bar, self.desk.thumb = laid.bar, thumb(laid, self._count)
+        bar = self.desk.bar
+        bar.rect, bar.visible = laid.bar or nowhere, laid.bar is not None
+        bar.show(*along(laid, self._count))
 
     def _hear(self) -> None:
         """Show how the session listens to the song: the toggles lit, the strips that are not heard dim.
@@ -462,20 +487,21 @@ class Mixer:
             strip.dim = heard is not None and strip.channel not in heard
             self._paint(strip)
         self.clear.enabled = bool(muted or soloed)
-        self.clear.help = ("hear every channel again: no mute and no solo" if self.clear.enabled
+        self.clear.help = (told("hear every channel again: no mute and no solo") if self.clear.enabled
                            else "nothing is muted or soloed")
-
-    def _scrolls(self) -> bool:
-        """Whether the strips do not all fit, so that the wheel moves the view."""
-        return self._laid.most > 0
 
     def _wheel(self, steps: int) -> bool:
         """Move the view by steps of the wheel, up being towards the first strip. False where every strip is in view."""
-        if not self._scrolls():
+        if not self._laid.most:
             return False
         self.first -= steps * WHEEL_STRIPS
         self._lay()
         return True
+
+    def _go(self, offset: int) -> None:
+        """Move the view to where the scroll bar was taken: the strip nearest to so many pixels is the first in view."""
+        self.first = (2 * offset + self._laid.wide) // (2 * max(1, self._laid.wide))
+        self._lay()
 
     def _press(self, strip: Strip, solo: bool) -> None:
         """Have the session flip the solo of a strip's channel, or else its mute, and show what it then has.
@@ -499,19 +525,19 @@ class Mixer:
             self.picked(strip.channel)
 
     def _save(self, where: str, owner: str, value: float, absent: float) -> None:
-        """Save the level a fader was left at, at a place of the song, and show what the file then holds.
+        """Save the volume a fader was left at, at a place of the song, and show what the file then holds.
 
-        It is written to two places after the point, called by whose level it is and by the number, and taken
+        It is written to two places after the point, called by whose volume it is and by the number, and taken
         out of the file where it is `absent`. A change that is refused is not made, and the session says why.
         """
         value = tidy(value)
-        save(self.session, where, value, f"{owner}: level {plain(value)}", absent)
+        save(self.session, where, value, f"{owner}: volume {plain(value)}", absent)
         self._read()
 
     def _put(self, strip: Strip, value: float) -> None:
-        """Save the level the fader of a strip was left at, as the level of its channel."""
+        """Save the volume the fader of a strip was left at, as the volume of its channel."""
         self._save(f"songs.{self.song}.channels.{strip.channel}.gain", strip.channel, value, ABSENT["gain"])
 
     def _put_song(self, value: float) -> None:
-        """Save the level the fader of the whole song was left at, as the level of the song."""
+        """Save the volume the fader of the whole song was left at, as the volume of the song."""
         self._save(f"songs.{self.song}.gain", self.song, value, SONG_ABSENT)

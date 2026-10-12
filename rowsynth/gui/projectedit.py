@@ -16,8 +16,8 @@ from .model import TEST_NOTE, TEST_TICKS, _section, inst_place
 # nothing with it. A thing is a song, a sound or an instrument, and `kind` says which, in that word.
 #
 # A change is to a whole thing, or to the whole table of a kind: a thing keeps its place among the others when
-# its name changes, and only the table can say so. An instrument of a song's own is taken out at its place in
-# the song. What cannot be done is refused, with the reason. After any other, a project that loaded before
+# its name changes, and only the table can say so. An instrument of a song's own is put in and taken out at its
+# place in the song. What cannot be done is refused, with the reason. After any other, a project that loaded before
 # still does, once all the changes are made: no one of them alone need leave it so.
 
 #: One change: a place as `edit.change_file_many` reads it, and the value put there, or NOTHING for what is
@@ -34,6 +34,38 @@ CHANNEL = "lead"
 PATTERN = "a"
 ROW_TICKS = 6
 TEXT = "o4 c4 r2."
+
+
+def _fm(level: float, attack: float, decay: float, sustain: float, release: float, mul: int = 1,
+        det: float | None = None) -> dict:
+    """One operator of an FM instrument as the file holds it: how loud it is, its envelope, and its pitch."""
+    pitch = {"mul": mul} if det is None else {"mul": mul, "det": det}
+    return {**pitch, "level": level, "env": {"a": attack, "d": decay, "s": sustain, "r": release}}
+
+
+#: The ready instruments a new one can be started from, by name, in the order they are offered: each as the
+#: example projects hold it. The first six are the arcade example's, the last three the trailer piece's.
+STARTERS: dict[str, dict] = {
+    "pluck": {"wave": "pulse", "duty": 1, "vol": [12, 10, 8, 6, 5, 4, 3], "release": 2},
+    "bass": {"wave": "tri", "vol": [15, 15, 14, 13, 12], "release": 2, "gate": 0.8},
+    "kick": {"wave": "tri", "vol": [15, 14, 12, 9, 6, 3], "pitch": [0, -6, -5, -4, -3, -2], "release": 1},
+    "snare": {"wave": "noise", "vol": [14, 11, 8, 6, 4, 2, 1], "release": 2, "lp": 7000},
+    "hat": {"wave": "noise", "vol": [8, 4, 1], "release": 1},
+    "chime": {"wave": "pulse", "duty": 2, "vol": [15, 14, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1], "release": 3},
+    "fmbrass": {"wave": "fm", "alg": 4, "fb": 0.25,
+                "ops": [_fm(2, 0.03, 0.3, 0.6, 0.12), _fm(0.8, 0.01, 0.3, 0.85, 0.12),
+                        _fm(1.2, 0.02, 0.2, 0.5, 0.12), _fm(0.5, 0.01, 0.3, 0.85, 0.12, det=1.2)],
+                "vol": [15], "vib": {"delay": 20, "depth": 0.12, "rate": 6}, "release": 6, "gate": 0.9, "lp": 2800,
+                "key_scale": -4},
+    "fmpad": {"wave": "fm", "alg": 5,
+              "ops": [_fm(1, 0.3, 1, 0.8, 0.6), _fm(0.5, 0.25, 0.5, 1, 0.6), _fm(0.22, 0.35, 0.5, 1, 0.6, 2, 1),
+                      _fm(0.5, 0.3, 0.5, 1, 0.6, det=-1.3)],
+              "vol": [15], "release": 40, "gate": 0.97, "lp": 1800, "key_scale": -4},
+    "sub": {"wave": "fm", "alg": 4,
+            "ops": [_fm(0.5, 0, 0.08, 0.1, 0.03), _fm(1, 0, 0.2, 0.7, 0.05), {"mul": 1, "level": 0},
+                    _fm(0.3, 0, 0.2, 0.6, 0.05, 2)],
+            "vol": [15], "release": 2, "gate": 0.55, "lp": 500},
+}
 
 # What a new name cannot hold: what the project refuses in a name that files are called by, as a song's and a
 # sound's are, and what a place in a project is spelt with.
@@ -82,22 +114,26 @@ def _put(data: dict, kind: str, name: str, thing: dict) -> Change:
     return (f"{section}.{name}", thing) if section in data else (section, {name: thing})
 
 
-def allowed(data: dict, kind: str, name: object) -> str:
+def allowed(data: dict, kind: str, name: object, song: str | None = None) -> str:
     """A new name for a song, a sound or an instrument, once it is seen to be one that can be given.
 
     A name is text with something in it. It holds nothing that the project refuses in a name files are called
     by, and no dot or square bracket, which the places of a project are spelt with. No other thing of its kind
     has it. Any other name is refused, and the refusal says which of these it broke. Every function here that
     gives a thing a name holds it to this.
+
+    With `song` the name is for an instrument of that song's own. It is held to the same, but for who may have
+    it already: no instrument of the song's own has it, and no name the song gives to one of the project's.
     """
-    table = _table(data, kind)
+    table = _table(data, kind) if song is None else _known(data, "song", song).get("instruments", {})
     if not isinstance(name, str) or not name:
         raise RowSynthError(f"{_a(kind)} needs a name, and {name!r} is none")
     for char in name:
         if char in _NOT_IN_NAMES or ord(char) < 32:
             raise RowSynthError(f"{_a(kind)} cannot be called {name!r}: a name cannot hold {char!r}")
     if name in table:
-        raise RowSynthError(f"the project has {_a(kind)} called {name!r} already")
+        owner = "the project" if song is None else f"the song {song!r}"
+        raise RowSynthError(f"{owner} has {_a(kind)} called {name!r} already")
     return name
 
 
@@ -116,6 +152,11 @@ def free(data: dict, kind: str, like: str | None = None) -> str:
     while f"{stem}{number}" in taken:
         number += 1
     return f"{stem}{number}"
+
+
+def fresh(data: dict, kind: str, name: str) -> str:
+    """The name for a new thing of a kind that is to be called `name`: that one, or where it is taken the next free."""
+    return free(data, kind, name) if name in _table(data, kind) else name
 
 
 def added(data: dict, kind: str, name: str | None = None, like: str | None = None) -> list[Change]:
@@ -144,6 +185,19 @@ def added(data: dict, kind: str, name: str | None = None, like: str | None = Non
         thing = {"row_ticks": ROW_TICKS, "channels": {CHANNEL: {"inst": inst}},
                  "patterns": {PATTERN: {CHANNEL: TEXT}}, "order": [PATTERN]}
     return [*changes, _put(data, kind, name, thing)]
+
+
+def started(data: dict, starter: str, name: str | None = None) -> list[Change]:
+    """The change that gives a project a new instrument that is a copy of one of `STARTERS`, the last of its kind.
+
+    Its name is `name`, held to what `allowed` allows. With none given it is the name of the starter, and
+    where the project has an instrument of that name the next free one after it, as `fresh` finds it: `bass2`.
+    A starter there is none of is refused.
+    """
+    if starter not in STARTERS:
+        raise RowSynthError(f"there is no ready instrument called {starter!r}")
+    name = allowed(data, "instrument", fresh(data, "instrument", starter) if name is None else name)
+    return [_put(data, "instrument", name, copy.deepcopy(STARTERS[starter]))]
 
 
 def _users(data: dict) -> Iterator[tuple[str, str, dict]]:
@@ -236,6 +290,21 @@ def shared(data: dict, song: str, name: str) -> list[Change]:
     return [_put(data, "instrument", allowed(data, "instrument", name), inst), (gone, NOTHING)]
 
 
+def own_copied(data: dict, song: str, name: str) -> list[Change]:
+    """The change that gives a song an instrument of the project as one of its own, under the name it has.
+
+    The song then plays its own copy wherever it played the project's by that name, and the project's is as
+    it was for every other song and sound. A song with no instruments of its own gets the table with it.
+    Refused are an instrument and a song the project does not have, and a song that has an instrument of its
+    own of that name already, or gives the name to one of the project's.
+    """
+    inst = copy.deepcopy(_known(data, "instrument", name))
+    allowed(data, "instrument", name, song)
+    if "instruments" in data["songs"][song]:
+        return [(inst_place(song, name), inst)]
+    return [(f"songs.{song}.instruments", {name: inst})]
+
+
 def _switched(text: str, old: str, new: str, words: str) -> str:
     """The text of a channel with every switch to one instrument made a switch to another, and all else as it was.
 
@@ -288,3 +357,30 @@ def renamed(data: dict, kind: str, old: str, new: str) -> list[Change]:
         if places:
             changes.append((f"{other}.{title}", made))
     return changes
+
+
+def own_renamed(data: dict, song: str, old: str, new: str) -> list[Change]:
+    """The change that gives an instrument of a song's own another name, in that song and nowhere else.
+
+    It is the whole song. The instrument keeps its place in the song's own table, and has the new name in
+    each channel and each drum of the song that plays it, and at every `@` of the old one in the text of a
+    channel, changed as `_switched` changes it. No other song and no sound can name it, so nothing else is
+    changed.
+
+    The new name is held to what `allowed` allows for an instrument of the song's own. Refused as well are a
+    song with no instrument of its own under the old name, a new name by which the song plays an instrument
+    of the project, since it would then play this one in its place, and whatever `_switched` refuses.
+    """
+    _own(data, song, old)
+    allowed(data, "instrument", new, song)
+    made = copy.deepcopy(data["songs"][song])
+    # The song with no instruments of its own names both by its channels, its drums and its texts alone.
+    bare = {**made, "instruments": {}}
+    taken = next(_named("songs", song, bare, new), None)
+    if taken is not None:
+        raise RowSynthError(f"{taken[0]} plays the instrument {new!r} of the project, and would play this one "
+                            "in place of that")
+    for words, holder, key, text in list(_named("songs", song, bare, old)):
+        holder[key] = _switched(holder[key], old, new, words) if text else new
+    made["instruments"] = {new if name == old else name: inst for name, inst in made["instruments"].items()}
+    return [(f"songs.{song}", made)]
