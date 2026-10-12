@@ -325,11 +325,12 @@ class Shown(unittest.TestCase):
         shape = soundview.shapes(stand.model.project.sounds["coin"], RATE, stand.model.project.instruments)[0][2]
         self.assertEqual((panel.heading, panel.refusal, panel.colour, view.visible),
                          (("SOUND", "coin"), "", theme.SOUND, True))
-        # The two notes of coin are there, on a clock as long as the sound, and there is no wave.
+        # The two notes of coin are there, on a clock that has a second of room after the sound, and there is no
+        # wave.
         seen = view.map
         x, y, _, _ = seen.bar(shape.bars[1].start, shape.bars[1].seconds, shape.bars[1].pitch)
         self.assertEqual((view.seconds, seen.notes, view.bar_at((x + 1, y + 1)), view.columns()),
-                         (shape.seconds, True, shape.bars[1], []))
+                         (shape.seconds + 1, True, shape.bars[1], []))
         # The render comes: the wave is its buffer, in the colour of a sound.
         stand.model.made = render(np.full(8820, 0.25, dtype=np.float32))
         panel.update()
@@ -541,7 +542,8 @@ class Heard(unittest.TestCase):
     def test_a_held_sound_that_is_played_through_once_goes_from_its_start_to_its_loop_to_its_end(self) -> None:
         stand, ui, panel = panel_on(picked=("sound", "hum"), made=silence(START, LOOP, END))
         view = panel.view
-        self.assertEqual((view.kind, len(view.columns()), round(view.seconds, 9)), ("held", 3, 0.7))
+        # The clock has a second of room after the 0.7 s of the sound.
+        self.assertEqual((view.kind, len(view.columns()), round(view.seconds, 9)), ("held", 3, 1.7))
         # Something else plays it, as the space bar does: the row is its start, its loop once, and its end.
         stand.playing = True
         for at, second in ((0.0, 0.0), (0.06, 0.06), (START + 0.3, START + 0.3), (START + LOOP + 0.04, 0.64)):
@@ -698,8 +700,12 @@ class OnAModel(unittest.TestCase):
         panel.update()
         view = panel.view
         (left, columns), = view.columns()
+        # The clock has a second of room after the sound, and the wave ends where the sound does.
+        seen = view.map
         self.assertEqual((panel.heading, view.seconds, view.playhead, left, len(columns)),
-                         (("SOUND", "coin"), made["seconds"], None, view.map.wave[0], view.map.wave[2]))
+                         (("SOUND", "coin"), made["seconds"] + 1, None, seen.wave[0],
+                          seen.x(made["seconds"]) - seen.wave[0]))
+        self.assertLess(len(columns), seen.wave[2])
         self.assertTrue(np.array_equal(columns, soundview.columns(made["buffers"][0], len(columns))))
         self.assertGreater(float(np.abs(columns).max()), 0.5)
 
@@ -957,7 +963,8 @@ class Saved(OnAFile):
 
     def test_the_wave_of_before_stays_under_the_saved_notes_and_is_stale_until_their_render_has_come(self) -> None:
         before = self.session.model.render()
-        self.assertEqual((self.view.stale, self.view.seconds), (False, before["seconds"]))
+        self.assertEqual((self.view.stale, self.view.seconds), (False, before["seconds"] + 1))
+        scale = self.view.map.scale
         # A note that ends 4 ticks after the others makes the sound longer.
         self.drag(self.at(16, 70))
         seen = self.view.map
@@ -967,8 +974,11 @@ class Saved(OnAFile):
                          (seen.x(0.0), seen.x(before["seconds"]) - seen.x(0.0), True))
         made = self.rendered()
         (left, columns), = self.view.columns()
-        self.assertEqual((self.view.stale, len(columns), self.view.seconds),
-                         (False, self.view.map.grid[2], made["seconds"]))
+        # The clock has its second of room after the new end, and a second is as wide as it was: the wave ends
+        # where the longer sound does.
+        seen = self.view.map
+        self.assertEqual((self.view.stale, len(columns), self.view.seconds, seen.scale),
+                         (False, seen.x(made["seconds"]) - seen.x(0.0), made["seconds"] + 1, scale))
         self.assertGreater(made["seconds"], before["seconds"])
         # Another sound that is picked has no wave of before to show.
         self.session.pick("sound", "pair")
@@ -1318,8 +1328,9 @@ class Kinds(Menus):
         self.drag((x, y), (x + round(0.05 * self.view.map.scale), y))
         self.assertEqual((self.sound("one")["max_seconds"], self.session.undo_label, self.view.limit),
                          (0.15, "one: longest time 0.15 s", 0.15))
-        # The clock goes on to a line that stands past the end of the sound.
-        self.assertAlmostEqual(self.view.seconds, 0.15 * 1.05)
+        # The line stands past the end of the sound, which is 8 ticks long: in the second of room that the clock
+        # has after it.
+        self.assertAlmostEqual(self.view.seconds, 8 / 60 + 1)
         self.drag(self.ruler(0.02), button=3)
         self.assertEqual(self.items()[1], ("No longest time", True))
         self.choose("No longest time")

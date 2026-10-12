@@ -426,6 +426,8 @@ A song's own instruments stand in the list after the project's, each with the na
 
 A sound is laid out as a channel of a song is: a keyboard and a grid, here on a clock of seconds, with the velocity of the notes and the wave of the sound at the foot on the same clock. Notes are placed, moved, stretched and rubbed out as in the piano roll, on a grid of ticks, and the keyboard scrolls and zooms as it does there. With the mouse on the wave, the status line says the pitch that is heard at that moment.
 
+The clock goes on after the end of the sound, by as long again as the sound and by no less than a second. A note that is put there, or made longer into it, makes the sound longer, and the room is then after its new end. A sound opens with its whole length and a little of that room in view. Shift and the wheel, or the bar under the notes, go along the rest, and Ctrl and the wheel zoom out until all of it is in view. The zoom stays as it was set while the sound gets longer or shorter.
+
 The bar has the voices as tabs with a `+` after the last, then the `INSTRUMENT` of the picked voice, the `VOLUME` of the sound, and its `ECHO` with `TIME`, `AMOUNT`, `REPEATS` and `TONE`. Each return of the echo is drawn as a fainter copy of the notes, as much later as it is heard. A voice whose instrument is written in place in the file shows `its own`, and the list beside it has `Make shared...`, which gives the instrument a name among the project's.
 
 The heading has four buttons.

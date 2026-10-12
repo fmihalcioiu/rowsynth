@@ -54,6 +54,13 @@ FULL = 0.999
 #: What one step of the zoom makes the clock wider by, and how many steps the zoom goes.
 ZOOM_STEP = 1.25
 ZOOM_MOST = 16
+#: The room the clock of a sound that can be changed has after the end of the sound, for notes that make it
+#: longer: as long again as the sound, and no less than this many seconds.
+ROOM_LEAST = 1.0
+#: How much of that room is in view as a sound is opened, as a share of the sound's length, and the least there
+#: is in view then, in seconds: a sound of a few ticks is not opened with each tick as wide as a hand.
+OPEN_AIR = 0.25
+OPEN_LEAST = 0.5
 #: What is left free between two variants: this share of the longest of them.
 VARIANT_GAP = 0.2
 #: How much of its bar's colour the copy has that a repeat of the echo at full strength is drawn as, and how far a
@@ -244,7 +251,8 @@ class Map:
 
     rect is the view's rectangle: the keyboard, the ruler, the grid and the two scroll bars are in it. seconds is
     how long the clock is, start the second at the left edge of the grid, and zoom how many steps the clock is
-    zoomed in: at 0 the whole of it is as wide as the grid. top is the pitch of the key at the upper edge of the
+    zoomed in. shown is how many seconds are as wide as the grid at zoom 0: with 0 it is the whole clock, and
+    with fewer the rest of the clock is reached by going along it. top is the pitch of the key at the upper edge of the
     grid, which can be a fraction: then part of a key is cut off at that edge. A key is `KEY_H` high. labels is
     whether the shapes are named, in a strip of their own over the grid. notes is whether there is a grid: with
     none the wave has the room under the ruler. foot is the box of the wave, which stands where the owner of the
@@ -260,6 +268,7 @@ class Map:
     labels: bool = False
     notes: bool = True
     foot: Rect = (0, 0, 0, 0)
+    shown: float = 0.0
 
     @property
     def ruler(self) -> Rect:
@@ -317,7 +326,19 @@ class Map:
     @property
     def scale(self) -> float:
         """How many pixels wide a second is."""
-        return ZOOM_STEP ** self.zoom * max(1, self.grid[2]) / (self.seconds if self.seconds > 0 else 1.0)
+        return ZOOM_STEP ** self.zoom * max(1, self.grid[2]) / self.fitted
+
+    @property
+    def fitted(self) -> float:
+        """How many seconds are as wide as the grid at zoom 0: `shown`, or with none of it the whole clock."""
+        return self.shown if self.shown > 0 else self.seconds if self.seconds > 0 else 1.0
+
+    @property
+    def least(self) -> int:
+        """The least zoom there is: 0, or under it the first at which the whole clock is in view."""
+        if self.shown <= 0 or self.seconds <= self.shown:
+            return 0
+        return math.floor(math.log(self.shown / self.seconds, ZOOM_STEP))
 
     @property
     def zero(self) -> int:
@@ -380,19 +401,25 @@ class Map:
         return [mark for mark in range(first, last + 1) if x <= self.x(mark * step) < x + w]
 
     def zoomed(self, zoom: int, x: int) -> Map:
-        """This map at another zoom, no less than 0 and no more than `ZOOM_MOST`. The second at `x` stays at that x."""
-        fresh = replace(self, zoom=min(max(zoom, 0), ZOOM_MOST))
+        """This map at another zoom, no less than `least` and no more than `ZOOM_MOST`. The second at `x` stays
+        at that x."""
+        fresh = replace(self, zoom=min(max(zoom, self.least), ZOOM_MOST))
         return replace(fresh, start=zoomed(self.grid[0], self.start, self.scale, fresh.scale, x))
 
     def within(self) -> Map:
         """This map, moved no further than its limits let it.
 
-        The clock starts no sooner than second 0, and ends no later than it does. No key is shown under
-        `soundedit.LOWEST` or over `soundedit.HIGHEST`, which are the ends of what a note can be placed at.
+        The clock starts no sooner than second 0, and ends no later than it does. The zoom is no less than
+        `least`. No key is shown under `soundedit.LOWEST` or over `soundedit.HIGHEST`, which are the ends of
+        what a note can be placed at.
         """
-        last = max(0.0, self.seconds) * (1 - ZOOM_STEP ** -self.zoom)
+        zoom = min(max(self.zoom, self.least), ZOOM_MOST) if self.shown > 0 else self.zoom
+        if self.shown > 0:
+            last = max(0.0, self.seconds - self.shown * ZOOM_STEP ** -zoom)
+        else:
+            last = max(0.0, self.seconds) * (1 - ZOOM_STEP ** -zoom)
         top = min(float(HIGHEST), max(self.top, LOWEST - 1 + self.grid[3] / KEY_H))
-        return replace(self, start=min(max(self.start, 0.0), last), top=top)
+        return replace(self, start=min(max(self.start, 0.0), last), zoom=zoom, top=top)
 
     def scrolls(self) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
         """What the two scroll bars show, the one along the keys first.
@@ -806,6 +833,8 @@ class SoundView(Widget):
         self.typed: Callable[[Event], object] | None = None
         self.seconds = 0.0
         self.start, self.zoom, self.top = 0.0, 0, float(MIDDLE_C)
+        # How many seconds are as wide as the grid at zoom 0: 0 for the whole clock.
+        self.shown = 0.0
         self.foot: Rect = (0, 0, 0, 0)
         self.stale = False
         self.grid = 1
@@ -913,7 +942,7 @@ class SoundView(Widget):
     def map(self) -> Map:
         """The sums of the view as it is now, kept within their limits."""
         return Map(self.rect, self.seconds, self.start, self.zoom, self.top,
-                   any(label for label, _, _ in self._laid), bool(self._laid), self.foot).within()
+                   any(label for label, _, _ in self._laid), bool(self._laid), self.foot, self.shown).within()
 
     @property
     def sound(self) -> int:
@@ -1014,6 +1043,13 @@ class SoundView(Widget):
         the kind of thing shown. The view stays where it was, as far as the new clock lets it. The keys are
         set on the notes only for the first sound there is to show, and for the first after `fit`.
 
+        The clock ends where the last shape or wave does. With an `entry`, whose notes can be changed, it goes
+        on past there: by as long again as the sound, and by no less than `ROOM_LEAST` seconds, so that there
+        is room to put a later note and to make a note longer. The sound then gets longer, and the room is
+        after its new end. Such a sound is opened with its whole length in view and `OPEN_AIR` of that after
+        it, or as far as the line of its longest time where that is near, and with no less than `OPEN_LEAST`
+        seconds. From then on a second is as wide as the zoom makes it, however long the sound gets.
+
         `entry` is the entry of a project's sounds that the shapes were made of: with it the notes can be
         changed by hand, and with None they are shown and no more. What is picked stays picked while the sound
         it is in has the notes it had. The sound that the last edit gave is shown with what that edit left
@@ -1049,10 +1085,20 @@ class SoundView(Widget):
         self._entry, self._instruments, self._limit = entry, instruments, limit if numbered else None
         self._marks = () if entry is None else tuple(entry.get("check", ()))
         self._take(fresh)
-        self.seconds = max([0.0] + [place + shape.seconds for _, place, shape in laid]
-                           + [place + len(row) / rate for place, row in waves])
-        if numbered and kind != "defs" and self.seconds / (1 + LIMIT_AIR) < limit <= LIMIT_REACH * self.seconds:
-            self.seconds = limit * (1 + LIMIT_AIR)
+        end = max([0.0] + [place + shape.seconds for _, place, shape in laid]
+                  + [place + len(row) / rate for place, row in waves])
+
+        def reach(length: float) -> float:
+            """A length of the clock, or where the longest time is near after it, as far as that and a little on."""
+            near = numbered and kind != "defs" and length / (1 + LIMIT_AIR) < limit <= LIMIT_REACH * length
+            return limit * (1 + LIMIT_AIR) if near else length
+
+        roomy = entry is not None and bool(laid)
+        self.seconds = reach(end + max(end, ROOM_LEAST) if roomy else end)
+        if not roomy:
+            self.shown = 0.0
+        elif self.shown <= 0:
+            self.shown = max(reach(end), end * (1 + OPEN_AIR), OPEN_LEAST)
         if laid and not self._opened:
             pitches = [round(bar.pitch) for _, _, shape in laid for bar in shape.bars] or [MIDDLE_C]
             self._opened, self.top = True, opened(self.map.grid[3], min(pitches), max(pitches))
@@ -1072,11 +1118,12 @@ class SoundView(Widget):
             self._sound, self._picked = min(at, max(0, len(fresh) - 1)), frozenset()
 
     def fit(self) -> None:
-        """Set the view to the whole of the clock, which then is as wide as the grid.
+        """Set the view to the start of the clock, at the zoom a sound is opened with.
 
-        The sound that is shown next has the keys opened on its notes, as the first one had.
+        The sound that is shown next has the keys opened on its notes, as the first one had, and its length
+        in view.
         """
-        self.start, self.zoom, self._opened = 0.0, 0, False
+        self.start, self.zoom, self._opened, self.shown = 0.0, 0, False, 0.0
 
     def _see(self, seen: Map) -> None:
         """Take the view of a map, brought within its limits, and have the parts show it."""

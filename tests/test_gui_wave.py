@@ -7,6 +7,7 @@ import os
 import unittest
 from dataclasses import replace
 from pathlib import Path
+from unittest import mock
 
 import numpy as np
 
@@ -19,8 +20,9 @@ from rowsynth.gui.kit import VELOCITY_HELP, told
 from rowsynth.gui.roll import BOX, DARKER, LIGHTER, MOVE, PICK, PLACE, REMOVE, STRETCH, mix
 from rowsynth.gui.soundview import Bar, Shape
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import (ACROSS_HELP, ALONG_HELP, FLAG, FLAG_W, GRIP, LABEL, LIMIT_AIR, MARK, NO_PITCH, PART,
-                               PLUS_GAP, RULER, RULER_HELP, STALE, VARIANT_GAP, VELOCITY_DONE, WHEEL_HELP, ZONES,
+from rowsynth.gui.wave import (ACROSS_HELP, ALONG_HELP, FLAG, FLAG_W, GRIP, LABEL, LIMIT_AIR, MARK, NO_PITCH,
+                               OPEN_LEAST, PART, PLUS_GAP, ROOM_LEAST, RULER, RULER_HELP, STALE, VARIANT_GAP,
+                               VELOCITY_DONE, WHEEL_HELP, ZONES,
                                ZOOM_MOST, Map, SoundView, Span, bars, begins, beside, called, echo_colour, joined,
                                limit_lines, mark_lines, on_tick, opened, places, plus, ruler_step, span_at, spans,
                                spelt, stretch, tabs, tint, voice_colour)
@@ -116,6 +118,20 @@ LAYERS = {"parts": [[0, {"def": solo([0, "c4", 10]), "db": -3}], [0.1, {"def": s
 #: A held sound: its note is held for 60 ticks, of which the start and the loop take 36, and then comes its end.
 HUM = {"held": {"note": solo([0, "c3", 60]), "start": 6, "loop": 30, "join": 3, "end": solo([0, "c3", 2]),
                 "let_go": 4}, "db": -6}
+
+
+# Every test of this file but those of `Room` opens a sound with its length as wide as the grid, however short it
+# is, and none of the room after it in view: the places they hold a view to are counted from that. What a sound
+# is opened with after its end is held to in `Room`.
+_NO_AIR = mock.patch.multiple("rowsynth.gui.wave", OPEN_AIR=0.0, OPEN_LEAST=0.0)
+
+
+def setUpModule() -> None:
+    _NO_AIR.start()
+
+
+def tearDownModule() -> None:
+    _NO_AIR.stop()
 
 
 def view_on(ui: Ui, help: str = "") -> SoundView:
@@ -1491,18 +1507,24 @@ class Drawn(unittest.TestCase):
             self.draw()
             return self.where(theme.FAULT, (0, 0, *SIZE))
 
-        # The sound is a third of a second long. A limit inside it leaves the clock as it is. Its line runs down
-        # the view and the box of the wave, under the scroll bar that lies between the two.
+        # The sound is a third of a second long, and its clock has a second of room after it. A limit inside the
+        # sound leaves the clock as it is. Its line runs down the view and the box of the wave, under the scroll
+        # bar that lies between the two.
         down = [y for y in range(20, 320) if not 235 <= y < 239]
         line = {(358, y) for y in down}
         self.assertEqual((lines(0.25), self.view.limit, self.view.seconds, self.view.map.x(0.25)),
-                         (line, 0.25, long, 358))
-        # The clock goes on to a limit that is past the sound, and a little further. One that is more than
-        # twice the sound away is off the clock.
-        found = lines(0.5)
-        seen = self.view.map
-        self.assertEqual((self.view.seconds, found), (0.5 * (1 + LIMIT_AIR), {(seen.x(0.5), y) for y in down}))
-        self.assertEqual((lines(2), self.view.seconds, self.view.limit), (set(), long, 2))
+                         (line, 0.25, long + 1, 358))
+        # A limit that is past the sound is in the room after it: out of view as the sound was opened, and there
+        # once the view has gone along the clock to it.
+        self.assertEqual((lines(0.5), self.view.seconds), (set(), long + 1))
+        self.view.start = 0.3
+        found, seen = lines(0.5), self.view.map
+        self.assertEqual((seen.start, found), (0.3, {(seen.x(0.5), y) for y in down}))
+        self.view.start = 0.0
+        # The clock goes on to a limit that is past its room, and a little further. One that is more than twice
+        # the clock away is off it.
+        self.assertEqual((lines(2), self.view.seconds, self.view.limit), (set(), 2 * (1 + LIMIT_AIR), 2))
+        self.assertEqual((lines(3), self.view.seconds, self.view.limit), (set(), long + 1, 3))
         # Where it can be dragged, it has a grip in the ruler.
         self.view.handled = lambda *told: None
         self.assertEqual(lines(0.25), line | {(x, y) for x in range(358 - GRIP, 358 + GRIP + 1) for y in range(20, 30)})
@@ -1634,6 +1656,148 @@ class Drawn(unittest.TestCase):
         self.assertEqual(([left for left, _ in waves], [len(buffer) for buffer in buffers]), (starts, [4410] * 3))
         self.assertEqual([left + len(columns) for left, columns in waves],
                          [seen.x(second) for second in (0.1, 0.22, 0.34)])
+
+
+#: A sound of one note that is held for 48 ticks: with the two ticks it takes to end it is 50 long.
+LONG = {"def": solo([0, "c4", 48])}
+
+
+@unittest.skipUnless(pygame, NEEDS)
+class Room(unittest.TestCase):
+    """What the clock of a sound that can be changed has after the end of the sound, opened as a sound is."""
+
+    def setUp(self) -> None:
+        # The air a sound is opened with is the one there is, here.
+        _NO_AIR.stop()
+        self.addCleanup(_NO_AIR.start)
+        self.ui = Ui()
+        self.view = view_on(self.ui, PLAIN)
+        self.edits: list[tuple[int, dict, str]] = []
+        self.view.edited = self.save
+        self.show(LONG)
+
+    def show(self, entry: dict | None = None) -> None:
+        """Show the view an entry, or again the one it has as a change left it, with no wave under it."""
+        if entry is not None:
+            self.view.fit()
+            self.entry = copy.deepcopy(entry)
+        shapes = soundview.shapes(self.entry, instruments=INSTRUMENTS)
+        self.long = max(place + shape.seconds for _, place, shape in shapes)
+        self.view.show(shapes, [], 44100, theme.SOUND, entry_kind(self.entry), self.entry)
+
+    def save(self, index: int, defn: dict, label: str) -> bool:
+        """What an owner does with an edit: it is kept here, put in the entry, and the view is shown the entry."""
+        self.edits.append((index, defn, label))
+        self.entry = soundedit.with_sound(self.entry, index, defn, INSTRUMENTS)
+        self.show()
+        return True
+
+    def wheel(self, steps: int, *mods: str) -> None:
+        """Turn the wheel with the mouse on the grid, some keys held."""
+        self.ui.handle(Event("wheel", (258, 100), wheel=steps, mods=frozenset(mods)))
+
+    def test_the_sums_of_a_map_that_shows_less_than_its_clock_go_by_what_it_shows(self) -> None:
+        # Two seconds of clock, of which half a second is as wide as the grid: 800 pixels to the second.
+        seen = Map(RECT, seconds=2.0, shown=0.5)
+        self.assertEqual((seen.scale, seen.fitted, seen.x(0.5), seen.scrolls()[1]), (800.0, 0.5, 458, (1600, 400, 0)))
+        # The view goes along the clock until the end of the clock is at the right edge of the grid.
+        far = replace(seen, start=9.0).within()
+        self.assertEqual((far.start, far.x(2.0), far.scrolls()[1]), (1.5, 458, (1600, 400, 1200)))
+        # It is zoomed out as far as the first zoom that has the whole clock in view, and no further: 1.25 to
+        # the power of 7 is the first that is more than 4. The clock then starts at the left edge.
+        out = replace(seen, start=1.0).zoomed(-100, 258).within()
+        self.assertEqual((seen.least, out.zoom, out.start), (-7, -7, 0.0))
+        self.assertTrue(out.x(2.0) <= 458 < replace(out, zoom=-6).x(2.0))
+        self.assertEqual(seen.zoomed(100, 258).zoom, ZOOM_MOST)
+        # A zoom under the least, which a clock that has become shorter leaves, is brought up to it.
+        self.assertEqual(replace(seen, zoom=-7, seconds=1.0).within().zoom, -4)
+        # A map that shows its whole clock is as it was: no zoom under 0, and a second as wide as the clock makes it.
+        whole = Map(RECT, seconds=2.0)
+        self.assertEqual((whole.least, whole.fitted, whole.scale, whole.zoomed(-3, 258).zoom), (0, 2.0, 200.0, 0))
+        self.assertEqual(Map(RECT, seconds=0.2, shown=0.5).least, 0)
+
+    def test_a_sound_is_opened_with_a_quarter_of_its_length_after_it_in_view_and_a_second_of_room(self) -> None:
+        view, long = self.view, self.long
+        seen = view.map
+        self.assertEqual((ROOM_LEAST, OPEN_LEAST, long, view.shown, view.seconds, view.zoom, view.start),
+                         (1.0, 0.5, 50 / 60, long * 1.25, long + 1.0, 0, 0.0))
+        self.assertEqual((seen.x(0.0), seen.x(long * 1.25)), (58, 458))
+        # There is more of the clock than is in view, so the bar along the time has a thumb from the first.
+        left, _, wide, _ = view.across.thumb()
+        self.assertEqual((left, wide < 400), (58, True))
+        # With shift the wheel goes along the clock into the room, as far as the end of the clock.
+        self.wheel(-1, "shift")
+        self.assertAlmostEqual(view.start, 36 / seen.scale)
+        self.wheel(-1000, "shift")
+        self.assertAlmostEqual(view.start, long + 1.0 - long * 1.25)
+        self.assertLessEqual(abs(view.map.x(view.seconds) - 458), 1)
+        # A sound of two seconds has as long again after it.
+        self.show({"def": solo([0, "c4", 120])})
+        self.assertEqual((view.shown, view.seconds, view.start), (self.long * 1.25, 2 * self.long, 0.0))
+        self.assertGreaterEqual(self.long, 2.0)
+        # A sound of a few ticks is opened with half a second in view, and has a second of room as any has.
+        self.show({"def": solo([0, "c4", 3])})
+        self.assertEqual((self.long, view.shown, view.seconds, view.map.x(0.5)), (5 / 60, 0.5, 5 / 60 + 1.0, 458))
+        self.assertIsNotNone(view.across.thumb())
+
+    def test_what_is_shown_and_not_changed_has_no_room_and_its_whole_clock_in_view(self) -> None:
+        self.view.fit()
+        self.view.show(ONE, [wave()], RATE, theme.SOUND)
+        self.assertEqual((self.view.shown, self.view.seconds, self.view.map.x(1.0), self.view.across.thumb()),
+                         (0.0, 1.0, 458, None))
+        self.wheel(-3, "ctrl")
+        self.assertEqual(self.view.zoom, 0)
+
+    def test_a_note_put_in_the_room_makes_the_sound_longer_and_a_second_stays_as_wide_as_it_was(self) -> None:
+        view, long = self.view, self.long
+        scale = view.map.scale
+        # The view goes along the clock to where a second and a half is in it, which is after the end of the sound.
+        view.start = 0.7
+        seen = view.map
+        self.assertTrue(seen.start == 0.7 and long < 1.5 and 58 < seen.x(1.5) < 458)
+        pos = (seen.x(1.5) + 1, seen.y(64) + 4)
+        self.ui.handle(Event("down", pos, button=1))
+        self.ui.handle(Event("up", pos, button=1))
+        (index, defn, label), = self.edits
+        self.assertEqual((index, defn["voices"][0]["notes"][0], defn["voices"][0]["notes"][1][:2], label),
+                         (0, [0, "c4", 48], [90, "e4"], "note placed"))
+        # The sound ends later now, and the room is after its new end: as long again as the sound, which is
+        # more than a second long now. The view is where it was, and a second is as wide as it was.
+        after = self.long
+        self.assertGreater(after, 1.5)
+        self.assertEqual((view.seconds, view.shown, view.start, view.zoom, view.map.scale),
+                         (2 * after, long * 1.25, 0.7, 0, scale))
+        # A note is made longer into the room in the same way: its end is dragged on by half a second.
+        ticks = defn["voices"][0]["notes"][1][2]
+        seen = view.map
+        x, y, w, _ = seen.bar(1.5, ticks / 60, 64)
+        self.ui.handle(Event("down", (x + w - 1, y + 4), button=1))
+        self.ui.handle(Event("move", (x + w - 1 + round(0.5 * scale), y + 4)))
+        self.ui.handle(Event("up", (x + w - 1 + round(0.5 * scale), y + 4), button=1))
+        self.assertEqual((len(self.edits), self.edits[-1][1]["voices"][0]["notes"][1][:3], view.map.scale),
+                         (2, [90, "e4", ticks + 30], scale))
+        self.assertEqual((self.long > after, view.seconds), (True, 2 * self.long))
+
+    def test_ctrl_and_the_wheel_zoom_out_until_the_whole_clock_with_its_room_is_in_view(self) -> None:
+        view = self.view
+        self.wheel(-100, "ctrl")
+        seen = view.map
+        self.assertEqual((view.zoom, view.start), (seen.least, 0.0))
+        self.assertLess(view.zoom, 0)
+        self.assertEqual((seen.x(0.0), seen.x(view.seconds) <= 458, view.across.thumb()), (58, True, None))
+        # In again, a second is as wide as the sound was opened with.
+        self.wheel(-view.zoom, "ctrl")
+        self.assertEqual(view.zoom, 0)
+        self.assertAlmostEqual(view.map.scale, 400 / (self.long * 1.25))
+
+    def test_another_sound_is_opened_on_its_own_length_and_the_same_one_stays_as_it_was_left(self) -> None:
+        view, short = self.view, self.long
+        self.wheel(2, "ctrl")
+        self.show()
+        self.assertEqual((view.shown, view.zoom), (short * 1.25, 2))
+        self.show({"def": solo([0, "c4", 60])})
+        self.assertEqual((view.shown, view.zoom, view.start, view.map.x(self.long * 1.25)),
+                         (self.long * 1.25, 0, 0.0, 458))
 
 
 if __name__ == "__main__":
