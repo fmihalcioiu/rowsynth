@@ -14,7 +14,7 @@ CLIENT, CAPTION = 1, 2
 #: And an edge or a corner, by the name `layout.grip` gives it.
 EDGES = {"w": 10, "e": 11, "n": 12, "nw": 13, "ne": 14, "s": 15, "sw": 16, "se": 17}
 
-_CALC_SIZE, _HIT_TEST, _CLOSE = 0x0083, 0x0084, 0x0010
+_CALC_SIZE, _HIT_TEST, _CLOSE, _SIZES = 0x0083, 0x0084, 0x0010, 0x0024
 _WNDPROC = -4
 _SHOW_MAXIMISED, _SHOW_MINIMISED, _SHOW_RESTORED = 3, 6, 9
 _NO_SIZE, _NO_MOVE, _NO_Z_ORDER, _FRAME_CHANGED = 0x0001, 0x0002, 0x0004, 0x0020
@@ -52,6 +52,18 @@ class _Display(ctypes.Structure):
     _fields_ = [("size", ctypes.c_ulong), ("whole", _Rect), ("work", _Rect), ("flags", ctypes.c_ulong)]
 
 
+class _Point(ctypes.Structure):
+    """Two numbers, across and down, as Windows gives a point or a size."""
+
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _Sizes(ctypes.Structure):
+    """What Windows asks a window of the sizes it may have: of them all, `least` is the one answered here."""
+
+    _fields_ = [("kept", _Point), ("big", _Point), ("big_at", _Point), ("least", _Point), ("most", _Point)]
+
+
 def _signed(value: int) -> int:
     """The low 16 bits of a number as a whole number with a sign, which is how a message holds an x or a y."""
     value &= 0xFFFF
@@ -64,7 +76,8 @@ class Frame:
     The window keeps the frame of the system as far as the system is concerned, so it is moved, sized,
     snapped to the sides of the screen, taken off the screen and brought back by the system, as any window
     is. Nothing of that frame is drawn: the window's own picture covers all of it. `asked` is asked, for a
-    position of the window, what the window has there, in the words `zone` takes.
+    position of the window, what the window has there, in the words `zone` takes. `least` is the least size
+    the system lets the window be dragged or snapped to, in window pixels.
 
     Only Windows has this. Anywhere else, and where the system refuses, making one raises OSError.
     """
@@ -74,6 +87,7 @@ class Frame:
             raise OSError("only Windows moves a window by a title row the window draws itself")
         self.hwnd = hwnd
         self.asked = asked
+        self.least = (0, 0)
         user = self._user = ctypes.WinDLL("user32", use_last_error=True)
         pointer, word, long = ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ssize_t
         self._kind = ctypes.WINFUNCTYPE(long, pointer, ctypes.c_uint, word, long)
@@ -98,11 +112,18 @@ class Frame:
         user.SetWindowPos(hwnd, None, 0, 0, 0, 0, _NO_MOVE | _NO_SIZE | _NO_Z_ORDER | _FRAME_CHANGED)
 
     def _told(self, hwnd: int, message: int, first: int, second: int) -> int:
-        """What the system is answered for one message to the window. Any but two goes on to the window as it was.
+        """What the system is answered for one message to the window. Any but three goes on to the window as it
+        was.
 
         Nothing may be raised here, where the system is the caller: whatever goes wrong, the message goes on.
         """
         try:
+            if message == _SIZES:
+                # The window as it was answers first, and its least size is then made the one of here.
+                answer = self._user.CallWindowProcW(self._before, hwnd, message, first, second)
+                sizes = ctypes.cast(second, ctypes.POINTER(_Sizes)).contents
+                sizes.least.x, sizes.least.y = max(sizes.least.x, self.least[0]), max(sizes.least.y, self.least[1])
+                return answer
             if message == _CALC_SIZE:
                 # All of the window is the window's own. One that fills its display would hang over the edges
                 # of it by the frame the system gives it, so it is set on what the task bar leaves.

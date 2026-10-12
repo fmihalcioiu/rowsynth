@@ -7,11 +7,13 @@
 | Part | Holds |
 |---|---|
 | Title row | The name of the file, and buttons to minimise, maximise and close. The window has it in place of the system's frame |
-| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, and at the right end the count of findings: a green tick with 0, or a red sign with how many |
+| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, `LIST` and `INSPECTOR` to show or hide the two side panels, and at the right end the count of findings: a green tick with 0, or a red sign with how many |
 | The list on the left | `SONGS`, `SOUNDS` and `INSTRUMENTS` by name, with a `+` after the last of each. A click picks one, and Space plays what is picked |
 | The middle | What is picked. The three editors are laid out alike: a heading, one bar with the knobs, the main area, and a foot. A song has a strip of blocks, one for each pattern in its order, and `NOTES`, `MIXER` or `LAYERS` under it. A sound is its notes beside a keyboard on a clock of seconds, over its wave. An instrument is its tables as bars beside their names, over a keyboard to try it on |
 | The inspector on the right | `MEASURED`: the figures of what is picked, as `LENGTH`, `PEAK`, `LOUDNESS`, `OFFSET`, `CLIPPED`, `START`, `END`, `HIGHS`, `BRIGHTNESS` and for a song or a held sound `LOOP JOIN`, with one that breaks a rule in red. `FOUND`: the findings of `check` in words |
 | Status line | What the window has to say, and for whatever the mouse is on what a press, a right press and the wheel do there. At its right end is what is picked, as in `SONG tune` |
+
+A window too narrow for all three columns has no inspector, and a narrower one has no list either. If the person cannot find one of them, `LIST` and `INSPECTOR` in the top bar bring it back.
 
 Every change the person makes is written to the file as they make it, in the layout `set` writes. There is no Save. Each change is a step, and Ctrl+Z takes the last one back.
 

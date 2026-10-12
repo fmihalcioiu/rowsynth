@@ -99,6 +99,9 @@ DESIGN = (960, 540)
 # The least art size a scale is chosen at. It is less high than the layout is drawn for, so that a window filling
 # a full HD desktop, where the title bar and the task bar take their share, is still shown at twice.
 MIN_ART = (960, 480)
+# The least art size a window is made: no edge is dragged further in. The middle of the window has its room at
+# this width once the two side panels are off it, and half of a desktop of 2560 across is this wide at twice.
+LEAST_ART = (640, 400)
 # What a desktop loses to the title bar of a window and to the task bar, in window pixels of height: an allowance.
 # The window is centred on the desktop, so half of it is left free above and half below, and each half must
 # clear a task bar of 48.

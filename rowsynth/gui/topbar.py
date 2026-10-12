@@ -1,4 +1,5 @@
-"""The window's own title row, and the top bar: FILE, undo and redo, play, stop, loop and its two switches, the time."""
+"""The window's own title row, and the top bar: FILE, undo and redo, play, stop, loop and its two switches, the time,
+and the two switches of the side panels."""
 from __future__ import annotations
 
 from collections.abc import Callable
@@ -30,8 +31,12 @@ PATTERN = "PATTERN"
 DRY = "DRY"
 #: The buttons of the bar after FILE, in the groups they stand in: those of a group stand side by side.
 GROUPS = (("undo", "redo"), ("play", "stop", "loop", "pattern", "dry"))
+#: What the two switches before the findings read as: the panel down the left, and the one down the right.
+LIST = "LIST"
+INSPECTOR = "INSPECTOR"
 #: How wide the buttons are that show a word: each as wide as its word needs. Every other one shows an icon.
-WORDS = {"pattern": Font.width(PATTERN) + 2 * theme.PAD, "dry": Font.width(DRY) + 2 * theme.PAD}
+WORDS = {"pattern": Font.width(PATTERN) + 2 * theme.PAD, "dry": Font.width(DRY) + 2 * theme.PAD,
+         "list": Font.width(LIST) + 2 * theme.PAD, "inspector": Font.width(INSPECTOR) + 2 * theme.PAD}
 
 #: The program's name, as the title row has it, and the side of the small square before it.
 PROGRAM = "rowsynth"
@@ -215,7 +220,8 @@ def verdict(count: int | None, refused: bool = False) -> tuple[str, str, Colour]
 def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the things of the bar go in its rectangle, each by what it is called.
 
-    "found" stands at the right end. From the left stand "file", as wide as its word needs, then "undo" and
+    "found" stands at the right end, and before it the two switches "list" and "inspector" side by side, each
+    as wide as its word needs. From the left stand "file", as wide as its word needs, then "undo" and
     "redo" side by side, then "play", "stop", "loop" and the two switches "pattern" and "dry" side by side,
     each of those two as wide as its word needs, then "time" and then "meter". A bar too narrow for them all
     has no meter, and one still too narrow has no time either: what has gone has no width. The buttons all
@@ -227,6 +233,11 @@ def arrange(rect: Rect) -> dict[str, Rect]:
     found = x + w - theme.BAR_MARGIN - theme.FOUND_W
     left = x + theme.BAR_MARGIN
     placed = {"file": (left, top, Font.width(FILE) + 2 * theme.PAD, high), "found": (found, y, theme.FOUND_W, h)}
+    # The two switches stand before the findings, and what comes from the left has to end before them.
+    found -= theme.GROUP_GAP + WORDS["inspector"]
+    placed["inspector"] = (found, top, WORDS["inspector"], high)
+    found -= theme.BUTTON_GAP + WORDS["list"]
+    placed["list"] = (found, top, WORDS["list"], high)
     left += placed["file"][2]
     for group in GROUPS:
         left += theme.GROUP_GAP
@@ -258,12 +269,20 @@ class TopBar(Panel):
     shows play alone, and the second has what plays play with no echoes. `found` is how the findings are shown
     now, as `verdict` gives it. `sign` lies over them, and draws nothing: it has the line of help that says so
     when the checks could not run.
+
+    `list` and `inspector` are the two switches before the findings, one for the panel down the left and one
+    for the panel down the right. Each is on while its panel is on the window: `sides` is whether the left
+    one and the right one are, which the owner of the panels sets. A press on one calls `folded` with the
+    side of its panel, "left" or "right", for the owner to take the panel off the window or bring it back.
     """
 
-    def __init__(self, session: Session, ui: Ui, asked: Callable[[Pos], object] | None = None) -> None:
+    def __init__(self, session: Session, ui: Ui, asked: Callable[[Pos], object] | None = None,
+                 folded: Callable[[str], object] | None = None) -> None:
         super().__init__(session, ui)
         nowhere = (0, 0, 0, 0)
         self.asked = asked
+        self.folded = folded
+        self.sides = (True, True)
         self.file = ui.add(Button(nowhere, FILE, action=self._file,
                                   help=told("open the menu of files: a new project, another file, a copy, the "
                                             "export, a WAV file to measure, the first screen")))
@@ -284,6 +303,10 @@ class TopBar(Panel):
         self.meter = ui.add(Meter(nowhere))
         self.meter.levels = (0.0, 0.0)
         self.sign = ui.add(Widget(nowhere))
+        self.list = ui.add(Toggle(nowhere, LIST, on=True, changed=lambda on: self._fold("left"),
+                                  help=told("show the list of songs, sounds and instruments, or hide it")))
+        self.inspector = ui.add(Toggle(nowhere, INSPECTOR, on=True, changed=lambda on: self._fold("right"),
+                                       help=told("show the numbers and the findings, or hide them")))
         self.found = verdict(None)
         self._places = arrange(nowhere)
 
@@ -292,6 +315,11 @@ class TopBar(Panel):
         if self.asked is not None:
             x, y, _, h = self.file.rect
             self.asked((x, y + h))
+
+    def _fold(self, side: str) -> None:
+        """Tell the owner that the switch of a side panel was pressed."""
+        if self.folded is not None:
+            self.folded(side)
 
     def _loop(self, on: bool) -> None:
         """Tell the session whether a song goes round."""
@@ -309,7 +337,8 @@ class TopBar(Panel):
         """Take the bar's rectangle, and lay the widgets out in it as `arrange` has them."""
         super().place(rect)
         self._places = arrange(rect)
-        for thing in ("file", "undo", "redo", "play", "stop", "loop", "pattern", "dry", "time", "meter"):
+        for thing in ("file", "undo", "redo", "play", "stop", "loop", "pattern", "dry", "time", "meter", "list",
+                      "inspector"):
             getattr(self, thing).rect = self._places[thing]
         self.sign.rect = self._places["found"]
         # A meter that has gone has no width, and is not drawn.
@@ -328,6 +357,7 @@ class TopBar(Panel):
         self.loop.is_on = session.loop
         self.pattern.is_on = session.pattern
         self.dry.is_on = session.dry
+        self.list.is_on, self.inspector.is_on = self.sides
         self.time.text = timing(session.position(), session.seconds)
         self.meter.levels = session.level()
         self.meter.fall(passed)

@@ -325,7 +325,7 @@ class Top(unittest.TestCase):
 
     def test_in_a_narrow_bar_undo_and_redo_stay_as_the_buttons_of_play_do_and_in_their_order(self) -> None:
         # A bar with no meter, one with no time either, and one that has just the room for its buttons.
-        for rect, gone in (((0, 0, 471, 22), ["meter"]), ((0, 0, 397, 22), ["time", "meter"]),
+        for rect, gone in (((0, 0, 577, 22), ["meter"]), ((0, 0, 503, 22), ["time", "meter"]),
                            (SMALL_BAR, ["time", "meter"])):
             places = arrange(rect)
             self.assertEqual([thing for thing in ("time", "meter") if not places[thing][2]], gone, rect)
@@ -429,24 +429,58 @@ class Top(unittest.TestCase):
         places = arrange(BAR)
         self.assertEqual((places["time"], places["meter"], places["found"]),
                          ((242, 3, 109, 16), (363, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
-        # At 472 pixels everything just fits: the meter ends a gap before the findings.
-        places = arrange((0, 0, 472, 22))
-        self.assertEqual((places["meter"], places["found"]), ((363, 3, 62, 16), (437, 0, 29, 22)))
+        # At 578 pixels everything just fits: the meter ends a gap before the two switches of the side panels.
+        places = arrange((0, 0, 578, 22))
+        self.assertEqual((places["meter"], places["list"], places["inspector"], places["found"]),
+                         ((363, 3, 62, 16), (437, 3, 31, 16), (470, 3, 61, 16), (543, 0, 29, 22)))
+
+    def test_the_two_switches_of_the_side_panels_stand_side_by_side_a_gap_before_the_findings(self) -> None:
+        places = arrange(BAR)
+        self.assertEqual((places["list"], places["inspector"], places["found"]),
+                         ((819, 3, 31, 16), (852, 3, 61, 16), (925, 0, 29, 22)))
+        self.assertEqual((places["inspector"][0] - places["list"][0] - places["list"][2],
+                          places["found"][0] - places["inspector"][0] - places["inspector"][2]),
+                         (theme.BUTTON_GAP, theme.GROUP_GAP))
+
+    def test_a_switch_of_a_side_panel_is_on_while_its_panel_is_and_a_press_tells_the_owner_its_side(self) -> None:
+        asked = []
+        stand = Stand()
+        ui = Ui()
+        bar = TopBar(stand, ui, folded=asked.append)
+        bar.place(BAR)
+        bar.update()
+        self.assertEqual((bar.list.text, bar.inspector.text, bar.list.is_on, bar.inspector.is_on),
+                         ("LIST", "INSPECTOR", True, True))
+        self.assertEqual((bar.list.help, bar.inspector.help),
+                         ("press: show the list of songs, sounds and instruments, or hide it",
+                          "press: show the numbers and the findings, or hide them"))
+        click(ui, middle(bar.list.rect))
+        click(ui, middle(bar.inspector.rect))
+        self.assertEqual(asked, ["left", "right"])
+        # What the owner says of the panels is what the switches show, whatever was pressed.
+        for sides in ((False, True), (True, False), (False, False)):
+            bar.sides = sides
+            bar.update()
+            self.assertEqual((bar.list.is_on, bar.inspector.is_on), sides)
+        # With no owner to tell, a press does nothing.
+        bar.folded = None
+        click(ui, middle(bar.list.rect))
+        self.assertEqual(asked, ["left", "right"])
 
     def test_a_bar_too_narrow_for_everything_has_no_meter_and_keeps_the_rest(self) -> None:
-        places = arrange((0, 0, 471, 22))
+        places = arrange((0, 0, 577, 22))
         self.assertEqual(places["meter"][2], 0)
         self.assertEqual([places[thing] for thing in ("play", "stop", "loop", "dry", "time", "found")],
                          [(97, 3, 17, 16), (116, 3, 17, 16), (135, 3, 17, 16), (205, 3, 25, 16), (242, 3, 109, 16),
-                          (436, 0, 29, 22)])
-        # The time stays down to the width at which it ends a gap before the findings.
-        self.assertEqual(arrange((0, 0, 398, 22))["time"], (242, 3, 109, 16))
+                          (542, 0, 29, 22)])
+        # The time stays down to the width at which it ends a gap before the two switches.
+        self.assertEqual(arrange((0, 0, 504, 22))["time"], (242, 3, 109, 16))
 
     def test_a_bar_too_narrow_for_the_time_as_well_has_neither_and_keeps_the_buttons_and_the_findings(self) -> None:
-        places = arrange((0, 0, 397, 22))
+        places = arrange((0, 0, 503, 22))
         self.assertEqual((places["time"][2], places["meter"][2]), (0, 0))
         self.assertEqual([places[thing] for thing in ("play", "stop", "loop", "dry", "found")],
-                         [(97, 3, 17, 16), (116, 3, 17, 16), (135, 3, 17, 16), (205, 3, 25, 16), (362, 0, 29, 22)])
+                         [(97, 3, 17, 16), (116, 3, 17, 16), (135, 3, 17, 16), (205, 3, 25, 16), (468, 0, 29, 22)])
         # The buttons keep their size and their places from the left end of the bar, wherever the bar is.
         self.assertEqual([arrange(SMALL_BAR)[thing] for thing in ("file", "play", "dry")],
                          [(46, 13, 31, 16), (137, 13, 17, 16), (245, 13, 25, 16)])
@@ -457,15 +491,16 @@ class Top(unittest.TestCase):
         self.assertEqual(places, {"file": (6, 3, 31, 16), "undo": (49, 3, 17, 16), "redo": (68, 3, 17, 16),
                                   "play": (97, 3, 17, 16), "stop": (116, 3, 17, 16), "loop": (135, 3, 17, 16),
                                   "pattern": (154, 3, 49, 16), "dry": (205, 3, 25, 16), "time": (242, 3, 109, 16),
-                                  "meter": (363, 3, 62, 16), "found": (925, 0, 29, 22)})
-        things = (*ROW, "time", "meter")
+                                  "meter": (363, 3, 62, 16), "list": (819, 3, 31, 16),
+                                  "inspector": (852, 3, 61, 16), "found": (925, 0, 29, 22)})
+        things = (*ROW, "time", "meter", "list", "inspector")
         self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
         self.assertEqual(bar.sign.rect, places["found"])
         # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
-        for rect in (BAR, (0, 0, 471, 22), SMALL_BAR, (0, 0, 30, 5)):
+        for rect in (BAR, (0, 0, 577, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
             # A meter that has gone is not drawn at all.
-            self.assertEqual((len(ui.widgets), bar.meter.visible), (11, rect == BAR))
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (13, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
 
@@ -799,7 +834,7 @@ class Changing(unittest.TestCase):
 @unittest.skipUnless(pygame, NEEDS)
 class Drawn(unittest.TestCase):
     def test_the_bar_draws_the_findings_in_their_colour_and_the_time_in_a_sunk_box(self) -> None:
-        rect = (0, 0, 400, theme.TOP_H)
+        rect = (0, 0, 520, theme.TOP_H)
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
@@ -827,7 +862,7 @@ class Drawn(unittest.TestCase):
                          (w - 2) * (h - 2) - ink(surface, places["time"], theme.TEXT))
 
     def test_the_bar_draws_the_left_side_in_the_upper_bar_of_the_meter_and_no_meter_that_has_gone(self) -> None:
-        rect = (0, 0, 472, theme.TOP_H)
+        rect = (0, 0, 578, theme.TOP_H)
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
@@ -835,7 +870,7 @@ class Drawn(unittest.TestCase):
         meter = arrange(rect)["meter"]
         upper, lower = bars(meter, 2, lying=True)
         shown = []
-        for wide in (472, 471):
+        for wide in (578, 577):
             bar.place((0, 0, wide, theme.TOP_H))
             surface.fill(theme.PANEL)
             bar.update()
@@ -1037,7 +1072,8 @@ class InTheApp(unittest.TestCase):
         app.update()
         self.assertEqual((app.screen.stand(), app.ui.held, app._shape()), ((x + 40, y + 25, w - 100, h), None, "ew"))
         self.mouse(app, up, (w - 102, 500))
-        self.assertEqual(app.screen.begin().get_size(), (w - 100, h))
+        # The narrower window shows less, at the scale it opened with.
+        self.assertEqual((app.screen.begin().get_size(), app.screen.scale), (((w - 100) // 2, h // 2), 2))
         # No edge has hold of the mouse on a button of the row, in its corner: the middle one fills the desktop.
         work = (0, 0, 1920, 1032)
         at = tuple(part * app.screen.scale for part in middle(title_parts(app.title.rect)[MAXIMISE]))
@@ -1139,6 +1175,92 @@ class InTheApp(unittest.TestCase):
         self.assertTrue(app.open(EXAMPLES / "arcade.json"))
         self.assertEqual((app.borders["left"].line(), app.borders["right"].line(), app.panels["left"].rect[2]),
                          (299, 700, 300))
+
+    def wide(self, app: App, width: int) -> dict[str, layout.Rect]:
+        """Have the window be a width, in window pixels, and draw a frame in it: the parts of the frame it then has."""
+        x, y, _, h = app.screen.stand()
+        app.screen.put((x, y, width, h))
+        app.update()
+        art = app.screen.begin()
+        app.draw(art)
+        # The frame after it has the switches of the top bar as the panels are now.
+        app.update()
+        return app.parts(art.get_size())
+
+    def test_a_side_panel_is_off_a_window_too_narrow_for_it_and_comes_back_with_the_room(self) -> None:
+        self.held()
+        app = self.silent()
+        top, (left, right) = app.panels["top"], (app.panels["left"], app.panels["right"])
+
+        def on() -> tuple[bool, ...]:
+            return (left.shown, app.borders["left"].visible, top.list.is_on,
+                    right.shown, app.borders["right"].visible, top.inspector.is_on)
+
+        parts = self.wide(app, 1920)
+        self.assertEqual((app.screen.scale, parts["middle"], on()), (2, (124, 36, 662, 442), (True,) * 6))
+        # A window with no room for both has no inspector, and the middle has what the inspector had.
+        parts = self.wide(app, 1800)
+        self.assertEqual((app.screen.scale, parts["left"][2], parts["middle"], parts["right"][2], on()),
+                         (2, 124, (124, 36, 776, 442), 0, (True, True, True, False, False, False)))
+        # None of what the inspector has is seen or takes the mouse, and nothing is drawn where it stood.
+        self.assertFalse(any(widget.visible for widget in right.widgets))
+        # Half of a desktop of 2560 across has neither, and the middle has all of the width at the same scale.
+        parts = self.wide(app, 1280)
+        self.assertEqual((app.screen.scale, parts["left"][2], parts["middle"], parts["right"][2], on()),
+                         (2, 0, (0, 36, 640, 442), 0, (False,) * 6))
+        self.assertFalse(any(widget.visible for widget in (*left.widgets, *right.widgets)))
+        self.assertEqual(left.list.visible, False)
+        # With room again, both are back by themselves, as wide as they were.
+        parts = self.wide(app, 1920)
+        self.assertEqual((parts["left"][2], parts["right"][2], on(), app.wishes),
+                         (124, 174, (True,) * 6, {"left": None, "right": None}))
+        self.assertTrue(left.list.visible)
+
+    def test_the_switch_of_a_side_panel_brings_it_onto_a_narrow_window_and_takes_it_off_a_wide_one(self) -> None:
+        self.held()
+        app = self.silent()
+        top = app.panels["top"]
+        self.wide(app, 1280)
+        # A press on LIST in a window with no room for the list: the list is there, and the middle is narrower.
+        click(app.ui, middle(top.list.rect))
+        parts = self.wide(app, 1280)
+        self.assertEqual((app.wishes, parts["left"][2], parts["middle"], parts["right"][2], app.panels["left"].shown,
+                          app.borders["left"].visible, (top.list.is_on, top.inspector.is_on)),
+                         ({"left": True, "right": None}, 124, (124, 36, 516, 442), 0, True, True, (True, False)))
+        # Its border is dragged as in any window, with the inspector off the window and out of the sum.
+        app.pull("left", 199)
+        self.assertEqual((app.columns, app.parts((640, 492))["middle"]), ((200, 174), (200, 36, 440, 442)))
+        app.pull("left", 123)
+        # Another press takes it off again, and that is what the window gives by itself: nothing is left asked.
+        click(app.ui, middle(top.list.rect))
+        parts = self.wide(app, 1280)
+        self.assertEqual((app.wishes, parts["middle"], top.list.is_on), ({"left": None, "right": None},
+                                                                         (0, 36, 640, 442), False))
+        # What was asked onto a narrow window is over in a wide one, which has it anyway: narrow again, it is off.
+        click(app.ui, middle(top.inspector.rect))
+        self.assertEqual((app.wishes, self.wide(app, 1280)["right"][2]), ({"left": None, "right": True}, 174))
+        self.assertEqual((self.wide(app, 1920)["right"][2], app.wishes), (174, {"left": None, "right": None}))
+        self.assertEqual(self.wide(app, 1280)["right"][2], 0)
+        # In a wide window a press takes a panel off, for the middle to have its room, and a press brings it back.
+        self.wide(app, 1920)
+        click(app.ui, middle(top.inspector.rect))
+        parts = self.wide(app, 1920)
+        self.assertEqual((app.wishes["right"], parts["middle"], app.panels["right"].shown, top.inspector.is_on),
+                         (False, (124, 36, 836, 442), False, False))
+        click(app.ui, middle(top.inspector.rect))
+        self.assertEqual((app.wishes["right"], self.wide(app, 1920)["right"][2]), (None, 174))
+
+    def test_an_edge_of_the_window_is_not_dragged_further_in_than_the_least_size_at_its_scale(self) -> None:
+        self.held()
+        app = self.silent()
+        x, y, w, h = app.screen.stand()
+        self.assertEqual((app.screen.scale, app.screen.least), (2, (1280, 800)))
+        self.mouse(app, pygame.MOUSEBUTTONDOWN, (w - 2, h - 2))
+        self.mouse(app, pygame.MOUSEMOTION, (40, 30))
+        app.update()
+        self.mouse(app, pygame.MOUSEBUTTONUP, (40, 30))
+        self.assertEqual(app.screen.stand(), (x, y, 1280, 800))
+        self.assertEqual((app.screen.begin().get_size(), app.screen.scale), (theme.LEAST_ART, 2))
 
     def test_ctrl_and_z_is_undo_and_ctrl_and_y_or_ctrl_and_shift_and_z_is_redo_whatever_has_the_focus(self) -> None:
         self.held()

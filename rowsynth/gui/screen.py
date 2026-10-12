@@ -128,7 +128,8 @@ class Screen:
     """
 
     def __init__(self, size: tuple[int, int] | None = None, scale: int | None = None) -> None:
-        """Open a window that can be resized. `scale` is kept at every size when one is given.
+        """Open a window that can be resized. Its scale is kept at every size: `scale`, or with none the one
+        that `fit` chooses for the size the window opens at. A smaller window shows less, and nothing smaller.
 
         A `size` that is given is the window's, as it is. With none the window opens at the size that fits the
         first desktop, which is the main one.
@@ -149,7 +150,10 @@ class Screen:
         self.window = self._open(size)
         # The window may not have come out at the size asked for, so its own size is the one that counts.
         self.scale, art = fit(self.window.get_size(), scale)
+        self._given = self.scale
         self.art = pygame.Surface(art)
+        if self.frame is not None:
+            self.frame.least = self.least
 
     def _open(self, size: tuple[int, int]) -> pygame.Surface:
         """Open the window with no frame of the system's where pygame can stand in for the frame, and else with it.
@@ -216,6 +220,11 @@ class Screen:
         return handle
 
     @property
+    def least(self) -> tuple[int, int]:
+        """The least size the window is dragged to, in window pixels: `theme.LEAST_ART` at the window's scale."""
+        return theme.LEAST_ART[0] * self.scale, theme.LEAST_ART[1] * self.scale
+
+    @property
     def big(self) -> bool:
         """Whether the window fills the desktop: as the system has it, or as it was made to here and not put back."""
         return self.frame.big if self.frame is not None else self.kept is not None
@@ -280,7 +289,10 @@ class Screen:
         pygame.display.set_caption(f"rowsynth  {text}" if text else "rowsynth")
 
     def begin(self) -> pygame.Surface:
-        """The art surface, to draw the next frame on. It follows the window: after a resize it has a new size."""
+        """The art surface, to draw the next frame on. It follows the window: after a resize it has a new size.
+
+        The scale stays what it was as the window opened.
+        """
         self.window = pygame.display.get_surface()
         self.scale, art = fit(self.window.get_size(), self._given)
         if art != self.art.get_size():

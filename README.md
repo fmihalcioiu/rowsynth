@@ -350,7 +350,7 @@ python -m rowsynth gui examples/piece.json
 
 The window shows a project file as something to click on. Notes are placed with the mouse and heard as they are placed, and every change is written to the file as it is made. It works on the same files as the commands, and the two can work on one file at the same time.
 
-It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels: the largest square at which the screen still has room for the whole of it.
+It is drawn for 960 by 540 pixels, and each drawn pixel is shown as a square of screen pixels. How big that square is, is settled as the window opens: the largest at which the screen still has room for the whole layout. It stays that for as long as the window is open, so a smaller window shows less and nothing in it gets smaller. The window is never smaller than 640 by 400 drawn pixels.
 
 The window has a title row of its own in place of the system's: the name of the file, and buttons to minimise, to maximise and to close. A drag on the row moves the window, a double press on it maximises, and the edges and corners resize. On Windows it is the system that does all of this, so the window snaps to the sides of the screen and answers the keys of the system as any other does. Where none of it can be set up, the window opens with the frame of the system.
 
@@ -358,13 +358,15 @@ The window has a title row of its own in place of the system's: the name of the 
 
 | Part | What it is for |
 |---|---|
-| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, and at the right end how many findings `check` has for the project |
+| Top bar | `FILE`, undo and redo, play, stop and loop, `PATTERN` to play only the pattern that is shown, `DRY` to play without echoes, the time, a meter, `LIST` and `INSPECTOR` to show or hide the two side panels, and at the right end how many findings `check` has for the project |
 | The list on the left | The songs, the sounds and the instruments. A click picks one, and Space plays what is picked. After the last of each kind stands a `+` that makes a new one. The `+` of the instruments offers `Empty` and a few ready instruments to start from |
 | The middle | What is picked, to change: a song, an instrument or a sound, each as below |
 | The inspector on the right | `MEASURED` has the numbers of what is picked, the ones `measure` prints, in words, and one that breaks a rule is red. `FOUND` has the findings of `check`, those of the picked thing first. A click on a finding goes to the thing it is in. A finding with one sure repair has a `FIX` button, and `FIX ALL` makes all of them as one step |
 | Status line | One line for whatever the mouse is on: what a press does there, what a right press does, and what the wheel does. At its right end is what is picked |
 
 The borders between the list, the middle and the inspector are dragged to give one of them more room.
+
+A window too narrow for all three has no inspector, and a narrower one has no list either, so the editor in the middle keeps its room. Half of a wide screen is such a window. `LIST` and `INSPECTOR` in the top bar bring a panel back there, and take one off a wide window to give the editor more room. Both panels come back by themselves when the window is wide enough again.
 
 The three editors of the middle are laid out alike. At the top is a heading with the name of the thing and the buttons that act on all of it. Under it is one bar with the knobs of what is picked inside. Then comes the main area with a column of names at its side, and at the foot what comes out of it: the velocity of the notes, the wave, or the scope.
 
@@ -835,7 +837,7 @@ usage: rowsynth gui [-h] [--scale N] [--frames N] [--shot PATH] [FILE]
 
 Opens the window on a project file, or with no `FILE` on its first screen. The window is described under The window above. The command goes on until the window is closed, and then prints the file and how many frames were drawn.
 
-`--scale N` is how many screen pixels a drawn pixel takes each way, a whole number. Left out, it is the largest that leaves 960 by 480 drawn pixels or more.
+`--scale N` is how many screen pixels a drawn pixel takes each way, a whole number. Left out, it is the largest that leaves 960 by 480 drawn pixels or more in the window as it opens.
 
 The files opened in the window are remembered from one run to the next, in `rowsynth/recent.json` in the settings folder of the user: `%APPDATA%` on Windows, `~/Library/Application Support` on macOS, and `$XDG_CONFIG_HOME` or `~/.config` anywhere else.
 

@@ -7,7 +7,8 @@ import numpy as np
 
 from rowsynth.gui import theme
 from rowsynth.gui.layout import (BORDER_REACH, CORNER_REACH, EDGE_REACH, LEAST_MIDDLE, LEAST_SIDE, LEAST_WINDOW, MOVE,
-                                 POINTERS, TITLE_H, borders, dragged, edge, filled, frame, grip, pulled)
+                                 NEED_MIDDLE, POINTERS, SIDES, TITLE_H, borders, dragged, edge, filled, frame, grip,
+                                 pulled, room_for, wished)
 
 
 class Frame(unittest.TestCase):
@@ -134,6 +135,22 @@ class Dragging(unittest.TestCase):
                          [(100, 50, 640, 360), (260, 290, 640, 360)])
         # The least can be another.
         self.assertEqual(dragged(rect, "w", (790, 0), (20, 20)), (880, 50, 20, 600))
+
+    def test_a_surface_has_room_for_a_side_panel_that_leaves_the_middle_what_it_needs(self) -> None:
+        self.assertEqual((SIDES, NEED_MIDDLE, theme.LEAST_ART), (("left", "right"), 640, (640, 400)))
+        # The surface the layout is drawn for has both, and so has one a few pixels narrower.
+        self.assertEqual((room_for(theme.DESIGN[0]), room_for(938)), ((True, True), (True, True)))
+        # The right panel is the first to go, and the left one goes where it would leave the middle too little.
+        self.assertEqual((room_for(937), room_for(764)), ((True, False), (True, False)))
+        self.assertEqual((room_for(763), room_for(theme.LEAST_ART[0]), room_for(0)),
+                         ((False, False), (False, False), (False, False)))
+        # With no side panel, the least surface a window has gives the middle what it needs.
+        self.assertEqual(frame(theme.LEAST_ART, TITLE_H, 0, 0)["middle"][2], NEED_MIDDLE)
+
+    def test_a_wish_for_a_side_panel_is_over_once_the_room_gives_what_was_wished(self) -> None:
+        self.assertEqual([wished(wish, room) for wish, room in ((True, False), (False, True), (True, True),
+                                                                (False, False), (None, True), (None, False))],
+                         [True, False, None, None, None, None])
 
     def test_a_window_fills_the_desktop_and_is_put_back_where_it_stood(self) -> None:
         stood, work = (100, 50, 800, 600), (0, 0, 1920, 1032)

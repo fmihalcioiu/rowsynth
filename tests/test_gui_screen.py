@@ -215,12 +215,22 @@ class Window(unittest.TestCase):
         for pos in ((9, 14), (12, 14), (10, 13), (10, 16)):
             self.assertEqual(window.get_at(pos)[:3], theme.BACKGROUND, pos)
 
+    def test_the_least_size_of_the_window_is_the_least_art_size_at_the_scale_it_opened_with(self) -> None:
+        self.assertEqual(theme.LEAST_ART, (640, 400))
+        self.assertEqual((self.opened((1920, 1080)).least, self.opened((960, 540)).least, self.opened(scale=3).least),
+                         ((1280, 800), (640, 400), (1920, 1200)))
+
     def test_the_art_surface_follows_the_window_to_a_new_size(self) -> None:
         screen = self.opened((1920, 1080))
         # What a resize leaves behind it: the window's own surface at another size.
         pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
-        self.assertEqual((screen.begin().get_size(), screen.scale), ((1280, 720), 1))
-        self.assertEqual(screen.to_art((700, 30)), (700, 30))
+        # The scale the window opened with stays: a smaller window shows less, and nothing smaller.
+        self.assertEqual((screen.begin().get_size(), screen.scale), ((640, 360), 2))
+        self.assertEqual(screen.to_art((700, 30)), (350, 15))
+        # Nor does a larger window show anything larger than the window did as it opened.
+        screen = self.opened((1280, 720))
+        pygame.display.set_mode((2560, 1440), pygame.RESIZABLE)
+        self.assertEqual((screen.begin().get_size(), screen.scale), ((2560, 1440), 1))
         # A scale that was given stays, and a window that does not divide by it has a strip left over.
         screen = self.opened((1920, 1080), 2)
         pygame.display.set_mode((1281, 721), pygame.RESIZABLE)

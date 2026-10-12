@@ -10,6 +10,10 @@ TITLE_H = 14
 #: The least width a side column keeps while its border is dragged, and the least that is then left to the middle.
 LEAST_SIDE = 72
 LEAST_MIDDLE = 320
+#: The width the middle has to have left for a side panel to be on the window by itself.
+NEED_MIDDLE = 640
+#: The two side panels, by the names their parts have, in the order their widths are given in.
+SIDES = ("left", "right")
 #: How far the strip a border is taken by reaches to each side of the border's line.
 BORDER_REACH = 2
 
@@ -49,6 +53,25 @@ def frame(size: tuple[int, int], title: int = 0, left: int | None = None, right:
         "right": (width - right, under, right, between),
         "status": (0, height - status, width, status),
     }
+
+
+def room_for(width: int) -> tuple[bool, bool]:
+    """Whether a surface of a width has room for the left panel, and for the right one as well.
+
+    There is room for a panel where it leaves the middle `NEED_MIDDLE` pixels, with the panels as wide as the
+    theme has them. The right panel is the first to go, and it has no room where the left one has none.
+    """
+    left = width >= theme.LEFT_W + NEED_MIDDLE
+    return left, left and width >= theme.LEFT_W + theme.RIGHT_W + NEED_MIDDLE
+
+
+def wished(wish: bool | None, room: bool) -> bool | None:
+    """What is left of a wish for a side panel on a surface that has room for the panel, or has none.
+
+    A wish is True for a panel that was asked onto the window, False for one that was asked off it, and None
+    for one that comes and goes with the room there is. A wish for what the room gives by itself is over.
+    """
+    return None if wish == room else wish
 
 
 def edge(rect: Rect, side: str) -> Rect:

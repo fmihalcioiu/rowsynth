@@ -156,12 +156,12 @@ class Browser(Panel):
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
         nowhere = (0, 0, 0, 0)
-        self.list = ui.add(Things(nowhere, changed=lambda key: session.pick(*key), help=LIST_HELP,
-                                  asked=self._ask, named=lambda key: self._rename(*key)))
+        self.list = self.add(Things(nowhere, changed=lambda key: session.pick(*key), help=LIST_HELP,
+                                    asked=self._ask, named=lambda key: self._rename(*key)))
         self.list.told = lambda row: row_help(row, session.model.project.instruments)
         self.list.added = lambda key: self._plus(key[1])
         #: The button of each row that adds, by the kind of thing it makes. They stand over the list.
-        self.plus = {kind: ui.add(Plus(nowhere, lambda kind=kind: self._plus(kind), told(adds(kind))))
+        self.plus = {kind: self.add(Plus(nowhere, lambda kind=kind: self._plus(kind), told(adds(kind))))
                      for kind in KINDS.values()}
         # The listing the rows were last made of, and the song that is picked, or was picked last.
         self._listing: Listing | None = None
@@ -199,7 +199,7 @@ class Browser(Panel):
         for kind, button in self.plus.items():
             row = self.list.row_rect((NEW, kind))
             rect = (x, y, 0, 0) if row is None else plus_rect(row)
-            button.visible = row is not None and within(rect, self.list.rect) == rect
+            button.visible = self.shown and row is not None and within(rect, self.list.rect) == rect
             button.rect = rect if button.visible else (x, y, 0, 0)
 
     def _plus(self, kind: str) -> None:

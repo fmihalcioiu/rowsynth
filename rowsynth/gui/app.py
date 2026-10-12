@@ -114,6 +114,10 @@ class App:
     and moves the window, and the edges and corners of the window resize it. With the system's frame there is
     no title row: `title` is None. `borders` is the two borders between the columns, which are dragged, and
     `columns` how wide the left panel and the right one are: they stay as they were dragged for the run.
+
+    A side panel is on the window while the window has room for it, as `layout.room_for` says, and off it in
+    a narrower one, so that the middle keeps its room. `wishes` is what was asked of each with its switch in
+    the top bar since the room last changed: True for on, False for off, None for nothing.
     """
 
     def __init__(self, path: str | Path | None = None, scale: int | None = None,
@@ -147,6 +151,7 @@ class App:
         self.title: Title | None = None
         self.borders: dict[str, Border] = {}
         self.columns: tuple[int, int] = (theme.LEFT_W, theme.RIGHT_W)
+        self.wishes: dict[str, bool | None] = dict.fromkeys(layout.SIDES)
         # A drag of the window's frame that is under way: the edge or corner it has hold of, or that it moves
         # the window, where the window stood as it began, and where on the desktop the mouse then was.
         self._drag: tuple[str, Rect, Pos] | None = None
@@ -204,7 +209,7 @@ class App:
         self.ui.keys[_UNDO] = self.session.undo
         for keys in _REDO:
             self.ui.keys[keys] = self.session.redo
-        self.panels = {"top": TopBar(self.session, self.ui, self.file_menu),
+        self.panels = {"top": TopBar(self.session, self.ui, self.file_menu, self.fold),
                        "left": Browser(self.session, self.ui),
                        "middle": Middle(self.session, self.ui),
                        "right": Inspector(self.session, self.ui)}
@@ -323,16 +328,34 @@ class App:
 
         `border` is "left" or "right". Each column keeps a least width, as `layout.pulled` has it.
         """
-        self.columns = layout.pulled(self._size[0], *self.columns, border, x)
+        width = self._size[0]
+        pulled = layout.pulled(width, *self.sides(width), border, x)
+        at = layout.SIDES.index(border)
+        self.columns = tuple(pulled[at] if index == at else wide for index, wide in enumerate(self.columns))
+        self.place(self._size)
+
+    def sides(self, width: int) -> tuple[int, int]:
+        """How wide the left panel and the right one are on an art surface of a width: 0 for one that is off it.
+
+        A panel is on the window where it was asked on, off where it was asked off, and with nothing asked it
+        is on while the surface has room for it. One that is on is as wide as its border was dragged.
+        """
+        on = (room if self.wishes[side] is None else self.wishes[side]
+              for side, room in zip(layout.SIDES, layout.room_for(width)))
+        return tuple(wide if shown else 0 for wide, shown in zip(self.columns, on))
+
+    def fold(self, side: str) -> None:
+        """Take a side panel off the window, or bring it back: its switch in the top bar was pressed."""
+        self.wishes[side] = not self.sides(self._size[0])[layout.SIDES.index(side)]
         self.place(self._size)
 
     def parts(self, size: tuple[int, int]) -> dict[str, Rect]:
         """The parts of the frame on an art surface of a size, as `layout.frame` gives them.
 
         There is a title row where the window has no frame of the system's, and the two side panels are as
-        wide as their borders were dragged.
+        wide as `sides` has them.
         """
-        return layout.frame(size, layout.TITLE_H if self.screen.frameless else 0, *self.columns)
+        return layout.frame(size, layout.TITLE_H if self.screen.frameless else 0, *self.sides(size[0]))
 
     def say(self, words: str) -> None:
         """Put words in the status bar: through the session where a project is open, and as the app's own if not."""
@@ -406,15 +429,24 @@ class App:
         """Give each panel its part of the frame on an art surface of a size, and the title row and borders theirs.
 
         With no project open, the first screen gets all of the surface but the title row and the status bar.
+        A side panel that has no width is off the window, and its border with it. What was asked of a side
+        panel is over once the surface gives it by itself.
         """
         self._size = size
+        for side, room in zip(layout.SIDES, layout.room_for(size[0])):
+            self.wishes[side] = layout.wished(self.wishes[side], room)
         parts = self.parts(size)
         for name, panel in self.panels.items():
             panel.place(parts[name])
+            if name in layout.SIDES and panel.shown != (parts[name][2] > 0):
+                panel.show(parts[name][2] > 0)
+        if "top" in self.panels:
+            self.panels["top"].sides = tuple(parts[side][2] > 0 for side in layout.SIDES)
         if self.title is not None:
             self.title.rect = parts["title"]
         for side, border in self.borders.items():
             border.rect = layout.borders(parts)[side]
+            border.visible = parts[side][2] > 0
         if self.first is not None:
             top = parts["title"][3]
             self.first.place((0, top, size[0], parts["status"][1] - top))
@@ -536,7 +568,7 @@ class App:
         stand = self.screen.stand()
         if stand is not None:
             by = (stand[0] + pos[0] - origin[0], stand[1] + pos[1] - origin[1])
-            self.screen.put(layout.dragged(start, grip, by))
+            self.screen.put(layout.dragged(start, grip, by, self.screen.least))
 
     def _shape(self) -> str:
         """The shape the mouse pointer has now, as `Screen.pointer` takes it.
@@ -585,7 +617,7 @@ class App:
         canvas.box((0, 0, *size), theme.BACKGROUND)
         parts = self.parts(size)
         for name, side in _LINES.items():
-            if self.first is None or name == "status":
+            if (self.first is None or name == "status") and parts[name][2] > 0:
                 canvas.box(parts[name], theme.PANEL)
                 canvas.box(layout.edge(parts[name], side), theme.LINE)
         self._status(parts["status"])
