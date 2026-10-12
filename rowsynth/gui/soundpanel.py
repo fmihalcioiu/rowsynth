@@ -1,6 +1,7 @@
-"""The middle of the window for a sound or an instrument: a heading, and under it its settings and its view."""
+"""The middle of the window for a sound: its heading, its settings bar, its notes on a clock, and its wave."""
 from __future__ import annotations
 
+import json
 import math
 from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
@@ -9,15 +10,16 @@ from ..bank import entry_kind, render_entry
 from ..checks.sounds import _BRIGHT, _DC
 from ..errors import RowSynthError
 from ..note import DEFAULT_RATE
-from . import soundbar, soundedit, soundview, theme
-from .font import Font
+from . import soundedit, soundview, theme
+from .dials import plain
+from .kit import REMOVE, Heading, thing_menu, told
 from .layout import Rect
 from .panels import Panel, within
 from .popups import Item, Menu, ask
-from .session import HOLD
+from .session import HOLD, piano
 from .soundbar import SoundBar
 from .ui import Button, Event, Pos, Ui, draw_button
-from .wave import KINDS, LIMIT, LIMIT_STEP, PART, RULER, SoundView, called, on_tick
+from .wave import KINDS, LIMIT, LIMIT_STEP, MARK, PART, RULER, RULER_H, WHEEL_HELP, SoundView, called, on_tick
 
 if TYPE_CHECKING:
     import numpy as np
@@ -27,35 +29,32 @@ if TYPE_CHECKING:
     from .model import Model
     from .session import Session
 
-#: From the sides of the panel to its two boxes, and between the two.
+#: From the sides of the panel to its parts, and from one part to the next.
 MARGIN = 4
-#: How high the box of the heading is, from its sides to its words, and between two things it says.
-HEAD_H = 17
-HEAD_PAD = 5
-HEAD_SPACE = 8
-#: From the outline of the lower box to what is in it, and from the bar of the settings to the view under it.
-PAD = 4
-BAR_GAP = 2
+GAP = 2
+#: How high the velocity lane is, the upper part of the foot: the box of the wave has the rest of it.
+LANE_H = 24
 #: The colour of each kind of thing the panel shows: of its name, and of its bars and its wave.
 COLOURS = {"sound": theme.SOUND, "instrument": theme.INSTRUMENT}
-#: What the view says of itself while the mouse is on no bar and not on the wave.
-HELP = "ctrl and the wheel zoom the time, and the wheel alone moves along it"
+#: What the view says of itself where a press would do nothing.
+HELP = told(wheel=WHEEL_HELP)
 #: What a sound of several holds, by the kind of its entry: the word for one of them, and for more.
 COUNTED = {"defs": ("variant", "variants"), "parts": ("part", "parts")}
 #: The word on the button that a held sound is played with, and what the button says of itself.
 HOLD_WORD = "HOLD"
-HOLD_HELP = "press and keep pressed to hear the sound held, and let go to hear its end"
+HOLD_HELP = told("keep it pressed to hear the sound held, and let go to hear its end")
 #: What is said, after its name, of a sound whose edit ended after it was changed outside.
 MEANWHILE = "was changed outside while it was edited here: this edit stands, and undo brings the other back"
 
-#: What each kind of entry is called on the button of the heading and in its menu, what a sound is said to
+#: The word on the button of the kinds, what each kind of entry is called in its menu, what a sound is said to
 #: have been made, and what the button says of itself.
-KIND_WORDS = {"def": "ONE", "defs": "VARIANTS", "parts": "PARTS", "held": "HELD"}
-MADE = {"def": "made one sound", "defs": "made variants", "parts": "made parts", "held": "made a held sound"}
-KIND_HELP = "what kind of sound this is: press to make it one sound, variants, parts on a timeline or a held sound"
+KIND_WORD = "KIND"
+KIND_WORDS = {"def": "SINGLE", "defs": "VARIANTS", "parts": "PARTS", "held": "HELD"}
+MADE = {"def": "made a single sound", "defs": "made variants", "parts": "made parts", "held": "made a held sound"}
+KIND_HELP = told("what kind of sound this is: a single sound, variants, parts on a timeline, or a held sound")
 #: The word on the button of the limits, and what it says of itself.
 LIMITS_WORD = "LIMITS"
-LIMITS_HELP = "what the checks hold this sound to: how long it may last, how far off zero and how bright it may be"
+LIMITS_HELP = told("what the checks hold this sound to: how long it may last, how far off zero and how bright")
 #: The limits an entry can be held to, each as the key of the file, its plain words, the unit its number is in,
 #: what the checks go by where the entry has none, and what the box says in which its number is typed.
 LIMITS = (
@@ -64,8 +63,21 @@ LIMITS = (
      "how far the mean of the wave may be off zero before the checks say so: empty is the usual"),
     ("max_bright", "Brightest", "", _BRIGHT,
      "the share of the energy that may be above 4 kHz before the checks say so: empty is the usual"))
-#: The least room the heading keeps for its words: one too narrow for that has neither of the two buttons.
-HEAD_WORDS = 160
+#: The word on the button of the notes that are kept with a sound, its `meta`, and what it says of itself. What
+#: the item reads that adds one, the two things the menu of one has, and how many characters of a text are
+#: listed.
+NOTES_WORD = "NOTES"
+NOTES_HELP = told("the notes that are kept with this sound, each a key and a text of your own")
+ADD_NOTE = "+"
+CHANGE = "Change..."
+NOTE_SHOWN = 40
+#: What the menu of the ruler reads that marks a note the sound is expected to play, and what the item of a
+#: variant reads that plays it.
+EXPECT = "Expect a note here..."
+PLAY = "Play"
+#: How wide the box is that a text is typed into, and how many characters it takes.
+TEXT_W = 160
+MOST_TEXT = 64
 #: The characters a number is typed with, and how many of them a box takes.
 NUMBER = "0123456789.-"
 MOST_NUMBER = 10
@@ -84,12 +96,26 @@ def held(model: Model) -> Project:
 def words(kind: str, count: int) -> str:
     """What the heading says of a sound after its name: what its entry is, and how many sounds that holds.
 
-    `kind` is as `bank.entry_kind` names it, and `count` how many shapes the entry has: "3 variants", "2 parts",
-    "held". Of one sound it says nothing.
+    `kind` is as `bank.entry_kind` names it, and `count` how many shapes the entry has: "single", "3 variants",
+    "2 parts", "held".
     """
     if kind in COUNTED:
         return f"{count} {COUNTED[kind][count != 1]}"
-    return "held" if kind == "held" else ""
+    return "held" if kind == "held" else "single"
+
+
+def length(kind: str, shapes: Sequence[tuple[str, float, soundview.Shape]]) -> float:
+    """How long a sound is, in seconds, by its shapes as `soundview.shapes` gives them.
+
+    Variants are sounds of their own, and the length is that of the longest. Anything else ends where the
+    last of its shapes does.
+    """
+    return max((shape.seconds if kind == "defs" else at + shape.seconds for _, at, shape in shapes), default=0.0)
+
+
+def facts(kind: str, shapes: Sequence[tuple[str, float, soundview.Shape]]) -> str:
+    """The few facts the heading has of a sound: what its entry is, and how long it is, as "held, 0.9 s"."""
+    return f"{words(kind, len(shapes))}, {plain(round(length(kind, shapes), 2))} s"
 
 
 def lost(entry: dict, to: str) -> str:
@@ -131,6 +157,23 @@ def number(typed: str) -> int | float:
     return int(value) if value == int(value) else value
 
 
+def noted(typed: str) -> str | int | float:
+    """The note that was typed in a box: a number as a number, and anything else as a name in small letters."""
+    try:
+        return number(typed)
+    except RowSynthError:
+        return typed.strip().lower()
+
+
+def listed(key: str, value: object) -> str:
+    """One of the notes kept with a sound as its row of their list: its key and its text, cut to `NOTE_SHOWN`.
+
+    A value that is no text is listed as a file writes it.
+    """
+    text = value if isinstance(value, str) else json.dumps(value)
+    return f"{key}: {text if len(text) <= NOTE_SHOWN else text[:NOTE_SHOWN - 2] + '..'}"
+
+
 def zone(at: float, lengths: Sequence[float], rounds: int = 1) -> tuple[int, float]:
     """Where a held sound is, at a place in the row it is played as: which zone, counted from 0, and how far into it.
 
@@ -148,33 +191,27 @@ def zone(at: float, lengths: Sequence[float], rounds: int = 1) -> tuple[int, flo
 
 
 def arrange(rect: Rect) -> dict[str, Rect]:
-    """Where the things of the panel go in its rectangle, each by what it is called.
+    """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
-    "head" is the box of the heading, along the top, and "hold" the button at the right end of that box. Before
-    it stand "limits" and before that "kind", the two buttons of a sound that can be changed: a heading that
-    would keep less than `HEAD_WORDS` for its words has neither, and they have no width. "box" is the box under
-    it, down to the foot. Inside that box, clear of its outline, "bar" runs along the top, which is where the
-    settings of a sound go as `soundbar.arrange` lays them out, and "view" is what is left under it. Every one
-    is cut to the panel.
+    They are the skeleton every editor has, from the top: "head" is the heading, `theme.HEAD_H` high, and "bar"
+    the settings bar, `theme.BAR_H` high. The foot is at the lower end, `theme.FOOT_H` high: "lane" is the
+    velocity lane, its upper `LANE_H`, and "wave" the box of the wave under it. "view" is the main area, what
+    is left between the bar and the foot: the keyboard, the ruler, the grid and its scroll bars.
     """
     x, y, w, h = rect
-    wide, top = w - 2 * MARGIN, y + 2 * MARGIN + HEAD_H
-    button = Font.width(HOLD_WORD) + 2 * theme.PAD
-    hold = x + w - MARGIN - button
-    limits = Font.width(LIMITS_WORD) + 2 * theme.PAD
-    kind = max(Font.width(word) for word in KIND_WORDS.values()) + 2 * theme.PAD
-    at = hold - HEAD_SPACE - limits
-    if at - theme.BUTTON_GAP - kind - HEAD_SPACE - x - MARGIN < HEAD_WORDS:
-        at, limits, kind = hold, 0, 0
-    box = (x + MARGIN, top, wide, y + h - MARGIN - top)
-    left, upper, inner = box[0] + PAD, box[1] + PAD, box[2] - 2 * PAD
-    under = upper + soundbar.HEIGHT + BAR_GAP
-    placed = {"head": (x + MARGIN, y + MARGIN, wide, HEAD_H),
-              "hold": (hold, y + MARGIN, button, HEAD_H), "limits": (at, y + MARGIN, limits, HEAD_H),
-              "kind": (at - (theme.BUTTON_GAP + kind if kind else 0), y + MARGIN, kind, HEAD_H), "box": box,
-              "bar": (left, upper, inner, soundbar.HEIGHT),
-              "view": (left, under, inner, box[1] + box[3] - PAD - under)}
-    return {thing: within(place, rect) for thing, place in placed.items()}
+    left, wide, end = x + MARGIN, w - 2 * MARGIN, y + h - MARGIN
+    bar = y + MARGIN + theme.HEAD_H + GAP
+    top = bar + theme.BAR_H + GAP
+    foot = max(top, end - theme.FOOT_H)
+    wave = foot + LANE_H + GAP
+    placed = {
+        "head": (left, y + MARGIN, wide, theme.HEAD_H),
+        "bar": (left, bar, wide, theme.BAR_H),
+        "view": (left, top, wide, foot - GAP - top),
+        "lane": (left, foot, wide, LANE_H),
+        "wave": (left, wave, wide, end - wave),
+    }
+    return {part: within(place, rect) for part, place in placed.items()}
 
 
 class Hold(Button):
@@ -207,56 +244,72 @@ class Hold(Button):
 
 
 class SoundPanel(Panel):
-    """The middle of the window while a sound or an instrument is picked: its kind and its name, and its view.
+    """The middle of the window while a sound is picked, laid out as every editor is.
 
-    A sound is its notes as bars over the waves of its render, and an instrument the wave of its test note alone.
-    Until the first render is ready the wave is empty. With a song picked, or nothing, the panel shows nothing.
+    `head` is the heading: what is shown, its name, and of a sound what its entry is and how long it is. At
+    its right end stand the buttons that act on the whole sound: `kinds`, `limits` and `notes`, each of which
+    opens a list, and for a held sound `hold`, which holds the sound for as long as it is kept pressed. `bar`
+    is the settings bar: the voices, the echo and the volume of the sound of the entry that the hand is in.
+    `view` is the main area, the notes as bars on a clock of seconds beside the keyboard, with its scroll
+    bars. In the foot stand the velocity lane of the view and under it the box of the wave. An instrument is
+    the wave of its test note alone. Until the first render is ready the wave is empty. With a song picked, or
+    nothing, the panel shows nothing.
 
-    A variant that is clicked in the view is played, and is the one the view marks. A held sound has a button,
-    `hold`, in the heading: the sound is held for as long as the button is kept pressed.
-
-    The notes of a sound are changed in `view`, and its voices, its echo and its level in `bar`, which has the
-    settings of the sound of the entry that the hand is in. What either hands the panel is saved at once: the
-    whole entry is put in the file, and that is one change, and one step that can be taken back. The sound is
-    then read again as after any change, so the view and the bar show what the file holds: the notes at once,
-    and the wave of before, dim, until the render of the saved sound has come. A change that is refused leaves
-    them as they were, and the session says why. After a save the sound is played once, the variant that was
-    changed where it has variants, unless the session's `audition` is off. While a gesture is under way in the
-    view, or a knob of the bar is under the hand, nothing is read: what changed meanwhile, here or outside, is
-    shown when the hand has let go. A note that is placed, or moved to another key, is heard, with the
-    instrument its voice names or has written in place.
+    The notes of a sound are changed in `view`, and its voices, its echo and its volume in `bar`. What either
+    hands the panel is saved at once: the whole entry is put in the file, and that is one change, and one step
+    that can be taken back. The sound is then read again as after any change, so the view and the bar show
+    what the file holds: the notes at once, and the wave of before, dim, until the render of the saved sound
+    has come. A change that is refused leaves them as they were, and the session says why. Nothing is played
+    by a change, unless the session's `audition` is on. While a gesture is under way in the view, or a knob of
+    the bar is under the hand, nothing is read: what changed meanwhile, here or outside, is shown when the
+    hand has let go. A note that is placed, or moved to another key, is heard, with the instrument its voice
+    names or has written in place, and so is a key of the keyboard. With the focus on the view the keys of the
+    computer play the instrument of the picked voice as a piano, from the lowest c the view has in view.
 
     What kind of entry a sound is, and what belongs to the kind, is changed here as well, each change one save
-    of the whole entry and one step. `kinds`, in the heading, shows the kind and opens a menu of the four: an
-    item says what the sound would let go of. The view tells of the rest. The sign after the labels adds a
-    variant or a part, a copy of the one the hand is in, and a click in the ruler with ctrl held adds a part
-    there. The right button on a label opens a menu: a variant is removed or moved, and a part is removed,
-    copied, or given its level in a box. The label of a part is dragged to where the part is to start, the
-    borders of a held sound to its start and its loop, and the line of the longest time to that. The right
-    button in the ruler sets a longest time or takes it away. `limits`, in the heading, opens a menu of all
-    three limits the checks go by, each typed as a number in a box: the bar has no room for them beside the
-    knobs of a held sound with an echo. The other two lengths of a held sound are knobs of the bar.
+    of the whole entry and one step. `kinds` opens a menu of the four kinds: an item says what the sound would
+    let go of. The view tells of the rest. The sign after the labels adds a variant or a part, a copy of the
+    one the hand is in, and a click in the ruler with ctrl held adds a part there. A press on the label of a
+    variant or a part picks it, and plays nothing. The right button on a label opens its menu, in the order
+    every such menu has: a variant is copied, played, moved or removed, and a part is copied, given its volume
+    in a box, or removed. The label of a part is dragged to where the part is to start, the borders of a held
+    sound to its start and its loop, and the line of the longest time to that. `limits` opens a menu of all
+    three limits the checks go by, each typed as a number in a box.
+
+    The right button in the ruler opens a menu that sets a longest time or takes it away, and marks a note the
+    sound is expected to play at the second under the mouse: a box takes the name of the note. Such a note has
+    a flag on the ruler, which is dragged to another second, and whose menu changes its note or removes it.
+    `notes` opens the list of the notes that are kept with the sound, its `meta`: a key and a text each. The
+    last item adds one, in a box for the key and then one for the text, and an item opens the menu of its
+    note, which changes its text or removes it. A value that is no text is dim, and is left as it is.
+
+    An instrument that is written in place in a voice is made a shared one from the list of the instruments
+    of the bar: it moves to the instruments of the project under the name that was typed, and the voice names
+    it, the two as one step.
 
     `heading` is the kind in capitals and the name of what is shown, or None for nothing, and `words` what the
-    heading says after them of a sound of several. `kind` is what the entry of a sound is, as `bank.entry_kind`
-    names it. `refusal` is what the engine says of a sound it cannot read, and "" for one it can: the words
-    stand in place of the view.
+    entry of a sound is, in the words of the heading. `kind` is what the entry of a sound is, as
+    `bank.entry_kind` names it. `refusal` is what the engine says of a sound it cannot read, and "" for one it
+    can: the words stand in place of the view.
     """
 
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
-        self.view = self.add(SoundView((0, 0, 0, 0), HELP))
-        self.view.chosen, self.view.edited = self._choose, self._save
-        self.view.sounded, self.view.refused = self._sound, self._refuse
-        self.view.added, self.view.asked = self._add, self._ask
-        self.view.handled, self.view.alone = self._handle, self._alone
-        self.hold = self.add(Hold((0, 0, 0, 0), HOLD_WORD, self._press, self._let_go, HOLD_HELP))
-        self.kinds = self.add(Button((0, 0, 0, 0), KIND_WORDS[KINDS[0]], action=self._ask_kind, help=KIND_HELP))
-        self.limits = self.add(Button((0, 0, 0, 0), LIMITS_WORD, action=self._ask_limits, help=LIMITS_HELP))
+        nowhere = (0, 0, 0, 0)
+        # The heading and the bar are added before what stands on them, so that they are drawn under it.
+        self.head = self.add(Heading(nowhere, "SOUND", theme.SOUND))
+        self.kinds = self.add(Button(nowhere, KIND_WORD, action=self._ask_kind, help=KIND_HELP, arrow=True))
+        self.limits = self.add(Button(nowhere, LIMITS_WORD, action=self._ask_limits, help=LIMITS_HELP, arrow=True))
+        self.notes = self.add(Button(nowhere, NOTES_WORD, action=self._ask_notes, help=NOTES_HELP, arrow=True))
+        self.hold = self.add(Hold(nowhere, HOLD_WORD, self._press, self._let_go, HOLD_HELP))
         self.bar = SoundBar(self, lambda defn, label: self._save(self.view.sound, defn, label), self._level,
-                            self._voice, lengthed=self._length)
-        # Nothing has been looked at yet, so there is nothing for the view to show.
-        self.view.visible = self.hold.visible = self.kinds.visible = self.limits.visible = False
+                            self._voice, lengthed=self._length, shared=self._share)
+        self.view = self.add(SoundView(nowhere, HELP))
+        for part in self.view.parts:
+            self.add(part)
+        self.view.edited, self.view.sounded, self.view.refused = self._save, self._sound, self._refuse
+        self.view.added, self.view.asked, self.view.typed = self._add, self._ask, self._key
+        self.view.handled, self.view.alone = self._handle, self._alone
         self.heading: tuple[str, str] | None = None
         self.words = ""
         self.kind = KINDS[0]
@@ -283,6 +336,8 @@ class SoundPanel(Panel):
         # frame: whether the picked thing played, and how far into it.
         self._asked = False
         self._was = (False, 0.0)
+        # Nothing has been looked at yet, so there is nothing to show.
+        self._turn()
 
     @property
     def showing(self) -> bool:
@@ -295,12 +350,13 @@ class SoundPanel(Panel):
         self._turn()
 
     def place(self, rect: Rect) -> None:
-        """Take the panel's rectangle, and give the view, the button and the bar what `arrange` leaves them."""
+        """Take the panel's rectangle, and give the heading, the bar, the view and its lane what `arrange` has."""
         super().place(rect)
-        self._places = arrange(rect)
-        self.view.rect, self.hold.rect = self._places["view"], self._places["hold"]
-        self.kinds.rect, self.limits.rect = self._places["kind"], self._places["limits"]
-        self.bar.place(self._places["bar"])
+        self._places = parts = arrange(rect)
+        self.head.rect = parts["head"]
+        self.bar.place(parts["bar"])
+        self.view.rect, self.view.foot, self.view.lane.rect = parts["view"], parts["wave"], parts["lane"]
+        self._turn()
 
     def update(self, passed: float = 0.0) -> None:
         """Show what is picked as it is now: its shapes made again only for another pick or another project.
@@ -326,14 +382,20 @@ class SoundPanel(Panel):
         self.view.played = self._variant if self.kind == "defs" else None
 
     def _turn(self) -> None:
-        """Have the view on the window only with something to show, the button only with a held sound, and the
-        bar and the two buttons of the kind and the limits only with a sound that can be changed."""
+        """Have each widget seen or not: by whether the panel is on the window, and by what there is to show.
+
+        The heading is seen with anything the panel shows, and the view only with something it can read: its
+        parts go with it. The bar and the three buttons that open a list are seen with a sound that can be
+        changed, and the button that holds only with a held sound. The buttons that are seen are laid out
+        from the right end of the heading.
+        """
+        self.head.visible = self.shown and self.heading is not None
         self.view.visible = self.shown and self.showing
-        self.hold.visible = self.view.visible and self.kind == "held"
         changed = self.view.visible and self._entry is not None
         self.bar.seen(changed)
-        self.kinds.visible = self.limits.visible = changed and self._places["kind"][2] > 0
-        self.kinds.text = KIND_WORDS[self.kind]
+        self.kinds.visible = self.limits.visible = self.notes.visible = changed
+        self.hold.visible = self.view.visible and self.kind == "held"
+        self.head.right([button for button in (self.kinds, self.limits, self.notes, self.hold) if button.visible])
 
     def _look(self) -> None:
         """Read the picked thing where it, or the project, is another than the one that was read last."""
@@ -341,7 +403,8 @@ class SoundPanel(Panel):
         picked, project = model.picked, held(model)
         if self._seen is None or picked != self._seen[0] or project is not self._seen[1]:
             if self._seen is None or picked != self._seen[0]:
-                # Another thing is shown whole, with the hand in its first sound and no wave of before.
+                # Another thing is shown whole, opened on its notes, with the hand in its first sound and no
+                # wave of before.
                 self.view.fit()
                 self.view.sound = 0
                 self._variant, self._holding, self._ending, self._wave = None, False, None, None
@@ -358,6 +421,7 @@ class SoundPanel(Panel):
         if picked is not None and picked[0] in COLOURS:
             kind, name = picked
             self.heading, self.colour = (kind.upper(), name), COLOURS[kind]
+            said = ""
             if kind == "sound":
                 try:
                     self._shapes = soundview.shapes(project.sounds[name], rate, project.instruments)
@@ -367,6 +431,9 @@ class SoundPanel(Panel):
                     self._entry = project.sounds[name]
                     self.kind = entry_kind(self._entry)
                     self.words = words(self.kind, len(self._shapes))
+                    said = facts(self.kind, self._shapes)
+            self.head.kind, self.head.colour = self.heading[0], self.colour
+            self.head.show(name, said)
         if self.showing:
             self._take(_WAITING)
         else:
@@ -439,7 +506,7 @@ class SoundPanel(Panel):
         return saved
 
     def _level(self, level: object, label: str) -> bool:
-        """Save a level as the `db` of the picked entry, or with None take it out, and say whether it was saved."""
+        """Save a volume as the `db` of the picked entry, or with None take it out, and say whether it was saved."""
         current = held(self.session.model).sounds.get(self.heading[1])
         if current is None:
             return self._refuse("the project has no such sound any more")
@@ -489,7 +556,8 @@ class SoundPanel(Panel):
                      count)
 
     def _handle(self, kind: str, which: int, value: float) -> None:
-        """Save what a handle of the view was dragged to: the start of a part, a border, or the longest time."""
+        """Save what a handle of the view was dragged to: the start of a part, a border, the longest time, or the
+        second of a note the sound is expected to play."""
         model = self.session.model
         instruments, rate = held(model).instruments, model.rate
         if kind == PART:
@@ -497,6 +565,9 @@ class SoundPanel(Panel):
                          f"part {which + 1} moved to {value:g} s")
         elif kind == LIMIT:
             self._limit("max_seconds", value)
+        elif kind == MARK:
+            self._change(lambda entry: soundedit.mark_set(entry, which, at=value),
+                         f"expected note moved to {value:g} s")
         else:
             before, after = BORDERS[kind]
             self._change(lambda entry: soundedit.held_with(entry, kind, value, instruments, rate),
@@ -517,6 +588,22 @@ class SoundPanel(Panel):
         none = "no longest time" if key == "max_seconds" else f"{words} as usual"
         return self._change(lambda entry: soundedit.with_setting(entry, key, value),
                             none if value is None else f"{words} {value:g}{unit}")
+
+    def _share(self, voice: int, name: str) -> bool:
+        """Make the instrument that is written in place in a voice of the sound the hand is in a shared one.
+
+        It moves to the instruments of the project under a name, and the voice names it: the two are one write
+        to the file, and one step that can be taken back. The answer is whether that was done. What
+        `soundedit.shared` refuses, as a name the project has, changes nothing, and the session says why.
+        """
+        model, sound = self.session.model, self.heading[1]
+        try:
+            changes = soundedit.shared(held(model).to_dict(), sound, self.view.sound, voice, name, model.rate)
+        except RowSynthError as error:
+            return self._refuse(str(error))
+        saved = self.session.change_many(changes, f"{sound}: voice {voice + 1} plays {name}, now a shared instrument")
+        self._look()
+        return saved
 
     def _alone(self, which: int) -> np.ndarray | None:
         """The wave of one part of the picked sound by itself, at its own level. None where the engine refuses it."""
@@ -545,6 +632,19 @@ class SoundPanel(Panel):
         ask(self.ui, rect, "" if value is None else f"{value:g}", done, allowed=NUMBER.__contains__,
             most=MOST_NUMBER, help=f"{help}, enter sets it, escape leaves it")
 
+    def _write(self, at: Pos, text: str, entered: Callable[[str], object], help: str) -> None:
+        """Open a box that is typed into at a place, holding a text, of which `help` says what it is.
+
+        On enter `entered` is given the text. The box is `TEXT_W` wide, and is moved onto the window.
+        """
+        ask(self.ui, (at[0], at[1], TEXT_W, RULER_H), text, entered, most=MOST_TEXT,
+            help=f"{help}, enter takes it, escape leaves it")
+
+    def _under(self, button: Button) -> Pos:
+        """Where the list of a button of the heading opens: under its left end."""
+        x, y, _, h = button.rect
+        return x, y + h
+
     def _ask_kind(self) -> None:
         """Open the menu of the four kinds under its button. An item says what the sound would let go of."""
         entry, rate = self._entry, self.session.model.rate
@@ -555,8 +655,7 @@ class SoundPanel(Panel):
                         lambda: self._change(lambda entry: converted(entry, kind, rate), MADE[kind], 0),
                         enabled=kind != self.kind)
 
-        x, y, _, h = self.kinds.rect
-        self._menu([item(kind) for kind in KINDS], (x, y + h))
+        self._menu([item(kind) for kind in KINDS], self._under(self.kinds))
 
     def _ask_limits(self) -> None:
         """Open the menu of the limits under its button: each item opens a box that holds the number of one."""
@@ -567,48 +666,106 @@ class SoundPanel(Panel):
             return Item(f"{words} ({shown})...", lambda: self._type(
                 self.limits.rect, entry.get(key), lambda value: self._limit(key, value), help))
 
-        x, y, _, h = self.limits.rect
-        self._menu([item(*limit) for limit in LIMITS], (x, y + h))
+        self._menu([item(*limit) for limit in LIMITS], self._under(self.limits))
+
+    def _ask_notes(self) -> None:
+        """Open the list of the notes that are kept with the sound under its button: its keys and its texts.
+
+        An item opens the menu of its note, and one whose value is no text cannot be chosen. The last item
+        adds a note: a box takes its key, and then one its text.
+        """
+        at = self._under(self.notes)
+        rows = [Item(listed(key, value), lambda key=key: self._ask_note(key, at), enabled=isinstance(value, str))
+                for key, value in self._entry.get("meta", {}).items()]
+        self._menu([*rows, Item(ADD_NOTE, lambda: self._add_note(at))], at)
+
+    def _ask_note(self, key: str, at: Pos) -> None:
+        """Open the menu of one of the notes that are kept with the sound: its text is changed, or it is removed."""
+        text = self._entry["meta"][key]
+        self._menu([
+            Item(CHANGE, lambda: self._write(at, text, lambda typed: self._change(
+                lambda entry: soundedit.meta_set(entry, key, typed), f"{key} of NOTES changed"),
+                f"the text that is kept under {key}")),
+            Item(REMOVE, lambda: self._change(lambda entry: soundedit.meta_dropped(entry, key),
+                                              f"{key} removed from NOTES"))], at)
+
+    def _add_note(self, at: Pos) -> None:
+        """Open a box that takes the key of a new note, and after it one that takes its text: enter saves the two.
+
+        A key that cannot be given, as one the sound has already, is said before the text is asked for.
+        """
+        def keyed(key: str) -> None:
+            try:
+                soundedit.meta_set(self._entry, key, "", True)
+            except RowSynthError as error:
+                self._refuse(str(error))
+                return
+            self._write(at, "", lambda text: self._change(
+                lambda entry: soundedit.meta_set(entry, key, text, True), f"{key} added to NOTES"),
+                f"the text that is kept under {key}")
+
+        self._write(at, "", keyed, "the key of a new note that is kept with the sound")
 
     def _ask(self, what: str, which: int, second: float, pos: Pos) -> None:
-        """Open the menu the view asks for at the mouse: that of the ruler, or of the label of a variant or a part.
+        """Open the menu the view asks for at the mouse: that of the ruler, of a flag, or of a label.
 
-        The ruler sets the longest time to its second, in hundredths, or takes it away. A variant is removed
-        or moved one place, and a part is removed, copied as a part that starts with it, or given its level in a
-        box over its label. What cannot be done is not enabled: the last of them is not removed, and none is
-        moved past the first or the last.
+        The ruler sets the longest time to its second, in hundredths, or takes it away, and marks a note that
+        the sound is expected to play there: a box takes the name of the note. The flag of such a note changes
+        its note in a box, or removes it. The label of a variant or a part has the menu of a named thing: a
+        variant is copied as one more, played, moved one place or removed, and a part is copied as a part that
+        starts with it, given its volume in a box over its label, or removed. What cannot be done is not
+        enabled: neither has a name, the last of them is not removed, and none is moved past the first or the
+        last.
         """
         entry, count, name = self._entry, len(self._shapes), called(self.kind, which)
-        removed = soundedit.variant_dropped if self.kind == "defs" else soundedit.part_dropped
-        remove = Item("Remove", lambda: self._change(lambda entry: removed(entry, which), f"{name} removed"),
-                      enabled=count > 1)
         if what == RULER:
             at = round(max(LIMIT_STEP, second), 2)
-            items = [Item("Set a longest time here", lambda: self._limit("max_seconds", at)),
-                     Item("No longest time", lambda: self._limit("max_seconds", None),
-                          enabled="max_seconds" in entry)]
-        elif self.kind == "defs":
+            here = round(max(0.0, second), 2)
+            self._menu([Item("Set a longest time here", lambda: self._limit("max_seconds", at)),
+                        Item("No longest time", lambda: self._limit("max_seconds", None),
+                             enabled="max_seconds" in entry),
+                        Item(EXPECT, lambda: self._write(pos, "", lambda typed: self._change(
+                            lambda entry: soundedit.mark_added(entry, here, noted(typed)),
+                            f"expects {typed.strip().lower()} at {here:g} s"),
+                            f"the note the sound is expected to play at {here:g} s, as e6"))], pos)
+            return
+        if what == MARK:
+            note = entry["check"][which]["note"]
+            self._menu([Item(CHANGE, lambda: self._write(pos, str(note), lambda typed: self._change(
+                            lambda entry: soundedit.mark_set(entry, which, note=noted(typed)),
+                            f"expects {typed.strip().lower()} at {second:g} s"),
+                            f"the note the sound is expected to play at {second:g} s")),
+                        Item(REMOVE, lambda: self._change(lambda entry: soundedit.mark_dropped(entry, which),
+                                                          f"expected note {note} removed"))], pos)
+            return
+        dropped = soundedit.variant_dropped if self.kind == "defs" else soundedit.part_dropped
+        remove = None if count == 1 else lambda: self._change(lambda entry: dropped(entry, which), f"{name} removed")
+        if self.kind == "defs":
             def move(way: str, to: int) -> Item:
                 return Item(f"Move {way}", lambda: self._change(
                     lambda entry: soundedit.variant_moved(entry, which, to), f"{name} moved {way}", to),
                     enabled=0 <= to < count)
 
-            items = [remove, move("left", which - 1), move("right", which + 1)]
+            def copy() -> None:
+                self._change(lambda entry: soundedit.variant_added(entry, which),
+                             f"{name} copied as variant {count + 1}", count)
+
+            special = [Item(PLAY, lambda: self._choose(which)), move("left", which - 1), move("right", which + 1)]
         else:
             start, level = entry["parts"][which][0], entry["parts"][which][1].get("db")
 
             def levelled(db: float | None) -> None:
                 self._change(lambda entry: soundedit.part_level(entry, which, db),
-                             f"{name} level taken out" if db is None else f"{name} level {db:g} dB")
+                             f"{name} volume taken out" if db is None else f"{name} volume {db:g} dB")
 
-            items = [remove,
-                     Item("Copy as a new part", lambda: self._change(
-                         lambda entry: soundedit.part_added(entry, start, which),
-                         f"{name} copied as part {count + 1}", count)),
-                     Item(f"Level ({level or 0:g} dB)...", lambda: self._type(
-                         self.view.tab(which), level, levelled,
-                         f"the level of {name}, in decibels from the level every sound is brought to"))]
-        self._menu(items, pos)
+            def copy() -> None:
+                self._change(lambda entry: soundedit.part_added(entry, start, which),
+                             f"{name} copied as part {count + 1}", count)
+
+            special = [Item(f"Volume ({level or 0:g} dB)...", lambda: self._type(
+                self.view.tab(which), level, levelled,
+                f"the volume of {name}, in decibels from the level every sound is brought to"))]
+        self._menu(thing_menu(None, copy, special, remove), pos)
 
     def _put(self, entry: dict, label: str, index: int) -> bool:
         """Put an entry in the file in the place of the picked one, as one step, and show what the file then holds.
@@ -635,6 +792,19 @@ class SoundPanel(Panel):
         The voice names its instrument, or has it written in place: the session is handed either as it is.
         """
         self.session.sound(inst, pitch)
+
+    def _key(self, event: Event) -> bool:
+        """Take a key the view has the focus for and does not use, and say whether it was used.
+
+        A key of the piano sounds its note with the instrument of the picked voice, counted from the lowest c
+        the view has in view. With ctrl held it is no key of the piano, and neither is any where there is no
+        sound to change.
+        """
+        note = piano(event.key)
+        if note is None or "ctrl" in event.mods or self._entry is None:
+            return False
+        self.view.hear(-(-self.view.map.pitches().start // 12) * 12 + note)
+        return True
 
     def _voice(self, voice: int) -> None:
         """Take the voice that was picked in the bar as the one a new note of the view goes into."""
@@ -701,21 +871,8 @@ class SoundPanel(Panel):
         return self.view.clock(2, self._ending)
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the two boxes, the heading in the upper one, and in the lower one the refusal if there is one."""
-        if self.heading is None:
-            return
-        places = self._places
-        with canvas.clip(self.rect):
-            for box in (places["head"], places["box"]):
-                canvas.box(box, theme.PANEL)
-                canvas.frame(box, theme.LINE)
-            x, y, w, h = places["head"]
-            # The words end before the first button there is.
-            last = min([x + w - HEAD_PAD, *(button.rect[0] - HEAD_SPACE for button in (self.kinds, self.hold)
-                                             if button.visible)])
-            at = x + HEAD_PAD
-            for text, colour in zip((*self.heading, self.words), (theme.DIM, self.colour, theme.DIM)):
-                canvas.text_in(text, (at, y, max(0, last - at), h), colour)
-                at += Font.width(text) + HEAD_SPACE
-            if self.refusal:
-                canvas.text_in(self.refusal, places["view"], theme.FAULT, "centre")
+        """Draw what the engine says against a sound in place of its view. Everything else is a widget."""
+        if self.heading is not None and self.refusal:
+            with canvas.clip(self.rect):
+                canvas.box(self._places["view"], theme.PANEL)
+                canvas.text_in(self.refusal, self._places["view"], theme.FAULT, "centre")

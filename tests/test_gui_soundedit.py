@@ -13,9 +13,10 @@ import numpy as np
 from rowsynth.bank import RENDER_GAIN, render_entry
 from rowsynth.errors import RowSynthError
 from rowsynth.gui.soundedit import (HIGHEST, LOWEST, as_held, as_one, as_parts, as_variants, boxed, copied, held_with,
-                                    kind_of, moved, part_added, part_at, part_dropped, part_level, pasted, placed,
-                                    removed, snapped, sound_in, stretched, variant_added, variant_dropped,
-                                    variant_moved, voice_added, voice_dropped, voice_inst, with_echo, with_setting,
+                                    kind_of, mark_added, mark_dropped, mark_set, meta_dropped, meta_set, moved,
+                                    part_added, part_at, part_dropped, part_level, pasted, placed, removed, shared,
+                                    snapped, sound_in, stretched, variant_added, variant_dropped, variant_moved,
+                                    voice_added, voice_copied, voice_dropped, voice_inst, with_echo, with_setting,
                                     with_sound, with_velocity)
 from rowsynth.notes import midi
 from rowsynth.project import Project
@@ -633,6 +634,140 @@ class Sounds(unittest.TestCase):
         self.assertEqual(sound_in(changed(self, with_sound, held(), 1, sound([]), INSTRUMENTS, RATE), 1), sound([]))
 
 
+class Kept(unittest.TestCase):
+    """What a sound has beside its notes: one more voice like another, the notes it is expected to play, the notes
+    of its maker's own, and an instrument of its own made one of the project's."""
+
+    ONE = {"def": sound([[0, "c4", 4]], [[2, "e4", 2, 0.5]]), "db": -3}
+
+    def test_a_voice_is_copied_with_its_instrument_and_its_notes_as_the_last_voice(self) -> None:
+        own = {"wave": "saw", "vol": [12, 8, 4]}
+        defn = {"voices": [{"inst": own, "notes": [[0, "c4", 4], [2, 64, 2, 0.5]]}, {"inst": "beep", "notes": []}]}
+        made = changed(self, voice_copied, defn, 0)
+        self.assertEqual(made["voices"], [*defn["voices"], defn["voices"][0]])
+        # The copy is its own: what is done to it is not done to the voice it was made of.
+        made["voices"][2]["notes"].clear()
+        made["voices"][2]["inst"].clear()
+        self.assertEqual((made["voices"][0], defn["voices"][0]["inst"]), (defn["voices"][0], own))
+        self.assertEqual(changed(self, voice_copied, defn, 1)["voices"][2], {"inst": "beep", "notes": []})
+        for voice in (2, -1):
+            self.assertEqual(refusal(self, voice_copied, defn, voice),
+                             f"{voice} is no voice of the sound, of which there are 2, counted from 0")
+
+    def test_a_note_a_sound_is_expected_to_play_is_added_last_set_and_dropped_and_the_last_takes_the_key(self) -> None:
+        first = changed(self, mark_added, self.ONE, 0.05, "c4")
+        self.assertEqual(first, {**self.ONE, "check": [{"at": 0.05, "note": "c4"}]})
+        # A note is a name as it was written, or a number, which is written whole where it is whole.
+        both = changed(self, mark_added, first, 0.2, 64.0)
+        self.assertEqual((both["check"], type(both["check"][1]["note"])),
+                         ([{"at": 0.05, "note": "c4"}, {"at": 0.2, "note": 64}], int))
+        self.assertEqual(mark_added(first, 0.2, 60.5)["check"][1], {"at": 0.2, "note": 60.5})
+        # Set, one has another second, or another note, and what is not named stays.
+        self.assertEqual(changed(self, mark_set, both, 1, 0.3)["check"],
+                         [{"at": 0.05, "note": "c4"}, {"at": 0.3, "note": 64}])
+        self.assertEqual(changed(self, mark_set, both, 0, None, "d4")["check"],
+                         [{"at": 0.05, "note": "d4"}, {"at": 0.2, "note": 64}])
+        self.assertEqual(mark_set(both, 0, 0, 72)["check"][0], {"at": 0, "note": 72})
+        # Dropped, it is gone alone, and an entry without its last one is as it was before the first.
+        left = changed(self, mark_dropped, both, 0)
+        self.assertEqual((left["check"], mark_dropped(left, 0)), ([{"at": 0.2, "note": 64}], self.ONE))
+        # They are kept for any kind of entry, and each passes the check of the project.
+        for entry in ({"defs": [sound([[0, "c4", 3]]), sound([[0, "e4", 3]])]}, held()):
+            with self.subTest(kind=kind_of(entry)):
+                self.assertEqual(changed(self, mark_added, entry, 0.1, "g3")["check"], [{"at": 0.1, "note": "g3"}])
+
+    def test_a_second_under_0_what_is_no_note_and_a_note_that_is_not_there_are_refused(self) -> None:
+        both = mark_added(mark_added(self.ONE, 0.05, "c4"), 0.2, 64)
+        for call, given, said in (
+                (mark_added, (self.ONE, -0.1, "c4"),
+                 "the second a note is expected at is a number, 0 or more, not -0.1"),
+                (mark_added, (self.ONE, "soon", "c4"),
+                 "the second a note is expected at is a number, 0 or more, not 'soon'"),
+                (mark_added, (self.ONE, 0.1, "h9"), "a note is a number or a name such as 'c#4', not 'h9'"),
+                (mark_added, (self.ONE, 0.1, None), "a note is a number or a name such as 'c#4', not None"),
+                (mark_set, (both, 0, -1), "the second a note is expected at is a number, 0 or more, not -1"),
+                (mark_set, (both, 1, None, "x"), "a note is a number or a name such as 'c#4', not 'x'"),
+                (mark_set, (both, 2, 0.3),
+                 "2 is no note the sound is expected to play, of which there are 2, counted from 0"),
+                (mark_dropped, (both, -1),
+                 "-1 is no note the sound is expected to play, of which there are 2, counted from 0"),
+                (mark_dropped, (self.ONE, 0),
+                 "0 is no note the sound is expected to play, of which there are 0, counted from 0")):
+            with self.subTest(call=call.__name__, given=given[1:]):
+                self.assertEqual(refusal(self, call, *given), said)
+
+    def test_a_text_is_kept_under_a_key_of_the_notes_of_a_sound_changed_and_dropped_with_the_last_key(self) -> None:
+        first = changed(self, meta_set, self.ONE, "mood", "calm", True)
+        self.assertEqual(first, {**self.ONE, "meta": {"mood": "calm"}})
+        # A new key is the last, and one that is changed stays where it stands. A text can be empty.
+        kept = {**self.ONE, "meta": {"by": "hand", "take": 3}}
+        more = changed(self, meta_set, kept, "mood", "calm", True)
+        self.assertEqual(list(more["meta"].items()), [("by", "hand"), ("take", 3), ("mood", "calm")])
+        self.assertEqual(list(changed(self, meta_set, more, "by", "ear")["meta"].items()),
+                         [("by", "ear"), ("take", 3), ("mood", "calm")])
+        self.assertEqual(meta_set(kept, "by", "")["meta"], {"by": "", "take": 3})
+        # Without `fresh` a key the entry does not have yet is set as well.
+        self.assertEqual(meta_set(kept, "mood", "calm")["meta"], more["meta"])
+        # Dropped, a key is gone alone: what is no text stays, and without its last key the entry has no notes.
+        self.assertEqual(changed(self, meta_dropped, more, "by")["meta"], {"take": 3, "mood": "calm"})
+        self.assertEqual(meta_dropped(first, "mood"), self.ONE)
+
+    def test_a_key_that_is_none_one_taken_already_and_a_value_that_is_no_text_are_refused(self) -> None:
+        kept = {**self.ONE, "meta": {"by": "hand", "take": 3}}
+        for call, given, said in (
+                (meta_set, (kept, "by", "ear", True), "NOTES has 'by' already"),
+                (meta_set, (kept, "", "x"), "a key of NOTES is text with something in it, not ''"),
+                (meta_set, (kept, 3, "x"), "a key of NOTES is text with something in it, not 3"),
+                (meta_set, (kept, "mood", 3), "what stands under a key of NOTES here is text, not 3"),
+                (meta_set, (kept, "take", "4"), "'take' of NOTES holds no text, and is left as the file has it"),
+                (meta_dropped, (kept, "take"), "'take' of NOTES holds no text, and is left as the file has it"),
+                (meta_dropped, (kept, "mood"), "NOTES has no 'mood'"),
+                (meta_dropped, (self.ONE, "by"), "NOTES has no 'by'"),
+                (meta_dropped, (kept, ""), "a key of NOTES is text with something in it, not ''")):
+            with self.subTest(call=call.__name__, given=given[1:]):
+                self.assertEqual(refusal(self, call, *given), said)
+
+    def test_an_instrument_written_in_place_is_made_shared_by_two_changes_the_instrument_first(self) -> None:
+        own = {"wave": "saw", "release": 0}
+        data = {"instruments": INSTRUMENTS, "sounds": {
+            "a": {"def": sound([[0, "c4", 4]], [[0, "e4", 4]], inst=own)},
+            "b": {"defs": [sound([[0, "c4", 4]]), sound([[0, "c4", 4]], inst=own)], "db": [0, -3]}}}
+        before = json.dumps(data)
+        # Only the one voice names the instrument: another that has one like it written in place keeps its own.
+        self.assertEqual(shared(data, "a", 0, 1, "rasp"), [("instruments.rasp", own), ("sounds.a", {"def": {
+            "voices": [{"inst": own, "notes": [[0, "c4", 4]]}, {"inst": "rasp", "notes": [[0, "e4", 4]]}]}})])
+        # The sound is counted in its entry as `sound_in` counts, and the rest of the entry is as it was.
+        places = shared(data, "b", 1, 0, "rasp")
+        self.assertEqual(places, [("instruments.rasp", own), ("sounds.b", {
+            "defs": [sound([[0, "c4", 4]]), sound([[0, "c4", 4]], inst="rasp")], "db": [0, -3]})])
+        # What comes back shares nothing with the project. With the two changes made the project loads, and
+        # hands the sound out with the instrument it had.
+        scribble([value for _, value in shared(data, "a", 0, 0, "rasp")])
+        self.assertEqual(json.dumps(data), before)
+        made = {"instruments": {**INSTRUMENTS, "rasp": places[0][1]}, "sounds": {**data["sounds"], "b": places[1][1]}}
+        self.assertEqual(Project.from_dict(made).sound("b")["defs"][1]["voices"][0]["inst"], own)
+        # A project with no instruments yet gets its table with the one in it.
+        bare = {"sounds": {"a": {"def": sound([[0, "c4", 4]], inst=own)}}}
+        self.assertEqual(shared(bare, "a", 0, 0, "rasp"),
+                         [("instruments", {"rasp": own}), ("sounds.a", {"def": sound([[0, "c4", 4]], inst="rasp")})])
+
+    def test_a_voice_that_names_its_instrument_and_a_name_that_cannot_be_given_are_refused(self) -> None:
+        own = {"wave": "saw", "release": 0}
+        data = {"instruments": INSTRUMENTS, "sounds": {
+            "a": {"def": sound([[0, "c4", 4]], inst=own)}, "b": {"def": sound([[0, "c4", 4]])}}}
+        for given, said in (
+                (("b", 0, 0, "rasp"),
+                 "voice 1 names its instrument, 'beep': only one written in place is made shared"),
+                (("c", 0, 0, "rasp"), "the project has no sound called 'c'"),
+                (("a", 1, 0, "rasp"), "1 is no sound of the entry, of which there are 1, counted from 0"),
+                (("a", 0, 1, "rasp"), "1 is no voice of the sound, of which there are 1, counted from 0"),
+                (("a", 0, 0, "beep"), "the project has an instrument called 'beep' already"),
+                (("a", 0, 0, ""), "an instrument needs a name, and '' is none"),
+                (("a", 0, 0, "ra.sp"), "an instrument cannot be called 'ra.sp': a name cannot hold '.'")):
+            with self.subTest(given=given):
+                self.assertEqual(refusal(self, shared, data, *given), said)
+
+
 class Results(unittest.TestCase):
     def test_what_comes_back_shares_nothing_with_what_was_handed_in(self) -> None:
         own, echo = {"wave": "tri", "vol": [12, 6]}, dict(ECHO)
@@ -657,7 +792,8 @@ class Results(unittest.TestCase):
             "part_dropped": part_dropped(kinds["parts"], 1), "part_at": part_at(kinds["parts"], 0, 1),
             "part_level": part_level(kinds["parts"], 0, -2), "held_with": held_with(kinds["held"], "start", 9),
             "let_go": held_with(kinds["held"], "let_go", 9), "sound_in": sound_in(kinds["parts"], 0),
-            "with_sound": with_sound(kinds["defs"], 1, defn),
+            "with_sound": with_sound(kinds["defs"], 1, defn), "voice_copied": voice_copied(defn, 0),
+            "mark_added": mark_added(kinds["def"], 0.1, "c4"), "meta_set": meta_set(kinds["defs"], "by", "hand"),
         }
         for kind, entry in kinds.items():
             for call in (as_one, as_variants, as_parts, as_held):

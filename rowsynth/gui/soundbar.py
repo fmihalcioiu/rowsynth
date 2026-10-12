@@ -1,4 +1,4 @@
-"""The settings of one sound of an entry in one bar: its voices, the instrument of one, its level and its echo."""
+"""The settings bar of a sound: the voices of one sound of an entry as tabs, its instrument, its volume and its echo."""
 from __future__ import annotations
 
 import time
@@ -6,160 +6,153 @@ from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
-from . import channelbar, soundedit, theme
-from .channelbar import tidy
-from .dials import Knob, Stepper, knob_parts, plain
+from . import soundedit, theme
+from .channelbar import INST_W, tidy
+from .dials import Knob, Stepper, plain
 from .font import Font
+from .kit import Bar, Plus, Slot, thing_menu, told
 from .layout import Rect
 from .panels import within
+from .popups import Item, Menu, ask
 from .theme import Colour
-from .ui import Button, Choice, Label, Toggle, draw_button
+from .ui import Button, Choice, Event, Pos, Toggle, Ui, draw_button
 from .wave import called, voice_colour
 
 if TYPE_CHECKING:
     from .canvas import Canvas
     from .panels import Panel
 
-#: How high the bar is, how high a small button of it, and from one part of it to the next: as in the bar of a
-#: channel.
-HEIGHT = channelbar.HEIGHT
-BUTTON_H = channelbar.BUTTON_H
-SPACE = channelbar.SPACE
-#: How wide the room is for the words that say which sound of several the bar is of, the button of one voice,
-#: the field of the instrument, and a knob with its two lines: the widest of those is the hertz of the low-pass.
-WORD_W = Font.width("VARIANT 10")
-VOICE_W = Font.width("0") + 2 * theme.PAD
-INST_W = channelbar.INST_W
-KNOB_W = Font.width("12000 HZ")
-
-#: What the parts are called, the two buttons that add a voice and remove one, and what the field of the
-#: instrument reads for one that is written in place in its voice.
+#: What stands over the voices of the one sound of an entry, and what the settings are called. The last four are
+#: the echo's: how many seconds after itself the sound comes back (its `time`), how loud that first return is
+#: (its `mix`), how much of each return comes back once more (its `feedback`), and how bright the returns stay
+#: (its `lp`, the hertz of the low-pass each goes through). The switch of the echo reads one of the two words
+#: after them.
 VOICE = "VOICE"
-ADD = "+"
-DROP = "-"
 INSTRUMENT = "INSTRUMENT"
-OWN = "own"
-LEVEL = "LEVEL"
+VOLUME = "VOLUME"
 ECHO = "ECHO"
-#: What the settings of the echo are called, by what they do: how many seconds after itself the sound comes back
-#: (its `time`), how loud that first return is (its `mix`), how much of each return comes back once more (its
-#: `feedback`), and how bright the returns stay (its `lp`, the hertz of the low-pass each goes through).
-AFTER = "AFTER"
-LOUD = "LOUD"
-AGAIN = "AGAIN"
-BRIGHT = "BRIGHT"
+TIME = "TIME"
+AMOUNT = "AMOUNT"
+REPEATS = "REPEATS"
+TONE = "TONE"
+ON, OFF = "ON", "OFF"
 #: What the two lengths of a held sound are called that have no handle on its clock: the ticks at the end of its
 #: loop that are faded into what led up to it (its `join`), and the ticks its loop takes to die away once it is
-#: let go (its `let_go`). And what each says of itself.
-JOIN = "JOIN"
-LET_GO = "LET GO"
-JOIN_HELP = "how many ticks at the end of the loop fade into what came before it, so that it goes round without a click"
-LET_GO_HELP = "how many ticks the loop takes to die away once the sound is let go"
+#: let go (its `let_go`).
+CROSSFADE = "CROSSFADE"
+RELEASE = "RELEASE"
+#: What the field of the instrument reads for one that is written in place in its voice, and the item of the
+#: list of the instruments that makes such a one an instrument of the project.
+OWN = "its own"
+MAKE_SHARED = "Make shared..."
 
 #: The travel of each knob: its lowest value, its highest, and how many steps there are between them. A project
-#: may hold any number for each, so the travels are chosen here. A level goes in half decibels up to the 3 that
+#: may hold any number for each, so the travels are chosen here. A volume goes in half decibels up to the 3 that
 #: bring a sound to full scale, the seconds of an echo in hundredths up to a second, its two shares in
 #: hundredths, the second up to the most the engine lets come back, and its low-pass in hundreds of hertz. The
 #: two lengths of a held sound go in whole ticks, up to half a second and up to a second.
-LEVELS = (-30.0, 3.0, 66)
-JOINS = (0.0, 30.0, 30)
-LET_GOS = (0.0, 60.0, 60)
-AFTERS = (0.01, 1.0, 99)
-LOUDS = (0.0, 1.0, 100)
-AGAINS = (0.0, 0.95, 95)
-BRIGHTS = (200.0, 12000.0, 118)
+VOLUMES = (-30.0, 3.0, 66)
+CROSSFADES = (0.0, 30.0, 30)
+RELEASES = (0.0, 60.0, 60)
+TIMES = (0.01, 1.0, 99)
+AMOUNTS = (0.0, 1.0, 100)
+REPEATING = (0.0, 0.95, 95)
+TONES = (200.0, 12000.0, 118)
 #: The echo a sound gets when its echo is switched on and was not switched off here before: the one the example
 #: uses. And what the engine takes for the settings an echo leaves out.
 USUAL_ECHO = {"time": 0.09, "feedback": 0.35, "mix": 0.3, "lp": 4000}
 ABSENT = {"feedback": 0.3, "mix": 0.3, "lp": 3000}
-
-#: The parts that give way in a bar too narrow for all of them, the first first.
-DROPPED = (("after", "loud", "again", "bright"), ("level",), ("word",), ("echo",), ("inst",), ("add", "drop"),
-           ("voices",))
-#: The two knobs of a held sound, which stand after the level. They give way after the knobs of the echo.
-LENGTHS = ("join", "let_go")
-#: The parts that are knobs: they are as high as the bar, and the others as high as a button.
-KNOBS = ("level", *LENGTHS, "after", "loud", "again", "bright")
-#: What the knob of the echo's seconds says of itself, and what it says while the echo has several times.
-AFTER_HELP = "how many seconds after itself the sound comes back"
+#: What the knob of the echo's seconds says of itself while the echo has several times.
 SEVERAL_HELP = "this echo has several times, which are left as the file has them"
 
 
 def seconds_text(value: float) -> str:
     """A number of seconds as a knob shows it."""
-    return f"{plain(value)} S"
+    return f"{plain(value)} s"
 
 
 def hertz_text(value: float) -> str:
     """A number of hertz as a knob shows it."""
-    return f"{plain(value)} HZ"
+    return f"{plain(value)} Hz"
 
 
 def db_text(value: float) -> str:
-    """A level in decibels as a knob shows it."""
-    return f"{plain(value)} DB"
+    """A volume in decibels as a knob shows it."""
+    return f"{plain(value)} dB"
 
 
 def ticks_text(value: float) -> str:
-    """A number of ticks as a knob shows it."""
-    return f"{plain(value)} TICKS"
+    """A number of ticks as a knob shows it, as "1 tick" and "3 ticks"."""
+    return f"{plain(value)} {'tick' if value == 1 else 'ticks'}"
 
 
-def arrange(rect: Rect, voices: int = 1, several: bool = False, held: bool = False) -> dict[str, Rect]:
-    """Where the parts of the bar go in its rectangle, each by what it is called, and each cut to the bar.
+def knob_room(name: str, *values: str) -> int:
+    """How wide the room of a knob is: `KNOB_W` at the least, and what its name and its widest values need."""
+    return max(KNOB_W, *(Font.width(text) + 2 for text in (name, *values)))
 
-    From the left stand "word", for a sound that is one of `several`, then "voices" with a button for each of
-    so many voices and "add" and "drop" close after it, with "voice" over the three, "inst" with "heading" over
-    it, "level", "echo", and the knobs of the echo: "after", "loud", "again" and "bright". For a `held` sound
-    "join" and "let_go" stand between the level and the echo, and for any other there are no such parts. A bar
-    too narrow for all of them drops parts in the order of `DROPPED` until the rest fit, those two after the
-    knobs of the echo, so no two ever overlap. A part that was dropped has no width, and neither has a heading
-    with nothing under it.
+
+#: How wide the tab of one voice is, the least room a knob has with its two lines, and the button that opens the
+#: list of the instruments. The room of each knob is that of its name or of its widest value.
+VOICE_W = Font.width("0") + 2 * theme.PAD
+KNOB_W = 33
+LIST_W = theme.BUTTON_H
+VOLUME_W = knob_room(VOLUME, db_text(-29.5))
+CROSSFADE_W = knob_room(CROSSFADE, ticks_text(CROSSFADES[1]))
+RELEASE_W = knob_room(RELEASE, ticks_text(RELEASES[1]))
+ECHO_W = Font.width(ECHO) + 2 * theme.PAD
+TIME_W = knob_room(TIME, seconds_text(0.99))
+AMOUNT_W = knob_room(AMOUNT, plain(0.99))
+REPEATS_W = knob_room(REPEATS, plain(0.95))
+TONE_W = knob_room(TONE, hertz_text(TONES[1]))
+
+
+def voices_room(word: str, voices: int) -> int:
+    """How wide the room of the voices is: what the word over them needs, or the tabs and the sign after them."""
+    return max(Font.width(word), voices * VOICE_W + theme.BUTTON_GAP + theme.PLUS)
+
+
+def voice_parts(room: Rect, voices: int) -> tuple[Rect, Rect]:
+    """Where the tabs of so many voices go in the room they have in the bar, and the sign that adds one after them.
+
+    The tabs stand from the left, each `VOICE_W` wide, and the sign close after the last, in the middle of the
+    height. A room too narrow for them cuts the tabs, and a room of no width leaves neither any.
     """
-    x, y, w, h = rect
-    widths = {"word": WORD_W, "voices": voices * VOICE_W, "add": VOICE_W, "drop": VOICE_W, "inst": INST_W,
-              "level": KNOB_W, **({part: KNOB_W for part in LENGTHS} if held else {}),
-              "echo": Font.width(ECHO) + 2 * theme.PAD, "after": KNOB_W, "loud": KNOB_W, "again": KNOB_W,
-              "bright": KNOB_W}
-    # The two buttons stand close after the voices they add to and take from.
-    gaps = {"voices": theme.BUTTON_GAP, "add": theme.BUTTON_GAP}
-    kept = [part for part in widths if several or part != "word"]
-    for group in (DROPPED[0], LENGTHS, *DROPPED[1:]):
-        # What is kept takes its widths, and after each part but the last the gap to the next.
-        if sum(widths[part] for part in kept) + sum(gaps.get(part, SPACE) for part in kept[:-1]) <= w:
-            break
-        kept = [part for part in kept if part not in group]
-    top = y + (h - BUTTON_H) // 2
-    placed = {part: (x, y, 0, 0) for part in (*widths, "voice", "heading")}
-    at = x
-    for part in kept:
-        placed[part] = (at, y, widths[part], h) if part in KNOBS else (at, top, widths[part], BUTTON_H)
-        at += widths[part] + gaps.get(part, SPACE)
-    # A heading is on the line the knobs have their labels on, over what it names.
-    for heading, parts in (("voice", ("voices", "add", "drop")), ("heading", ("inst",))):
-        under = [placed[part] for part in parts if placed[part][2]]
-        if under:
-            left, right = under[0][0], under[-1][0] + under[-1][2]
-            placed[heading] = knob_parts((left, y, right - left, h))[0]
-    return {part: within(place, rect) for part, place in placed.items()}
+    x, y, w, h = room
+    wide = max(0, min(voices * VOICE_W, w - theme.BUTTON_GAP - theme.PLUS))
+    sign = (x + wide + theme.BUTTON_GAP, y + (h - theme.PLUS) // 2, theme.PLUS, theme.PLUS)
+    return (x, y, wide, h), within(sign, room)
 
 
 class Voices(Choice):
-    """The voices of a sound as a row of joined toggles: each has its number, from 1, in the colour of its bars.
+    """The voices of a sound as a row of tabs: each has its number, from 1, in the colour of its bars.
 
-    `colour` is that of the first voice, and the others follow as `wave.voice_colour` has them.
+    `colour` is that of the first voice, and the others follow as `wave.voice_colour` has them. A press of the
+    left button picks a voice. One of the right button on a tab calls `asked` with the voice, counted from 0,
+    and the position, for its owner to open the menu of that voice at.
     """
 
-    def __init__(self, rect: Rect, changed: Callable[[int], object] | None = None, help: str = "") -> None:
+    def __init__(self, rect: Rect, changed: Callable[[int], object] | None = None,
+                 asked: Callable[[int, Pos], object] | None = None, help: str = "") -> None:
         super().__init__(rect, ("1",), 0, changed, help)
+        self.asked = asked
         self.colour: Colour = theme.SOUND
 
     def show(self, count: int, picked: int) -> None:
-        """Have a toggle for each of so many voices, with one of them on. Nothing is told of it."""
+        """Have a tab for each of so many voices, with one of them on. Nothing is told of it."""
         self.options, self.picked = tuple(str(number + 1) for number in range(count)), picked
 
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Tell of a press of the right button on a tab, and leave anything else to the row of tabs."""
+        if event.kind != "down" or event.button != 3:
+            return super().on(event, ui)
+        voice = self.at(event.pos)
+        if voice is None or self.asked is None or ui.held is not None:
+            return False
+        self.asked(voice, event.pos)
+        return True
+
     def draw(self, canvas: Canvas) -> None:
-        """Draw the voices as toggles that share the line between them. The one that is on is drawn last, whole."""
+        """Draw the voices as tabs that share the line between them. The one that is on is drawn last, whole."""
         cells = self.cells()
         for index in sorted(range(len(cells)), key=lambda index: index == self.picked):
             x, y, w, h = cells[index]
@@ -171,105 +164,109 @@ class Voices(Choice):
 
 
 class SoundBar:
-    """The bar over the view of a sound panel: the settings of one sound of the picked entry of the project.
+    """The settings bar of a sound panel: the settings of one sound of the picked entry of the project.
 
     It is no panel of the frame. A sound panel owns it, adds its widgets through itself, gives it a rectangle
     with `place`, a sound with `show` and a frame with `update`, and says with `seen` whether it is on the
-    window. From the left it has, for an entry of several sounds, the words for the one it is of, then `voices`
-    with `add` and `drop`, `inst`, `level`, `echo`, and while the echo is on its knobs `after`, `loud`, `again`
-    and `bright`. `voice` is the picked voice: the one whose instrument `inst` shows, and that `drop` removes.
-    A held sound has two knobs more after its level, `join` and `let_go`: its other two lengths are dragged on
-    its clock. Let go of, such a knob is handed to `lengthed` as the key of the length, its ticks, and a few
-    words for the list of what can be undone.
+    window. `frame` is the bar every editor has, as `kit.Bar` draws it: it lays the controls out, and has the
+    name of each over it. From the left stand `voices`, the voices of the sound as tabs, with `add` after the
+    last, the sign that adds one: over them stands `word`, which is VOICE, or for an entry of several sounds
+    the words for the one the bar is of. Then come `inst` under INSTRUMENT with `list` after it, the button
+    that opens the list of the instruments, `volume`, for a held sound `crossfade` and `release`, `echo`, and
+    while the echo is on its knobs `time`, `amount`, `repeats` and `tone`. In a bar too narrow for all of
+    them the last give way first.
+
+    `voice` is the picked voice: the one whose instrument `inst` shows. The right button on the tab of a voice
+    opens its menu, in the order every such menu has: a voice has no name, it is copied with its notes as one
+    more voice, and it is removed, but for the last voice of a sound.
 
     The bar saves nothing. What a widget makes of the sound is handed to `edited` as the new definition and a
-    few words for the list of what can be undone, and a level to `levelled` as the `db` of the entry, None for
-    none, with such words. The owner saves, and shows the bar the sound again: an owner that answers false has
-    not saved. `voiced` is called with the picked voice when one is picked here, and after a voice was added or
+    few words for the list of what can be undone, and a volume to `levelled` as the `db` of the entry, None for
+    none, with such words. The two knobs of a held sound are its other two lengths, which have no handle on
+    its clock: let go of, such a knob is handed to `lengthed` as the key of the length, its ticks, and such
+    words. The owner saves, and shows the bar the sound again: an owner that answers false has not saved.
+    `voiced` is called with the picked voice when one is picked here, and after a voice was added, copied or
     removed. A change that the rules of `soundedit` refuse is handed to nobody, and the session says why.
 
     A knob shows its value as it is turned, and is handed on when the hand has let go of it. A voice that is
-    added plays the instrument of the picked one, and is then the picked one. The last voice of a sound is not
-    removed. The instrument is one of the project's: a voice whose instrument is written in place shows `OWN`,
-    and that is replaced only when the stepper is stepped. A level put back to 0 is taken out of the file,
-    and an entry of parts has no level. An echo that is switched off is taken out of the file, and its
-    settings are kept here, so that switched on again it is the echo it was. Switched on for the first time it
-    is `USUAL_ECHO`. The knob of its seconds is not for an echo of several times.
+    added plays the instrument of the picked one, and is then the picked one. The instrument is one of the
+    project's, stepped to with `inst` or chosen from the list. A voice whose instrument is written in place
+    shows `OWN`, and that is replaced only when another is stepped to or chosen. For such a voice the list has
+    `MAKE_SHARED`: a box takes a name, and `shared` is called with the voice and the name, for the owner to
+    make the instrument one of the project's under it. A volume put back to 0 is taken out of the file, and an
+    entry of parts has no volume. An echo that is switched off is taken out of the file, and its settings are
+    kept here, so that switched on again it is the echo it was. Switched on for the first time it is
+    `USUAL_ECHO`. The knob of its seconds is not for an echo of several times.
     """
 
     def __init__(self, panel: Panel, edited: Callable[[dict, str], object],
                  levelled: Callable[[object, str], object], voiced: Callable[[int], object] | None = None,
                  clock: Callable[[], float] = time.perf_counter,
-                 lengthed: Callable[[str, float, str], object] | None = None) -> None:
+                 lengthed: Callable[[str, float, str], object] | None = None,
+                 shared: Callable[[int, str], object] | None = None) -> None:
         """`panel` is the panel the widgets are added through. `clock` times a run of the wheel on a knob."""
         self.session = panel.session
+        self.ui: Ui = panel.ui
         self.edited = edited
         self.levelled = levelled
         self.voiced = voiced
         self.lengthed = lengthed
+        self.shared = shared
         nowhere = (0, 0, 0, 0)
 
-        def knob(text: str, travel: tuple[float, float, int], usual: float | None,
-                 settled: Callable[[float], object], help: str, show: Callable[[float], str] = plain) -> Knob:
-            """A knob of the bar: a right click puts it back to `usual` where it has one, and let go of, it is
+        def knob(travel: tuple[float, float, int], usual: float | None, settled: Callable[[float], object],
+                 what: str, show: Callable[[float], str] = plain) -> Knob:
+            """A knob of the bar: a right press puts it back to `usual` where it has one, and let go of, it is
             `settled`."""
             low, high, steps = travel
+            back = "" if usual is None else f"back to {show(usual)}"
+            help = told(f"drag up or down {what}, slower with shift", back, "steps it")
             return panel.add(Knob(nowhere, low if usual is None else usual, low, high, default=usual, steps=steps,
-                                  text=text, show=show, help=help, clock=clock, settled=settled))
+                                  show=show, help=help, clock=clock, settled=settled))
 
-        def echo(text: str, travel: tuple[float, float, int], key: str, words: str, help: str,
+        def echo(travel: tuple[float, float, int], key: str, words: str, what: str,
                  show: Callable[[float], str] = plain) -> Knob:
             """A knob of the echo: let go of, its value is the echo's setting `key`."""
             usual = ABSENT.get(key, USUAL_ECHO[key])
-            return knob(text, travel, usual, lambda value: self._put(key, value, words, show), help, show)
+            return knob(travel, usual, lambda value: self._put(key, value, words, show), what, show)
 
-        self.word = panel.add(Label(nowhere, ""))
-        self.heading_voice = panel.add(Label(nowhere, VOICE, align="centre"))
-        self.voices = panel.add(Voices(nowhere, changed=self._pick,
-                                       help="the voice a new note goes into, and whose instrument is shown"))
-        self.add = panel.add(Button(nowhere, ADD, action=self._add,
-                                    help="add a voice that plays the instrument of the picked one"))
-        self.drop = panel.add(Button(nowhere, DROP, action=self._drop,
-                                     help="remove the picked voice and its notes"))
-        self.heading = panel.add(Label(nowhere, INSTRUMENT, align="centre"))
-        self.inst = panel.add(Stepper(nowhere, ("",), changed=self._step,
-                                      help="the instrument the picked voice plays, one of the project's"))
-        self.level = knob(LEVEL, LEVELS, 0, self._level,
-                          "how loud the sound is, in decibels from the level every sound is brought to: a right "
-                          "click is 0 again", db_text)
-        self.join = knob(JOIN, JOINS, None, lambda value: self._length("join", value, "loop joined over"),
-                         JOIN_HELP, ticks_text)
-        self.let_go = knob(LET_GO, LET_GOS, None, lambda value: self._length("let_go", value, "let go in"),
-                           LET_GO_HELP, ticks_text)
-        self.echo = panel.add(Toggle(nowhere, ECHO, changed=self._switch,
-                                     help="the whole sound comes back after itself, quieter each time"))
-        self.after = echo(AFTER, AFTERS, "time", "after", AFTER_HELP, seconds_text)
-        self.loud = echo(LOUD, LOUDS, "mix", "loud", "how loud the sound is the first time it comes back, as a "
-                                                     "share of itself")
-        self.again = echo(AGAIN, AGAINS, "feedback", "again", "how much of each return comes back once more: at 0 "
-                                                              "the sound comes back once")
-        self.bright = echo(BRIGHT, BRIGHTS, "lp", "bright", "how bright the returns stay: each goes through a "
-                                                            "low-pass at this many hertz, so lower is darker",
-                           hertz_text)
+        # The bar itself is added first, so that it is drawn under its controls.
+        self.frame = panel.add(Bar(nowhere))
+        self.voices = panel.add(Voices(nowhere, self._pick, self._ask_voice, told(
+            "pick the voice that new notes go into, and whose instrument is shown", "its menu")))
+        self.add = panel.add(Plus(nowhere, self._add, told("add a voice that plays the instrument of the picked one")))
+        self.inst = panel.add(Stepper(nowhere, ("",), changed=self._step, help=told(
+            "an arrow steps to the next instrument of the project", wheel="steps through them")))
+        self.list = panel.add(Button(nowhere, action=self._ask_inst, arrow=True, help=told(
+            "the list of the instruments, and what makes one that is written in place a shared one")))
+        self.volume = knob(VOLUMES, 0, self._volume, "for how loud the sound is", db_text)
+        self.crossfade = knob(CROSSFADES, None, lambda value: self._length("join", value, "crossfade"),
+                              "for how many ticks the end of the loop fades into what came before it", ticks_text)
+        self.release = knob(RELEASES, None, lambda value: self._length("let_go", value, "release"),
+                            "for how many ticks the loop takes to die away once the sound is let go", ticks_text)
+        self.echo = panel.add(Toggle(nowhere, OFF, changed=self._switch, help=told(
+            "switch the echo on or off: with it the whole sound comes back after itself, quieter each time")))
+        self.time = echo(TIMES, "time", "time", "for how long after itself the sound comes back", seconds_text)
+        self.amount = echo(AMOUNTS, "mix", "amount", "for how loud the sound comes back the first time")
+        self.repeats = echo(REPEATING, "feedback", "repeats", "for how much of each return comes back once more")
+        self.tone = echo(TONES, "lp", "tone", "for how bright the returns stay", hertz_text)
         #: The name of the entry that is shown and which of its sounds, as `soundedit.sound_in` counts them.
         self.name: str | None = None
         self.index = 0
-        #: The picked voice of the sound, counted from 0.
+        #: The picked voice of the sound, counted from 0, and what stands over the voices.
         self.voice = 0
+        self.word = VOICE
         self._colour: Colour = theme.SOUND
         #: What the project held for the entry when the widgets were set last, and its sound that is shown.
         self._entry: dict | None = None
         self._defn: dict | None = None
         #: The settings of each echo that was switched off here, by its entry and its sound.
         self._echoes: dict[tuple[str, int], dict] = {}
-        #: The widgets by the part of the bar each stands in, and those of them that are knobs.
-        self._widgets = {"word": self.word, "voice": self.heading_voice, "voices": self.voices, "add": self.add,
-                         "drop": self.drop, "heading": self.heading, "inst": self.inst, "level": self.level,
-                         "join": self.join, "let_go": self.let_go, "echo": self.echo, "after": self.after,
-                         "loud": self.loud, "again": self.again, "bright": self.bright}
-        self._knobs = tuple(self._widgets[part] for part in KNOBS)
-        self._rect: Rect = nowhere
-        self._parts: dict[str, Rect] = {}
+        #: The knobs, what the knob of the echo's seconds says while it is of use, and the controls that have a
+        #: room in the bar as it is laid out now.
+        self._knobs = (self.volume, self.crossfade, self.release, self.time, self.amount, self.repeats, self.tone)
+        self._time_help = self.time.help
+        self._roomed: tuple[object, ...] = ()
         self._on = False
         self._lay()
         self._see()
@@ -280,8 +277,8 @@ class SoundBar:
         return any(knob.busy for knob in self._knobs)
 
     def place(self, rect: Rect) -> None:
-        """Take the bar's rectangle, and lay the widgets out in it as `arrange` has them."""
-        self._rect = rect
+        """Take the bar's rectangle, and lay the controls out in it."""
+        self.frame.rect = rect
         self._lay()
         self._see()
 
@@ -321,24 +318,24 @@ class SoundBar:
             self.voices.show(len(voices), self.voice)
             inst, names = voices[self.voice]["inst"], tuple(project.instruments)
             # A name is one of the project's. What is none of them stands before them: an instrument written in
-            # place, under the word for one.
+            # place, under the words for one.
             named = inst in names if isinstance(inst, str) else False
             self.inst.options = names if named else (inst if isinstance(inst, str) else OWN, *names)
             self.inst.picked = names.index(inst) if named else 0
             level = entry.get("db", 0)
-            self.level.value = level[self.index] if isinstance(level, list) else level
-            for key in LENGTHS if "held" in entry else ():
-                self._widgets[key].value = entry["held"][key]
+            self.volume.value = level[self.index] if isinstance(level, list) else level
+            if "held" in entry:
+                self.crossfade.value, self.release.value = entry["held"]["join"], entry["held"]["let_go"]
             echo = defn.get("echo")
-            self.echo.is_on = echo is not None
+            self.echo.is_on, self.echo.text = echo is not None, OFF if echo is None else ON
             # An echo of several times has no one number for the knob of its seconds.
             one = echo is None or isinstance(echo["time"], (int, float))
-            self.after.enabled, self.after.help = one, AFTER_HELP if one else SEVERAL_HELP
+            self.time.enabled, self.time.help = one, self._time_help if one else SEVERAL_HELP
             if echo is not None:
-                self.after.value = echo["time"] if one else self.after.value
-                for knob, key in ((self.loud, "mix"), (self.again, "feedback"), (self.bright, "lp")):
+                self.time.value = echo["time"] if one else self.time.value
+                for knob, key in ((self.amount, "mix"), (self.repeats, "feedback"), (self.tone, "lp")):
                     knob.value = echo.get(key, ABSENT[key])
-            self.word.text = called(soundedit.kind_of(entry), self.index).upper()
+            self.word = called(soundedit.kind_of(entry), self.index).upper() or VOICE
             self.voices.colour = self._colour
             for knob in self._knobs:
                 knob.colour = self._colour
@@ -346,26 +343,36 @@ class SoundBar:
         self._see()
 
     def _lay(self) -> None:
-        """Give each widget its rectangle: its part of the bar, laid out for the voices of the sound that is shown."""
-        voices = len(self._defn["voices"]) if self._defn else 1
-        self._parts = arrange(self._rect, voices, bool(self.word.text), bool(self._defn) and "held" in self._entry)
-        # A knob of a held sound has no part in the bar of any other, and no width.
-        for part in LENGTHS:
-            self._parts.setdefault(part, self._parts["word"][:2] + (0, 0))
-        for part, widget in self._widgets.items():
-            widget.rect = self._parts[part]
+        """Give each control its rectangle in the bar, laid out for the sound that is shown.
+
+        The tabs of the voices and the sign after them share the room under the word for them. An entry of
+        parts has no room for a volume, and only a held sound has one for its two lengths.
+        """
+        entry, defn = self._entry or {}, self._defn
+        voices = len(defn["voices"]) if defn else 1
+        left = [Slot(self.word, None, voices_room(self.word, voices), "left"), Slot(INSTRUMENT, self.inst, INST_W),
+                Slot("", self.list, LIST_W)]
+        if "parts" not in entry:
+            left.append(Slot(VOLUME, self.volume, VOLUME_W))
+        if "held" in entry:
+            left += [Slot(CROSSFADE, self.crossfade, CROSSFADE_W), Slot(RELEASE, self.release, RELEASE_W)]
+        left += [Slot(ECHO, self.echo, ECHO_W), Slot(TIME, self.time, TIME_W), Slot(AMOUNT, self.amount, AMOUNT_W),
+                 Slot(REPEATS, self.repeats, REPEATS_W), Slot(TONE, self.tone, TONE_W)]
+        rects = self.frame.lay(left)
+        self.voices.rect, self.add.rect = voice_parts(rects[0], voices)
+        self._roomed = (self.voices, self.add, *(slot.widget for slot in left[1:]))
 
     def _see(self) -> None:
         """Have each widget seen or not: by whether the bar is on the window, what there is to show, and what fits.
 
-        The knobs of the echo are seen while it is on, and the level for an entry that has one: any but parts.
+        The knobs of the echo are seen while it is on, and a control with no room in the bar is not seen.
         """
         on = self._on and self._defn is not None
-        for part, widget in self._widgets.items():
-            widget.visible = on and self._parts[part][2] > 0
-        for knob in (self.after, self.loud, self.again, self.bright):
+        self.frame.visible = on
+        for widget in (self.voices, self.add, self.inst, self.list, self.echo, *self._knobs):
+            widget.visible = on and widget in self._roomed and widget.rect[2] > 0
+        for knob in (self.time, self.amount, self.repeats, self.tone):
             knob.visible = knob.visible and self.echo.is_on
-        self.level.visible = self.level.visible and soundedit.kind_of(self._entry) != "parts"
 
     def _make(self, change: Callable[[dict], dict], label: str) -> bool:
         """Hand on the sound as a change leaves it, and show what the project then holds. Whether it was saved.
@@ -382,6 +389,10 @@ class SoundBar:
         self._read()
         return saved
 
+    def _menu(self, items: list[Item | None], at: Pos) -> None:
+        """Open a menu at a place, over everything else. Each item stands for what is done when it is chosen."""
+        self.ui.open(Menu(items, at, chosen=lambda act: act()))
+
     def _pick(self, voice: int) -> None:
         """Take a voice as the picked one, show its instrument, and tell of it."""
         self.voice = voice
@@ -396,16 +407,60 @@ class SoundBar:
         if self._make(lambda defn: soundedit.voice_added(defn, inst), "voice added"):
             self._pick(len(voices))
 
-    def _drop(self) -> None:
-        """Remove the picked voice. Saved, the voice that has its number is the picked one, or else the last."""
-        voice = self.voice
+    def _ask_voice(self, voice: int, pos: Pos) -> None:
+        """Open the menu of a voice at the mouse: it is copied or removed. The last voice of a sound is not removed."""
+        last = len(self._defn["voices"]) == 1
+        self._menu(thing_menu(None, lambda: self._copy(voice), (), None if last else lambda: self._drop(voice)), pos)
+
+    def _copy(self, voice: int) -> None:
+        """Add a copy of a voice, with its instrument and its notes. Saved, it is the picked one."""
+        voices = self._defn["voices"]
+        if self._make(lambda defn: soundedit.voice_copied(defn, voice), f"voice {voice + 1} copied"):
+            self._pick(len(voices))
+
+    def _drop(self, voice: int) -> None:
+        """Remove a voice. Saved, the voice that was picked still is: or, where it is the one gone, the voice that
+        has its number, or else the last."""
+        picked = self.voice - (voice < self.voice)
         if self._make(lambda defn: soundedit.voice_dropped(defn, voice), f"voice {voice + 1} removed"):
-            self._pick(self.voice)
+            self._pick(min(picked, len(self._defn["voices"]) - 1))
 
     def _step(self, index: int) -> None:
         """Have the picked voice play the instrument the stepper was put on."""
-        name, voice = self.inst.options[index], self.voice
+        self._name(self.inst.options[index])
+
+    def _name(self, name: str) -> None:
+        """Have the picked voice play an instrument of the project, by its name."""
+        voice = self.voice
         self._make(lambda defn: soundedit.voice_inst(defn, voice, name), f"voice {voice + 1} plays {name}")
+
+    def _ask_inst(self) -> None:
+        """Open the list of the instruments under the field of the instrument: one that is chosen plays the voice.
+
+        After them stands what makes a shared instrument of one that is written in place. For a voice that
+        names its instrument it cannot be chosen.
+        """
+        inst = self._defn["voices"][self.voice]["inst"]
+        items: list[Item | None] = [Item(name, lambda name=name: self._name(name), enabled=name != inst)
+                                    for name in self.session.model.project.instruments]
+        if items:
+            items.append(None)
+        items.append(Item(MAKE_SHARED, self._ask_shared, enabled=isinstance(inst, dict)))
+        x, y, _, h = self.inst.rect
+        self._menu(items, (x, y + h))
+
+    def _ask_shared(self) -> None:
+        """Open a box over the field of the instrument that takes a name: enter has the owner make the instrument
+        of the picked voice one of the project's under it."""
+        voice = self.voice
+
+        def done(typed: str) -> None:
+            if self.shared is not None:
+                self.shared(voice, typed)
+            self._read()
+
+        ask(self.ui, self.inst.rect, "", done,
+            help="the name the instrument gets in the project: enter takes it, escape leaves it")
 
     def _switch(self, on: bool) -> None:
         """Hand the echo on as it was switched: on, it has the settings it was switched off with here, or the usual."""
@@ -427,13 +482,13 @@ class SoundBar:
     def _length(self, key: str, value: float, words: str) -> None:
         """Hand on the ticks a knob of a held sound was left at, as its length `key`, and show what is then held."""
         if self.lengthed is not None:
-            self.lengthed(key, tidy(value), f"{words} {ticks_text(tidy(value)).lower()}")
+            self.lengthed(key, tidy(value), f"{words} {ticks_text(tidy(value))}")
         self._read()
 
-    def _level(self, value: float) -> None:
-        """Hand on the level the knob was left at: the entry's own, or that of this variant where each has one."""
+    def _volume(self, value: float) -> None:
+        """Hand on the volume the knob was left at: the entry's own, or that of this variant where each has one."""
         value, level = tidy(value), self._entry.get("db")
-        words = f"level {db_text(value)}"
+        words = f"volume {db_text(value)}"
         if isinstance(level, list):
             words = f"{called(soundedit.kind_of(self._entry), self.index)} {words}"
             value = [*level[:self.index], value, *level[self.index + 1:]]

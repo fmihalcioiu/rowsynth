@@ -14,6 +14,7 @@ from ..notes import midi
 from ..project import _entry, _instrument, _sound, _sounds_in
 from ..sound import _settings, read_sound, sound_samples, tick_sample
 from .noteedit import _stopped
+from .projectedit import allowed
 
 # A sound definition goes in, or an entry of a project's `sounds`, as the project holds it. A new one comes out, to
 # be saved whole in its place, so that one change is one step to take back. What is handed in is never changed, and
@@ -284,6 +285,14 @@ def voice_dropped(defn: dict, voice: int) -> dict:
     return made
 
 
+def voice_copied(defn: dict, voice: int) -> dict:
+    """A sound with a copy of one of its voices as one more voice, the last: its instrument and its notes."""
+    at = _index(voice, len(defn["voices"]), "voice of the sound")
+    made = copy.deepcopy(defn)
+    made["voices"].append(copy.deepcopy(made["voices"][at]))
+    return made
+
+
 def voice_inst(defn: dict, voice: int, inst: str | dict) -> dict:
     """A sound with one of its voices played by another instrument: a name, or one written in place."""
     at = _index(voice, len(defn["voices"]), "voice of the sound")
@@ -350,6 +359,81 @@ def with_setting(place: dict, key: str, value: object) -> dict:
     else:
         _entry(made, "entry", _named(_sounds_in(made)))
     return made
+
+
+def _mark(at: object, note: object) -> dict:
+    """One note a sound is expected to play, as a file writes it, once its second and its note are seen to be so."""
+    try:
+        midi(note)
+    except RowSynthError:
+        raise RowSynthError(f"a note is a number or a name such as 'c#4', not {note!r}") from None
+    return {"at": _amount(at, "the second a note is expected at is", 0),
+            "note": note if isinstance(note, str) else _plain(note)}
+
+
+def mark_added(entry: dict, at: float, note: str | float) -> dict:
+    """An entry with one more note that it is expected to play, the last of its `check`: a note at a second.
+
+    The second is on the clock of the sound, and of each variant where it has variants: the `pitch` rule of the
+    checks reads the note back there. A second under 0 is refused, and so is what is no note.
+    """
+    return with_setting(entry, "check", [*entry.get("check", []), _mark(at, note)])
+
+
+def mark_set(entry: dict, index: int, at: float | None = None, note: str | float | None = None) -> dict:
+    """An entry with one of the notes it is expected to play at another second, or as another note.
+
+    The note is counted in its `check` from 0. With None its second, or its note, stays as it is.
+    """
+    marks = list(entry.get("check", []))
+    was = marks[_index(index, len(marks), "note the sound is expected to play")]
+    marks[index] = _mark(was["at"] if at is None else at, was["note"] if note is None else note)
+    return with_setting(entry, "check", marks)
+
+
+def mark_dropped(entry: dict, index: int) -> dict:
+    """An entry without one of the notes it is expected to play. Without the last of them it has no `check`."""
+    marks = list(entry.get("check", []))
+    del marks[_index(index, len(marks), "note the sound is expected to play")]
+    return with_setting(entry, "check", marks or None)
+
+
+def _noted(entry: dict, key: object, there: bool) -> dict:
+    """The `meta` of an entry, once a key is seen to be one whose text can be set: `there` is for one it must have.
+
+    A key is text with something in it. A value that is no text is left as the file has it, so its key is refused.
+    """
+    meta = entry.get("meta", {})
+    if not isinstance(key, str) or not key:
+        raise RowSynthError(f"a key of NOTES is text with something in it, not {key!r}")
+    if there and key not in meta:
+        raise RowSynthError(f"NOTES has no {key!r}")
+    if key in meta and not isinstance(meta[key], str):
+        raise RowSynthError(f"{key!r} of NOTES holds no text, and is left as the file has it")
+    return meta
+
+
+def meta_set(entry: dict, key: str, text: str, fresh: bool = False) -> dict:
+    """An entry with a text under a key of its `meta`, which the window calls NOTES. A new key is the last.
+
+    With `fresh` the key is one more, and one the entry has already is refused. Refused as well are a key that
+    is empty or no text, a text that is none, and a key whose value is no text: that is left alone.
+    """
+    meta = _noted(entry, key, False)
+    if fresh and key in meta:
+        raise RowSynthError(f"NOTES has {key!r} already")
+    if not isinstance(text, str):
+        raise RowSynthError(f"what stands under a key of NOTES here is text, not {text!r}")
+    return with_setting(entry, "meta", {**meta, key: text})
+
+
+def meta_dropped(entry: dict, key: str) -> dict:
+    """An entry without one key of its `meta`. Without the last of them it has no `meta`.
+
+    A key the entry does not have is refused, and so is one whose value is no text: that is left alone.
+    """
+    meta = _noted(entry, key, True)
+    return with_setting(entry, "meta", {name: value for name, value in meta.items() if name != key} or None)
 
 
 def kind_of(entry: dict) -> str:
@@ -675,3 +759,32 @@ def with_sound(entry: dict, index: int, defn: dict, instruments: dict | None = N
     holder[key] = copy.deepcopy(defn)
     _entry(made, "entry", _named(_sounds_in(made)))
     return _fitted(made, instruments, rate) if "held" in made else made
+
+
+def shared(data: dict, sound: str, index: int, voice: int, name: str,
+           rate: int = DEFAULT_RATE) -> list[tuple[str, object]]:
+    """The changes that make a shared instrument of one that is written in place in a voice of a sound.
+
+    `data` is the data of a project, as `Project.to_dict` gives it, `sound` the name of one of its sounds,
+    `index` which sound of that entry, as `sound_in` counts them, and `voice` the voice. The instrument moves
+    to the project's `instruments` under `name`, after the others, and the voice names it. The changes are
+    (place, value) pairs for `Session.change_many`, which makes them as one step: the instrument first, since
+    the sound names it.
+
+    Refused are a sound the project does not have, a voice whose instrument is a name already, and a name
+    that `projectedit.allowed` refuses, as one that an instrument of the project has.
+    """
+    entry = data.get("sounds", {}).get(sound)
+    if entry is None:
+        raise RowSynthError(f"the project has no sound called {sound!r}")
+    defn = sound_in(entry, index)
+    at = _index(voice, len(defn["voices"]), "voice of the sound")
+    inst = defn["voices"][at]["inst"]
+    if not isinstance(inst, dict):
+        raise RowSynthError(f"voice {at + 1} names its instrument, {inst!r}: only one written in place is made "
+                            "shared")
+    name = allowed(data, "instrument", name)
+    table = data.get("instruments")
+    made = with_sound(entry, index, voice_inst(defn, at, name), {**(table or {}), name: inst}, rate)
+    place = ("instruments", {name: inst}) if table is None else (f"instruments.{name}", inst)
+    return [place, (f"sounds.{sound}", made)]

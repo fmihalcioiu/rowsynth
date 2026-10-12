@@ -22,9 +22,10 @@ from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.model import Model
 from rowsynth.gui.session import HOLD, POLL_EVERY, Session
-from rowsynth.gui.soundpanel import HELP, HOLD_HELP, MEANWHILE, SoundPanel, arrange, words, zone
+from rowsynth.gui.kit import told
+from rowsynth.gui.soundpanel import HELP, HOLD_HELP, MEANWHILE, SoundPanel, arrange, facts, length, words, zone
 from rowsynth.gui.ui import Event, Ui
-from rowsynth.gui.wave import PLUS_GAP, on_tick, places, spans
+from rowsynth.gui.wave import PLUS_GAP, VELOCITY_DONE, WHEEL_HELP, on_tick, places, spans
 from rowsynth.project import Project
 
 # pygame reads these when it is imported: no test opens a window or plays a sound.
@@ -40,10 +41,11 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
 RATE = 44100
 
-#: The panel in a window, with room round it on the surface it is drawn on: its boxes are (24, 14, 392, 17) and
-#: (24, 35, 392, 241), its bar is (28, 39, 384, 37), its view (28, 78, 384, 194), and its button (385, 14, 31, 17).
+#: The panel in a window, with room round it on the surface it is drawn on: its heading is (24, 14, 392, 17), its
+#: bar (24, 33, 392, 40), its view (24, 75, 392, 127), and at its foot its lane (24, 204, 392, 24) and the box of
+#: its wave (24, 230, 392, 46).
 RECT = (20, 10, 400, 270)
-#: The panel as the middle of the art surface has it: its bar is (8, 29, 646, 37) and its view (8, 68, 646, 404).
+#: The panel as the middle of the art surface has it: its bar is (4, 23, 654, 40) and its view (4, 65, 654, 337).
 WIDE = (0, 0, 662, 480)
 SIZE = (440, 290)
 OUTSIDE = theme.GOOD
@@ -86,6 +88,12 @@ TRIO = {"defs": [solo([0, "c4", 6]), solo([0, "e4", 6]), solo([0, "g4", 6])], "d
 BOTH = {"parts": [[0, {"def": solo([0, "c4", 10]), "db": -3}], [0.1, {"def": solo([0, "c5", 6])}]]}
 MIXED = {"instruments": OWN["instruments"],
          "sounds": {"one": {"def": solo([0, "c4", 6])}, "trio": TRIO, "both": BOTH, "drone": DRONE}}
+#: A project with a sound whose one voice has its instrument written in place. Kept with the sound are two notes
+#: of its maker's own, of which one is no text, and it is expected to play one note.
+WRITTEN = {"wave": "saw", "release": 0}
+KEPT = {"def": {"voices": [{"inst": WRITTEN, "notes": [[0, "c4", 6]]}]}, "meta": {"by": "hand", "take": 3},
+        "check": [{"at": 0.05, "note": "c4"}]}
+EXTRA = {"instruments": OWN["instruments"], "sounds": {"own": KEPT, "two": TWO}}
 #: The time the first write from outside is stamped with, in nanoseconds: none the file gets by being saved.
 STAMP = 1_700_000_000 * 10**9
 
@@ -218,6 +226,12 @@ def centre(rect: layout.Rect) -> tuple[int, int]:
     return rect[0] + rect[2] // 2, rect[1] + rect[3] // 2
 
 
+def choose(ui: Ui, text: str) -> None:
+    """Click the item of the menu that is open whose text begins with some words."""
+    menu = ui.modal
+    press(ui, centre(menu.rows[[item is not None and item.text.startswith(text) for item in menu.items].index(True)]))
+
+
 def lies_in(rect: layout.Rect, bounds: layout.Rect) -> bool:
     """Whether a rectangle has no pixel outside another, and neither a width nor a height below 0."""
     x, y, w, h = rect
@@ -241,15 +255,28 @@ class Sums(unittest.TestCase):
     def test_the_words_of_the_heading_are_what_the_entry_of_a_sound_is_and_how_many_it_holds(self) -> None:
         self.assertEqual([words(kind, count) for kind, count in (("defs", 3), ("defs", 1), ("parts", 2),
                                                                  ("parts", 1), ("held", 3), ("def", 1))],
-                         ["3 variants", "1 variant", "2 parts", "1 part", "held", ""])
+                         ["3 variants", "1 variant", "2 parts", "1 part", "held", "single"])
         stand, _, panel = panel_on()
-        for picked, kind, said in ((("sound", "blip"), "defs", "3 variants"),
-                                   (("sound", "explosion"), "parts", "2 parts"), (("sound", "hum"), "held", "held"),
-                                   (("sound", "coin"), "def", ""), (("instrument", "chime"), "def", ""),
-                                   (("song", "tune"), "def", ""), (None, "def", "")):
+        sounds, instruments = stand.model.project.sounds, stand.model.project.instruments
+        # After them the heading says how long the sound is: of variants the longest, and of anything else
+        # where the last of its sounds ends.
+        for picked, kind, said, long in ((("sound", "blip"), "defs", "3 variants", "0.1 s"),
+                                         (("sound", "explosion"), "parts", "2 parts", "0.65 s"),
+                                         (("sound", "hum"), "held", "held", "0.7 s"),
+                                         (("sound", "coin"), "def", "single", "0.38 s")):
             stand.model.picked = picked
             panel.update()
-            self.assertEqual((panel.kind, panel.words), (kind, said), picked)
+            shapes = soundview.shapes(sounds[picked[1]], RATE, instruments)
+            self.assertEqual((panel.kind, panel.words, panel.head.kind, panel.head.name, panel.head.facts),
+                             (kind, said, "SOUND", picked[1], f"{said}, {long}"), picked)
+            self.assertEqual((facts(kind, shapes), length(kind, shapes) > 0), (panel.head.facts, True))
+        self.assertEqual(length("def", []), 0.0)
+        # What is no sound has no such words.
+        for picked in (("instrument", "chime"), ("song", "tune"), None):
+            stand.model.picked = picked
+            panel.update()
+            self.assertEqual((panel.kind, panel.words), ("def", ""), picked)
+        self.assertEqual((panel.head.kind, panel.head.facts), ("INSTRUMENT", ""))
         # A sound the engine refuses has no words but the refusal.
         stand.model.project = SimpleNamespace(sounds={"coin": BROKEN}, instruments={})
         stand.model.picked = ("sound", "coin")
@@ -258,23 +285,39 @@ class Sums(unittest.TestCase):
 
 
 class Shown(unittest.TestCase):
-    def test_the_boxes_the_button_and_the_view_are_inside_the_panel_at_any_size(self) -> None:
-        self.assertEqual(arrange(WIDE), {"head": (4, 4, 654, 17), "hold": (627, 4, 31, 17), "limits": (576, 4, 43, 17),
-                                         "kind": (519, 4, 55, 17), "box": (4, 25, 654, 451),
-                                         "bar": (8, 29, 646, 37), "view": (8, 68, 646, 404)})
+    def test_the_parts_are_laid_as_every_editor_has_them_and_are_inside_the_panel_at_any_size(self) -> None:
+        self.assertEqual(arrange(WIDE), {"head": (4, 4, 654, 17), "bar": (4, 23, 654, 40), "view": (4, 65, 654, 337),
+                                         "lane": (4, 404, 654, 24), "wave": (4, 430, 654, 46)})
         _, ui, panel = panel_on()
-        # The view and the buttons of the heading are the panel's first widgets, and those of the bar come after.
-        self.assertEqual((ui.widgets, panel.widgets[:4], panel.view.rect, panel.view.help),
-                         (panel.widgets, [panel.view, panel.hold, panel.kinds, panel.limits], (28, 78, 384, 194),
-                          HELP))
-        self.assertEqual((panel.hold.rect, panel.hold.text, panel.hold.help), ((385, 14, 31, 17), "HOLD", HOLD_HELP))
+        view, places = panel.view, arrange(RECT)
+        # The heading and its buttons are the panel's first widgets, the view and its parts the last, and those
+        # of the bar stand between them.
+        self.assertEqual((ui.widgets, panel.widgets[:5], panel.widgets[-6:]),
+                         (panel.widgets, [panel.head, panel.kinds, panel.limits, panel.notes, panel.hold],
+                          [view, *view.parts]))
+        self.assertEqual((panel.head.rect, view.rect, view.foot, view.lane.rect, view.help),
+                         (places["head"], places["view"], places["wave"], places["lane"], HELP))
+        self.assertEqual((HELP, places["view"], places["lane"], places["wave"]),
+                         (told(wheel=WHEEL_HELP), (24, 75, 392, 127), (24, 204, 392, 24), (24, 230, 392, 46)))
+        # The buttons that act on the whole sound stand at the right end of the heading, each as wide as its
+        # word, and the three that open a list have the arrow of one. A sound that is not held has no HOLD.
+        buttons = (panel.kinds, panel.limits, panel.notes)
+        self.assertEqual([(button.text, button.arrow, button.visible, bool(button.help)) for button in buttons],
+                         [("KIND", True, True, True), ("LIMITS", True, True, True), ("NOTES", True, True, True)])
+        self.assertEqual((panel.hold.visible, panel.hold.text, panel.hold.help), (False, "HOLD", HOLD_HELP))
+        rects = [button.rect for button in buttons]
+        self.assertEqual(([rect[1::2] for rect in rects], rects[2][0] + rects[2][2]), ([(16, 13)] * 3, 24 + 392 - 2))
+        self.assertTrue(rects[0][0] + rects[0][2] < rects[1][0] and rects[1][0] + rects[1][2] < rects[2][0])
+        # The keyboard, the scroll bars and the lane of the view are seen with it, and the bar with its voices.
+        self.assertEqual(([part.visible for part in view.parts[:4]], view.keys.rect[:3], view.lane.span[0]),
+                         ([True] * 4, (24, 85, 40), 64))
         self.assertEqual((panel.bar.voices in panel.widgets, panel.bar.voices.visible), (True, True))
-        self.assertTrue(lies_in(panel.bar.echo.rect, arrange(RECT)["bar"]))
+        self.assertTrue(lies_in(panel.bar.echo.rect, places["bar"]))
         for rect in (RECT, (40, 10, 60, 30), (0, 22, 3, 2)):
             panel.place(rect)
-            self.assertEqual((panel.view.rect, panel.hold.rect), (arrange(rect)["view"], arrange(rect)["hold"]))
+            self.assertEqual((panel.view.rect, panel.head.rect), (arrange(rect)["view"], arrange(rect)["head"]))
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
-            self.assertTrue(all(lies_in(widget.rect, arrange(rect)["bar"]) for widget in panel.widgets[4:]), rect)
+            self.assertTrue(all(lies_in(widget.rect, rect) for widget in panel.widgets if widget.visible), rect)
 
     def test_a_sound_is_its_bars_over_an_empty_wave_until_its_render_is_ready(self) -> None:
         stand, _, panel = panel_on()
@@ -398,14 +441,29 @@ class Shown(unittest.TestCase):
 
 
 class Heard(unittest.TestCase):
-    def test_a_variant_chosen_in_the_view_is_played_and_marked_with_the_playhead_in_its_stretch(self) -> None:
+    def test_a_variant_is_picked_by_a_press_and_played_from_its_menu_with_the_playhead_in_its_stretch(self) -> None:
         # Three variants of a tenth of a second, the second from 0.12 s and the third from 0.24 s.
         stand, ui, panel = panel_on(picked=("sound", "blip"), made=silence(0.1, 0.1, 0.1))
         view = panel.view
         seen = view.map
+        second = (seen.x(0.12) + 5, seen.names[1] + 2)
+
+        def play(label: tuple[int, int]) -> None:
+            """Open the menu of the variant a label is of with the right button, and choose what plays it."""
+            press(ui, label, 3)
+            choose(ui, "Play")
+
         self.assertEqual((view.kind, view.played, len(view.columns())), ("defs", None, 3))
-        # A press on the label of the second plays that one, and it is the one that is marked.
-        self.assertTrue(press(ui, (seen.x(0.12) + 5, seen.names[1] + 2)))
+        # A press on the label of the second picks it: the hand is in it, the bar is of it, and nothing plays.
+        # So it is with a press in the stretch of the third's wave.
+        self.assertTrue(press(ui, second))
+        panel.update()
+        self.assertEqual((stand.asked, view.sound, panel.bar.index, view.played), ([], 1, 1, None))
+        self.assertTrue(press(ui, (seen.x(0.24) + 30, seen.wave[1] + 10)))
+        panel.update()
+        self.assertEqual((stand.asked, view.sound, panel.bar.word, stand.playing), ([], 2, "VARIANT 3", False))
+        # Its menu plays the second, and it is the one that is marked.
+        play(second)
         self.assertEqual(stand.asked, [("play", 1)])
         for at in (0.0, 0.04, 0.1):
             stand.at = at
@@ -419,8 +477,7 @@ class Heard(unittest.TestCase):
         stand.playing = False
         panel.update()
         self.assertEqual((view.played, view.playhead), (1, None))
-        # A press in the stretch of the third's wave plays the third.
-        self.assertTrue(press(ui, (seen.x(0.24) + 30, seen.wave[1] + 10)))
+        play((seen.x(0.24) + 5, seen.names[1] + 2))
         stand.at = 0.02
         panel.update()
         self.assertEqual((stand.asked, view.played), ([("play", 1), ("play", 2)], 2))
@@ -428,7 +485,7 @@ class Heard(unittest.TestCase):
         # A play the panel did not ask for is of a variant the session does not name: nothing is marked. That
         # is so when it begins after the chosen one has ended, and when it begins while that still sounds.
         for playing in (False, True):
-            press(ui, (seen.x(0.12) + 5, seen.names[1] + 2))
+            play(second)
             stand.at = 0.05
             panel.update()
             self.assertEqual(view.played, 1)
@@ -438,7 +495,7 @@ class Heard(unittest.TestCase):
             panel.update()
             self.assertEqual((view.played, view.playhead), (None, None), playing)
         # Another sound is picked, and then this one again: nothing of it was played yet.
-        press(ui, (seen.x(0.12) + 5, seen.names[1] + 2))
+        play(second)
         for picked, made, played in ((("sound", "blip"), stand.model.made, 1), (("sound", "coin"), None, None),
                                      (("sound", "blip"), stand.model.made, None)):
             stand.model.picked, stand.model.made = picked, made
@@ -447,14 +504,16 @@ class Heard(unittest.TestCase):
 
     def test_the_hold_button_is_there_for_a_held_sound_alone(self) -> None:
         stand, ui, panel = panel_on()
-        on = centre(panel.hold.rect)
         for picked, there in ((("sound", "coin"), False), (("sound", "blip"), False), (("sound", "explosion"), False),
                               (("instrument", "bass"), False), (("song", "tune"), False), (None, False),
                               (("sound", "hum"), True)):
             stand.model.picked = picked
             panel.update()
-            self.assertEqual((panel.hold.visible, press(ui, on)), (there, there), picked)
-        self.assertEqual(stand.asked, [("hold",), ("release",)])
+            self.assertEqual(panel.hold.visible, there, picked)
+        # It is the last of the buttons of the heading, after the three that every sound has.
+        on = centre(panel.hold.rect)
+        self.assertEqual((panel.hold.rect[0] > panel.notes.rect[0], press(ui, on), stand.asked),
+                         (True, True, [("hold",), ("release",)]))
         # Off the window the button is off as the view is, and it comes back with the panel.
         panel.show(False)
         panel.update()
@@ -537,21 +596,30 @@ class Drawn(unittest.TestCase):
 
     def test_the_heading_is_the_kind_and_the_name_in_its_colour_and_a_refusal_stands_in_the_middle(self) -> None:
         places = arrange(RECT)
+        x, y, w, h = places["head"]
         for picked, colour in ((("sound", "coin"), theme.SOUND), (("instrument", "chime"), theme.INSTRUMENT)):
             self.stand.model.picked = picked
             self.draw()
             kind, name = picked[0].upper(), picked[1]
-            # The kind starts 5 pixels in, and the name 8 pixels after it. Both boxes have their outline.
-            self.assertTrue(self.written(theme.DIM, places["head"], kind, 29))
-            self.assertTrue(self.written(colour, places["head"], name, 29 + Font.width(kind) + 8))
-            # A sound has the two buttons of its kind and its limits there as well, raised.
+            # The kind starts 6 pixels in, and the name 6 pixels after it. The heading has its outline.
+            self.assertTrue(self.written(theme.DIM, (30, y, Font.width(kind), h), kind, 30))
+            self.assertTrue(self.written(colour, places["head"], name, 30 + Font.width(kind) + 6))
+            # A sound has the three buttons that open a list there as well, raised.
             buttons = {theme.RAISED, theme.LIT, theme.TEXT} if picked[0] == "sound" else set()
             self.assertEqual(self.colours(places["head"]), {theme.PANEL, theme.LINE, theme.DIM, colour} | buttons)
-            self.assertEqual(self.colours((24, 35, 392, 1)) | self.colours((24, 36, 1, 239)), {theme.LINE})
-            # The view is drawn in its box, and nothing is outside the panel.
+            self.assertEqual(self.colours((x, y, w, 1)) | self.colours((x, y + 1, 1, h - 2)), {theme.LINE})
+            # The view is drawn in its room, and nothing is outside the panel.
             self.assertIn(theme.BACKGROUND, self.colours(places["view"]))
             around = ((0, 0, 440, 10), (0, 280, 440, 10), (0, 10, 20, 270), (420, 10, 20, 270))
             self.assertEqual(set().union(*(self.colours(rect) for rect in around)), {OUTSIDE})
+        # A sound has its settings bar, its lane and the box of its wave under one another, each with its
+        # outline, and the keyboard of every view of notes down the left of its grid.
+        self.stand.model.picked = ("sound", "coin")
+        self.draw()
+        for part in ("bar", "lane", "wave"):
+            left, top, wide, _ = places[part]
+            self.assertEqual(self.colours((left, top, wide, 1)), {theme.LINE}, part)
+        self.assertEqual(self.colours(self.panel.view.keys.rect) - {theme.PANEL}, {theme.TEXT, theme.BACKGROUND})
         # A song draws nothing at all.
         self.stand.model.picked = ("song", "tune")
         self.draw()
@@ -567,17 +635,19 @@ class Drawn(unittest.TestCase):
                          {theme.PANEL})
         self.assertEqual(self.colours((x, y, w, h)), {theme.PANEL, theme.FAULT})
 
-    def test_the_heading_says_in_dim_words_what_a_sound_of_several_is_and_a_held_one_has_its_button(self) -> None:
-        head, hold = arrange(RECT)["head"], arrange(RECT)["hold"]
-        for name, said in (("blip", "3 variants"), ("explosion", "2 parts"), ("hum", "held")):
+    def test_the_heading_says_in_dim_words_what_a_sound_is_and_how_long_and_a_held_one_has_its_button(self) -> None:
+        head = arrange(RECT)["head"]
+        for name, said in (("blip", "3 variants, 0.1 s"), ("explosion", "2 parts, 0.65 s"), ("hum", "held, 0.7 s")):
             self.stand.model.picked = ("sound", name)
             self.draw()
-            # The words stand 8 pixels after the name, which stands 8 pixels after the kind.
-            after = 29 + Font.width("SOUND") + 8 + Font.width(name) + 8
-            self.assertTrue(self.written(theme.DIM, (after, head[1], head[0] + head[2] - after, head[3]), said, after))
-            self.assertTrue(self.written(theme.SOUND, head, name, 29 + Font.width("SOUND") + 8))
-        # The button of the held sound is the right end of the heading: raised, with its word 4 pixels in.
-        x, y, w, h = hold
+            # The name stands 6 pixels after the kind, and the facts 12 pixels after the name.
+            at = 30 + Font.width("SOUND") + 6
+            after = at + Font.width(name) + 12
+            self.assertTrue(self.written(theme.SOUND, head, name, at))
+            self.assertTrue(self.written(theme.DIM, (after, head[1], Font.width(said), head[3]), said, after), name)
+        # The button of the held sound is the last of the heading: raised, with its word 4 pixels in.
+        hold = x, y, w, h = self.panel.hold.rect
+        self.assertEqual((x + w, y, h), (head[0] + head[2] - 2, head[1] + 2, 13))
         self.assertEqual(self.colours(hold), {theme.RAISED, theme.LIT, theme.LINE, theme.TEXT})
         self.assertTrue(self.written(theme.TEXT, hold, "HOLD", x + 4))
         # Kept pressed it is sunk and its word is lit, also with the mouse off it.
@@ -588,18 +658,20 @@ class Drawn(unittest.TestCase):
         self.ui.handle(Event("up", (100, 100), button=1))
         self.draw()
         self.assertEqual(self.colours(hold), {theme.RAISED, theme.LIT, theme.LINE, theme.TEXT})
-        # In a narrow panel the words are cut 8 pixels before the button, and do not run on under it.
-        self.panel.place((20, 10, 120, 270))
+        # In a narrow panel the words end before the first button, and do not run on under it: here the facts
+        # have no room, and the name has.
+        self.panel.place((20, 10, 260, 270))
         self.draw()
-        x, y, w, h = arrange((20, 10, 120, 270))["hold"]
-        self.assertIn(theme.DIM, self.colours((x - 14, y + 1, 6, h - 2)))
-        self.assertEqual(self.colours((x - 8, y + 1, 8, h - 2)), {theme.PANEL})
+        first = self.panel.kinds.rect[0]
+        self.assertEqual((first, self.colours((first - 12, y - 1, 12, h + 2))), (102, {theme.PANEL}))
+        self.assertTrue(self.written(theme.SOUND, (24, head[1], first - 24, head[3]), "hum",
+                                     30 + Font.width("SOUND") + 6))
         self.panel.place(RECT)
-        x, y, w, h = hold
-        # A sound that is not held has the heading's own ground there.
+        # A sound that is not held has no such button: the three that open a list stand at the right end.
         self.stand.model.picked = ("sound", "blip")
         self.draw()
-        self.assertEqual(self.colours((x, y + 1, w - 1, h - 2)), {theme.PANEL})
+        notes = self.panel.notes.rect
+        self.assertEqual((self.panel.hold.visible, notes[0] + notes[2]), (False, x + w))
 
 
 class OnAModel(unittest.TestCase):
@@ -923,9 +995,9 @@ class Saved(OnAFile):
         self.outside(lambda sounds: sounds["two"]["def"]["voices"][1].update(notes=[]))
         self.panel.update()
         self.assertEqual((self.view.drawn, self.view.busy), (duo(FIRST, []), False))
-        # A knob of the bar that is under the hand holds it back as well: let go, its level is saved beside
+        # A knob of the bar that is under the hand holds it back as well: let go, its volume is saved beside
         # what was written outside.
-        level = self.panel.bar.level
+        level = self.panel.bar.volume
         x, y = centre(level.rect)
         self.mouse("down", (x, y))
         self.mouse("move", (x, y + 10))
@@ -934,7 +1006,7 @@ class Saved(OnAFile):
         self.assertEqual((self.panel.bar.busy, level.value, self.view.drawn), (True, -3.5, duo(FIRST, [])))
         self.mouse("up", (x, y + 10))
         self.assertEqual((self.data()["sounds"]["two"], self.view.drawn, self.session.undo_label),
-                         ({"def": duo(FIRST, SECOND), "db": -3.5}, duo(FIRST, SECOND), "two: level -3.5 DB"))
+                         ({"def": duo(FIRST, SECOND), "db": -3.5}, duo(FIRST, SECOND), "two: volume -3.5 dB"))
 
     def test_a_gesture_that_ends_after_its_sound_was_removed_outside_saves_nothing_and_says_so(self) -> None:
         start, stop = self.at(1, 60), self.at(3, 60)
@@ -948,8 +1020,8 @@ class Saved(OnAFile):
         self.assertEqual((self.data(), self.session.message, self.session.undo_label, self.view.busy),
                          (written, "two: the project has no such sound any more", steps, False))
 
-    def test_a_level_let_go_of_after_its_sound_was_removed_outside_saves_nothing_and_says_so(self) -> None:
-        x, y = centre(self.panel.bar.level.rect)
+    def test_a_volume_let_go_of_after_its_sound_was_removed_outside_saves_nothing_and_says_so(self) -> None:
+        x, y = centre(self.panel.bar.volume.rect)
         self.mouse("down", (x, y))
         self.mouse("move", (x, y + 10))
         written = self.outside(lambda sounds: sounds.pop("two"))
@@ -993,10 +1065,8 @@ class Saved(OnAFile):
         self.assertEqual(self.data(), before)
 
 
-class Kinds(OnAFile):
-    """The kind of a sound and what belongs to the kind, changed in the window: each change is one save."""
-
-    DATA, FIRST = MIXED, "one"
+class Menus(OnAFile):
+    """A panel on a file whose menus and boxes are worked: what a test does to them, and what it reads of them."""
 
     def sound(self, name: str) -> dict:
         """What the file holds now for a sound."""
@@ -1004,12 +1074,11 @@ class Kinds(OnAFile):
 
     def items(self) -> list[tuple[str, bool]]:
         """The items of the menu that is open: the text of each, and whether it can be chosen."""
-        return [(item.text, item.enabled) for item in self.ui.modal.items]
+        return [(item.text, item.enabled) for item in self.ui.modal.items if item is not None]
 
     def choose(self, text: str) -> None:
         """Click the item of the open menu whose text begins with some words."""
-        menu = self.ui.modal
-        self.drag(centre(menu.rows[[item.text.startswith(text) for item in menu.items].index(True)]))
+        choose(self.ui, text)
 
     def type(self, text: str) -> None:
         """Type a text in the box that is open, in place of what it holds, and press enter."""
@@ -1030,18 +1099,28 @@ class Kinds(OnAFile):
         """A pixel of the ruler at a second of the clock."""
         return self.view.map.x(second), self.view.map.ruler[1] + 2
 
+
+class Kinds(Menus):
+    """The kind of a sound and what belongs to the kind, changed in the window: each change is one save."""
+
+    DATA, FIRST = MIXED, "one"
+
     def test_each_kind_is_made_any_other_from_the_menu_of_the_heading_and_undo_brings_the_old_kind_back(self) -> None:
-        said = {"one": ["ONE", "VARIANTS", "PARTS", "HELD"],
-                "trio": ["ONE (keeps variant 1 only)", "VARIANTS", "PARTS", "HELD (keeps variants 1 and 2 only)"],
-                "both": ["ONE (keeps part 1 only)", "VARIANTS (drops where the parts start)", "PARTS",
+        said = {"one": ["SINGLE", "VARIANTS", "PARTS", "HELD"],
+                "trio": ["SINGLE (keeps variant 1 only)", "VARIANTS", "PARTS", "HELD (keeps variants 1 and 2 only)"],
+                "both": ["SINGLE (keeps part 1 only)", "VARIANTS (drops where the parts start)", "PARTS",
                          "HELD (drops where the parts start)"],
-                "drone": ["ONE (keeps the note only)", "VARIANTS (drops the loop)", "PARTS (drops the loop)", "HELD"]}
-        made = {"def": "made one sound", "defs": "made variants", "parts": "made parts", "held": "made a held sound"}
+                "drone": ["SINGLE (keeps the note only)", "VARIANTS (drops the loop)", "PARTS (drops the loop)",
+                          "HELD"]}
+        made = {"def": "made a single sound", "defs": "made variants", "parts": "made parts",
+                "held": "made a held sound"}
         for name, kind in zip(said, made):
             self.pick(name)
             before = self.data()
-            self.assertEqual((self.panel.kind, self.panel.kinds.visible, self.panel.kinds.text),
-                             (kind, True, said["one"][list(made).index(kind)]))
+            # The button says what it is for, and the heading what the sound is.
+            self.assertEqual((self.panel.kind, self.panel.kinds.visible, self.panel.kinds.text,
+                              self.panel.words.split()[-1].upper() in said["one"][list(made).index(kind)]),
+                             (kind, True, "KIND", True))
             for to, text in zip(made, said[name]):
                 # The button of the heading opens the menu: what the sound is cannot be chosen, and an item
                 # says what the sound would let go of.
@@ -1065,30 +1144,40 @@ class Kinds(OnAFile):
         self.drag(self.plus())
         self.assertEqual((self.sound("trio"), self.session.undo_label, self.view.sound),
                          ({"defs": [first, second, third, first], "db": [0, -3, -6, 0]}, "trio: variant 4 added", 3))
-        # The right button on its label: the last variant is not moved further right.
+        # The right button on its label opens the menu of a named thing, in the order every such menu has: a
+        # variant has no name, and the last variant is not moved further right.
         self.drag(self.label(3), button=3)
-        self.assertEqual(self.items(), [("Remove", True), ("Move left", True), ("Move right", False)])
+        self.assertEqual(self.items(), [("Rename...", False), ("Copy", True), ("Play", True), ("Move left", True),
+                                        ("Move right", False), ("Remove", True)])
         self.choose("Move left")
         self.assertEqual((self.sound("trio"), self.session.undo_label, self.view.sound),
                          ({"defs": [first, second, first, third], "db": [0, -3, 0, -6]},
                           "trio: variant 4 moved left", 2))
         self.drag(self.label(0), button=3)
-        self.assertEqual(self.items(), [("Remove", True), ("Move left", False), ("Move right", True)])
+        self.assertEqual(self.items()[3:], [("Move left", False), ("Move right", True), ("Remove", True)])
         self.choose("Remove")
         self.assertEqual((self.sound("trio"), self.session.undo_label),
                          ({"defs": [second, first, third], "db": [-3, 0, -6]}, "trio: variant 1 removed"))
+        # Copied, a variant is one more at the end, with its level, and the hand is in the copy.
+        self.drag(self.label(0), button=3)
+        self.choose("Copy")
+        self.assertEqual((self.sound("trio"), self.session.undo_label, self.view.sound),
+                         ({"defs": [second, first, third, second], "db": [-3, 0, -6, -3]},
+                          "trio: variant 1 copied as variant 4", 3))
+        # Nothing of all this was played.
+        self.assertEqual(self.speaker.played, [])
 
     def test_the_last_variant_and_the_last_part_cannot_be_removed(self) -> None:
         self.pick("both")
         self.drag(self.label(1), button=3)
-        self.assertEqual(self.items()[0], ("Remove", True))
+        self.assertEqual(self.items()[-1], ("Remove", True))
         self.choose("Remove")
         self.assertEqual((self.sound("both"), self.session.undo_label),
                          ({"parts": BOTH["parts"][:1]}, "both: part 2 removed"))
         self.drag(self.label(0), button=3)
-        self.assertEqual(self.items()[0], ("Remove", False))
-        # A press on what cannot be chosen does nothing, and the menu stays open.
-        self.drag(centre(self.ui.modal.rows[0]))
+        self.assertEqual(self.items()[-1], ("Remove", False))
+        # What cannot be done is shown, dim. A press on it does nothing, and the menu stays open.
+        self.drag(centre(self.ui.modal.rows[-1]))
         self.assertEqual((self.sound("both"), self.ui.modal is None), ({"parts": BOTH["parts"][:1]}, False))
         self.ui.handle(Event("key", key="escape"))
         # One sound made variants is one variant, which is not removed and has nowhere to move to.
@@ -1096,7 +1185,8 @@ class Kinds(OnAFile):
         self.drag(centre(self.panel.kinds.rect))
         self.choose("VARIANTS")
         self.drag(self.label(0), button=3)
-        self.assertEqual(self.items(), [("Remove", False), ("Move left", False), ("Move right", False)])
+        self.assertEqual(self.items(), [("Rename...", False), ("Copy", True), ("Play", True), ("Move left", False),
+                                        ("Move right", False), ("Remove", False)])
 
     def test_a_part_dragged_by_its_label_saves_its_new_start_and_nothing_else(self) -> None:
         self.pick("both")
@@ -1134,7 +1224,8 @@ class Kinds(OnAFile):
         self.drag(at)
         self.assertEqual(len(self.sound("both")["parts"]), 4)
         self.drag(self.label(0), button=3)
-        self.assertEqual([text for text, _ in self.items()], ["Remove", "Copy as a new part", "Level (-3 dB)..."])
+        self.assertEqual(self.items(), [("Rename...", False), ("Copy", True), ("Volume (-3 dB)...", True),
+                                        ("Remove", True)])
         self.choose("Copy")
         self.assertEqual((self.sound("both")["parts"][4:], self.session.undo_label, self.view.sound),
                          ([[0, low]], "both: part 1 copied as part 5", 4))
@@ -1156,19 +1247,19 @@ class Kinds(OnAFile):
             self.drag(self.label(which))
             self.assertEqual(self.view.sound, which)
 
-    def test_the_level_of_a_part_is_typed_in_a_box_over_its_label(self) -> None:
+    def test_the_volume_of_a_part_is_typed_in_a_box_over_its_label(self) -> None:
         self.pick("both")
         self.drag(self.label(1), button=3)
-        self.choose("Level (0 dB)")
+        self.choose("Volume (0 dB)")
         self.assertEqual(self.ui.modal.text, "")
         self.type("-6")
         self.assertEqual((self.sound("both")["parts"][1][1], self.session.undo_label),
-                         ({**BOTH["parts"][1][1], "db": -6}, "both: part 2 level -6 dB"))
-        # What is no number is said and saves nothing, and an empty box takes the level out of the file.
-        for typed, saved, label, message in (("-", -6, "both: part 2 level -6 dB", "both: '-' is no number"),
-                                             ("", None, "both: part 2 level taken out", "")):
+                         ({**BOTH["parts"][1][1], "db": -6}, "both: part 2 volume -6 dB"))
+        # What is no number is said and saves nothing, and an empty box takes the volume out of the file.
+        for typed, saved, label, message in (("-", -6, "both: part 2 volume -6 dB", "both: '-' is no number"),
+                                             ("", None, "both: part 2 volume taken out", "")):
             self.drag(self.label(1), button=3)
-            self.choose("Level (-6 dB)")
+            self.choose("Volume (-6 dB)")
             self.type(typed)
             self.assertEqual((self.sound("both")["parts"][1][1].get("db"), self.session.undo_label,
                               self.session.message), (saved, label, message))
@@ -1197,28 +1288,28 @@ class Kinds(OnAFile):
         pull(8, 500)
         self.assertEqual(self.sound("drone")["held"]["start"], 8)
 
-    def test_the_join_and_the_let_go_of_a_held_sound_are_two_knobs_of_the_bar(self) -> None:
+    def test_the_crossfade_and_the_release_of_a_held_sound_are_two_knobs_of_the_bar(self) -> None:
         bar = self.panel.bar
-        self.assertEqual((bar.join.visible, bar.let_go.visible), (False, False))
+        self.assertEqual((bar.crossfade.visible, bar.release.visible), (False, False))
         self.pick("drone")
         self.assertEqual([(knob.visible, knob.text, knob.value, knob.show(knob.value), bool(knob.help))
-                          for knob in (bar.join, bar.let_go)],
-                         [(True, "JOIN", 3, "3 TICKS", True), (True, "LET GO", 4, "4 TICKS", True)])
+                          for knob in (bar.crossfade, bar.release)],
+                         [(True, "CROSSFADE", 3, "3 ticks", True), (True, "RELEASE", 4, "4 ticks", True)])
         labels = []
-        for knob, up in ((bar.join, 10), (bar.let_go, 10), (bar.join, 60)):
+        for knob, up in ((bar.crossfade, 10), (bar.release, 10), (bar.crossfade, 60)):
             x, y = centre(knob.rect)
             self.drag((x, y), (x, y - up))
             labels.append(self.session.undo_label)
-        # The join is kept no longer than the start, which is 6 ticks: turned further, nothing more is saved.
-        self.assertEqual(labels, ["drone: loop joined over 6 ticks", "drone: let go in 10 ticks",
-                                  "drone: let go in 10 ticks"])
-        self.assertEqual((self.sound("drone")["held"], bar.join.value),
+        # The crossfade is kept no longer than the start, which is 6 ticks: turned further, nothing more is saved.
+        self.assertEqual(labels, ["drone: crossfade 6 ticks", "drone: release 10 ticks", "drone: release 10 ticks"])
+        self.assertEqual((self.sound("drone")["held"], bar.crossfade.value),
                          ({**DRONE["held"], "join": 6, "let_go": 10}, 6))
 
     def test_the_longest_time_is_set_in_the_ruler_dragged_by_its_line_and_taken_away(self) -> None:
         before = self.data()
         self.drag(self.ruler(0.1), button=3)
-        self.assertEqual(self.items(), [("Set a longest time here", True), ("No longest time", False)])
+        self.assertEqual(self.items(), [("Set a longest time here", True), ("No longest time", False),
+                                        ("Expect a note here...", True)])
         self.choose("Set")
         self.assertEqual((self.sound("one"), self.session.undo_label, self.view.limit),
                          ({**MIXED["sounds"]["one"], "max_seconds": 0.1}, "one: longest time 0.1 s", 0.1))
@@ -1271,6 +1362,172 @@ class Kinds(OnAFile):
         self.assertEqual((self.view.busy, self.view.stale), (False, True))
         self.rendered()
         self.assertFalse(self.view.stale)
+
+
+class Sheet(Menus):
+    """What the sheet of the window gave the sound editor: the things of a sound that had no place in it before."""
+
+    DATA, FIRST = EXTRA, "own"
+
+    def test_the_notes_kept_with_a_sound_are_listed_added_changed_and_removed_and_no_text_is_left_alone(self) -> None:
+        before, button = self.data(), centre(self.panel.notes.rect)
+        # The button opens the keys and the texts as a list, with what adds one after the last. A value that
+        # is no text is dim.
+        self.drag(button)
+        self.assertEqual(self.items(), [("by: hand", True), ("take: 3", False), ("+", True)])
+        # A box takes the key, and then one the text.
+        self.choose("+")
+        self.type("mood")
+        self.type("calm")
+        self.assertEqual((self.sound("own")["meta"], self.session.undo_label, differing(before, self.data())),
+                         ({"by": "hand", "take": 3, "mood": "calm"}, "own: mood added to NOTES",
+                          ["sounds.own.meta.mood"]))
+        # A key the sound has is said before any text is asked for.
+        self.drag(button)
+        self.choose("+")
+        self.type("by")
+        self.assertEqual((self.ui.modal, self.session.message), (None, "own: NOTES has 'by' already"))
+        # An item opens the menu of its note: its text is changed in a box that holds it, or it is removed.
+        self.drag(button)
+        self.choose("by:")
+        self.assertEqual(self.items(), [("Change...", True), ("Remove", True)])
+        self.choose("Change")
+        self.assertEqual(self.ui.modal.text, "hand")
+        self.type("ear")
+        self.assertEqual((self.sound("own")["meta"], self.session.undo_label),
+                         ({"by": "ear", "take": 3, "mood": "calm"}, "own: by of NOTES changed"))
+        self.drag(button)
+        self.choose("mood")
+        self.choose("Remove")
+        self.assertEqual((self.sound("own")["meta"], self.session.undo_label),
+                         ({"by": "ear", "take": 3}, "own: mood removed from NOTES"))
+        # Each was one step: three taken back, the file is as it was.
+        for _ in range(3):
+            self.assertTrue(self.session.undo())
+        self.assertEqual(self.data(), before)
+
+    def test_a_note_the_sound_is_expected_to_play_is_marked_in_the_ruler_dragged_changed_and_removed(self) -> None:
+        first = KEPT["check"][0]
+        # The menu of the ruler marks one at the second under the mouse: a box takes the name of the note.
+        self.drag(self.ruler(0.1), button=3)
+        self.choose("Expect")
+        self.assertEqual(self.ui.modal.text, "")
+        self.type("E4")
+        self.assertEqual((self.sound("own")["check"], self.session.undo_label),
+                         ([first, {"at": 0.1, "note": "e4"}], "own: expects e4 at 0.1 s"))
+        # What is no note is said, and nothing is saved.
+        self.drag(self.ruler(0.02), button=3)
+        self.choose("Expect")
+        self.type("h9")
+        self.assertEqual((len(self.sound("own")["check"]), self.session.message),
+                         (2, "own: a note is a number or a name such as 'c#4', not 'h9'"))
+        # Its flag is dragged along the ruler to another second.
+        x, y = self.ruler(0.1)
+        self.drag((x, y), (x + round(0.03 * self.view.map.scale), y))
+        self.assertEqual((self.sound("own")["check"][1], self.session.undo_label),
+                         ({"at": 0.13, "note": "e4"}, "own: expected note moved to 0.13 s"))
+        # The right button on the flag opens its menu: its note is changed in a box, or it is removed.
+        self.drag(self.ruler(0.13), button=3)
+        self.assertEqual(self.items(), [("Change...", True), ("Remove", True)])
+        self.choose("Change")
+        self.assertEqual(self.ui.modal.text, "e4")
+        self.type("g4")
+        self.assertEqual((self.sound("own")["check"][1], self.session.undo_label),
+                         ({"at": 0.13, "note": "g4"}, "own: expects g4 at 0.13 s"))
+        self.drag(self.ruler(0.13), button=3)
+        self.choose("Remove")
+        self.assertEqual((self.sound("own")["check"], self.session.undo_label),
+                         ([first], "own: expected note g4 removed"))
+        # Without its last one the sound has no such notes in the file.
+        self.drag(self.ruler(0.05), button=3)
+        self.choose("Remove")
+        self.assertEqual(("check" in self.sound("own"), self.session.message), (False, ""))
+
+    def test_an_instrument_written_in_place_is_made_a_shared_one_from_the_list_of_the_instruments(self) -> None:
+        bar, before = self.panel.bar, self.data()
+        self.assertEqual((bar.inst.options[bar.inst.picked], bar.list.visible), ("its own", True))
+        # The button after the field opens the list of the instruments, and after them what makes this one
+        # an instrument of the project. A name the project has is refused, and said.
+        self.drag(centre(bar.list.rect))
+        self.assertEqual(self.items(), [("tone", True), ("buzz", True), ("Make shared...", True)])
+        self.choose("Make shared")
+        self.type("tone")
+        self.assertEqual((self.data(), self.session.message),
+                         (before, "own: the project has an instrument called 'tone' already"))
+        # Under a new name the instrument moves to those of the project, and the voice names it.
+        self.drag(centre(bar.list.rect))
+        self.choose("Make shared")
+        self.type("rasp")
+        after = self.data()
+        self.assertEqual((after["instruments"]["rasp"], after["sounds"]["own"]["def"]["voices"][0]["inst"],
+                          differing(before, after)), (WRITTEN, "rasp", ["instruments.rasp", "sounds.own.def.voices"]))
+        self.assertEqual((self.session.undo_label, bar.inst.options, bar.inst.options[bar.inst.picked]),
+                         ("own: voice 1 plays rasp, now a shared instrument", ("tone", "buzz", "rasp"), "rasp"))
+        # The two were one step.
+        self.assertTrue(self.session.undo())
+        self.panel.update()
+        self.assertEqual((self.data(), bar.inst.options[bar.inst.picked]), (before, "its own"))
+        # A voice that names its instrument has nothing to make shared: the item is dim. An instrument of the
+        # list that is chosen plays the voice.
+        self.pick("two")
+        self.drag(centre(bar.list.rect))
+        self.assertEqual(self.items(), [("tone", False), ("buzz", True), ("Make shared...", False)])
+        self.choose("buzz")
+        self.assertEqual((self.sound("two")["def"]["voices"][0]["inst"], self.session.undo_label),
+                         ("buzz", "two: voice 1 plays buzz"))
+
+    def test_a_key_of_the_keyboard_and_the_piano_keys_of_the_computer_play_the_instrument_of_the_picked_voice(
+            self) -> None:
+        self.pick("two")
+        seen = self.view.map
+        on = (self.view.keys.rect[0] + 5, seen.y(60) + 4)
+        # A press on c4 of the keyboard is heard in the instrument of the first voice. Nothing plays, nothing
+        # is changed, and the keyboard has the focus.
+        self.drag(on)
+        self.assertEqual((len(self.speaker.notes), self.speaker.played, self.session.can_undo, self.ui.focus),
+                         (1, [], False, self.view.keys))
+        self.assertIs(self.speaker.notes[0], self.session.model.tone("tone", 60)["sides"])
+        # With the second voice picked it is that one's. The keys of the computer play it as a piano from the
+        # lowest c in view: z is that c, and q the one an octave over it.
+        self.drag(centre(self.panel.bar.voices.cells()[1]))
+        self.drag(on)
+        low = -(-seen.pitches().start // 12) * 12
+        self.assertEqual((low in seen.pitches(), self.ui.handle(Event("key", key="z")),
+                          self.ui.handle(Event("key", key="q"))), (True, True, True))
+        for note, pitch in zip(self.speaker.notes[1:], (60, low, low + 12)):
+            self.assertIs(note, self.session.model.tone("buzz", pitch)["sides"])
+        # With ctrl held it is no key of the piano, and a key that plays no note is not the view's either.
+        self.assertEqual((self.ui.handle(Event("key", key="z", mods=frozenset({"ctrl"}))),
+                          self.ui.handle(Event("key", key="f1")), len(self.speaker.notes), self.speaker.played),
+                         (False, False, 4, []))
+
+    def test_a_drag_in_the_velocity_lane_is_one_step_and_the_usual_velocity_is_written_as_none(self) -> None:
+        self.pick("two")
+        before = self.data()
+        left, top, _, high = self.view.lane.rect
+        self.assertEqual(((left, top, high), self.view.lane.span), ((4, 404, 24), self.view.map.grid[0::2]))
+        # Half way up the lane is a velocity of a half: it is the fourth number of the note, in the file.
+        x = self.at(1, 60)[0]
+        self.drag((x, top + high - 2 - 10))
+        self.assertEqual((self.sound("two")["def"]["voices"][0]["notes"][0], self.session.undo_label,
+                          differing(before, self.data()), self.speaker.notes),
+                         ([0, "c4", 6, 0.5], f"two: {VELOCITY_DONE}", ["sounds.two.def.voices"], []))
+        # The right button on its bar gives the note the usual velocity again, which the file does not write.
+        self.drag((x, top + 12), button=3)
+        self.assertEqual((self.data(), self.session.undo_label), (before, f"two: {VELOCITY_DONE}"))
+        self.assertTrue(self.session.undo())
+        self.panel.update()
+        self.assertEqual(self.view.drawn["voices"][0]["notes"][0], [0, "c4", 6, 0.5])
+
+    def test_the_help_line_on_the_wave_says_the_pitch_the_render_has_there(self) -> None:
+        seen = self.view.map
+        self.assertEqual(self.view.foot, (4, 430, 654, 46))
+        # The sound is a saw at c4 for a tenth of a second.
+        self.mouse("move", (seen.x(0.03), seen.wave[1] + 10))
+        self.assertRegex(self.ui.help, r"^0\.03 s, -[0-9.]+ dB, 26[0-9.]+ Hz, c4$")
+        # Beside the stretch of the wave, in its box under the keyboard, there is nothing to read.
+        self.mouse("move", (self.view.foot[0] + 10, seen.wave[1] + 10))
+        self.assertEqual(self.ui.help, HELP)
 
 
 if __name__ == "__main__":

@@ -88,17 +88,23 @@ KINDS: dict[str, tuple[str, ...]] = {
                               "press: hear version beat alone   right press: its menu   wheel: along"),
     "the layers, the buttons that add": ("press: a new version", "press: a new group", "press: one more key"),
     "the layers, off all of them": (layerview.TABLE_HELP,),
-    "a sound, a note": ("move ", "stretch "),
-    "a sound, empty grid": ("place a note at ",),
-    "a sound, the ruler": ("press the right button to set the longest time the sound may last",),
-    "a sound, the wave and the keys": (soundpanel.HELP,),
-    "variants, the labels": ("click to hear variant ", "add a variant, a copy of variant "),
-    "variants, the ruler": ("press the right button to set the longest time the sound may last",),
-    "parts, the labels": ("drag to move where part ", "add a part at the end, a copy of part "),
-    "parts, the ruler": ("press the right button to set the longest time the sound may last, and ctrl and a click",),
-    "a held sound, the labels": ("drag to move where the loop starts", "drag to move where the loop ends",
-                                 "click to work on the note", "click to work on the end"),
-    "a held sound, the ruler": ("the longest time the sound may last: drag to move it", "press the right button"),
+    "a sound, a note": ("press: pick ",),
+    "a sound, empty grid": ("press: put a note at ",),
+    "a sound, a key": ("press: hear ",),
+    "a sound, the ruler": ("right press: a longest time, or a note to expect   wheel: ",),
+    "a sound, the wave": (soundpanel.HELP,),
+    "a sound, its scroll bars": ("press: drag the bar to go along the keys, ",
+                                 "press: drag the bar to go along the time, "),
+    "a sound, the velocity lane": (VELOCITY_HELP,),
+    "variants, the labels": ("press: pick variant ", "press: add a variant, a copy of variant "),
+    "variants, the ruler": ("right press: a longest time, or a note to expect   wheel: ",),
+    "parts, the labels": ("press: pick part 1, a drag moves where it starts   right press: its menu",
+                          "press: add a part at the end, a copy of part "),
+    "parts, the ruler": ("press: ctrl adds a part here   right press: a longest time, or a note to expect",),
+    "a held sound, the labels": ("press: drag where the loop starts", "press: drag where the loop ends",
+                                 "press: pick the note", "press: pick the end"),
+    "a held sound, the ruler": ("press: drag the longest time   right press: a longest time, or a note to expect",
+                                "right press: a longest time, or a note to expect"),
     "a step table, a step": ("press: set step 1 of ",),
     "a step table, its handle": ("press: drag right for more steps, left for fewer   wheel: along the tables",),
     "a step table, the loop under its bars": ("press: loop the table from step 1   wheel: along the tables",),
@@ -399,7 +405,10 @@ class Walked(unittest.TestCase):
                 cls.at("a sound, a note", app, [on[0], on[-1]])
                 cls.at("a sound, empty grid", app, [next(pos for pos in across(seen.grid, 3)
                                                          if view.bar_at(pos) is None)])
-                cls.at("a sound, the wave and the keys", app, [middle(seen.wave), middle(seen.keys)])
+                cls.at("a sound, a key", app, [middle(seen.keys)])
+                cls.at("a sound, the wave", app, [middle(seen.wave)])
+                cls.at("a sound, its scroll bars", app, [middle(seen.along), middle(seen.across)])
+                cls.at("a sound, the velocity lane", app, along(view.lane.rect))
 
     @classmethod
     def instruments(cls, app: App) -> None:
