@@ -1,70 +1,63 @@
-"""The settings of the picked channel of a song in one bar: its instrument, its level, its pan and its echo."""
+"""The settings bar of a song: the picked channel's instrument, volume, pan and echo, and the toggles of the view."""
 from __future__ import annotations
 
 import math
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from typing import TYPE_CHECKING
 
 from ..edit import NOTHING, get_in
 from ..errors import RowSynthError
 from . import theme
-from .dials import Knob, Stepper, knob_parts, plain
+from .dials import Knob, Stepper, plain
 from .font import ADVANCE, Font
+from .kit import Bar, Slot, told
 from .layout import Rect
 from .model import TEST_NOTE
 from .panels import within
 from .theme import Colour
-from .ui import Label, Toggle
+from .ui import Label, Toggle, Widget
 
 if TYPE_CHECKING:
     from ..project import Project
     from .panels import Panel
     from .session import Session
 
-#: How high the bar is: a knob, with the line of its label above it and the line of its value below.
-HEIGHT = 37
-#: How high a small button is: the toggles of the bar are such buttons, and so is the field of the instrument.
-BUTTON_H = 13
-#: From one part of the bar to the next.
-SPACE = 6
-#: How wide the room for the channel's name is, the field of the instrument, and a knob with its two lines.
-NAME_W = Font.width("m" * 15)
-INST_W = 78
-KNOB_W = 33
+#: How high the row of the bar's controls is: a knob, with the line of its name above it and the line of its value
+#: below. How high a small button is, and from one control of the bar to the next.
+HEIGHT = theme.BAR_ROW_H
+BUTTON_H = theme.BUTTON_H
+SPACE = theme.BAR_GAP
 
 #: What the two toggles of the view are called, and the word after the name of a drum channel.
 FOLLOW = "FOLLOW"
 GHOSTS = "GHOSTS"
 DRUMS = "DRUMS"
 #: What the settings are called. The last two are the echo's: how many rows after a note it is played a second
-#: time, and how loud that second time is.
+#: time, and how loud that second time is. The switch of the echo reads one of the two words after them.
+CHANNEL = "CHANNEL"
 INSTRUMENT = "INSTRUMENT"
-LEVEL = "LEVEL"
+VOLUME = "VOLUME"
 PAN = "PAN"
 ECHO = "ECHO"
-AFTER = "AFTER"
-LOUD = "LOUD"
+TIME = "TIME"
+AMOUNT = "AMOUNT"
+ON, OFF = "ON", "OFF"
 
 #: The travel of each knob: its lowest value, its highest, and how many steps there are between them. A project
-#: may hold any number for each of the four, so the travels are chosen here. A level goes in hundredths up to
-#: twice the 1 a channel has when it says none, a pan in hundredths from all left to all right, the rows of an
-#: echo in whole rows up to a bar of sixteen, and its share of the note's level in hundredths.
+#: may hold any number for each of the four, so the travels are chosen here. A volume goes in hundredths up to
+#: twice the 1 a channel has when it says none, a pan in hundredths from all left to all right, the time of an
+#: echo in whole rows up to a bar of sixteen, and its amount, a share of the note's volume, in hundredths.
 LEVELS = (0.0, 2.0, 200)
 PANS = (-1.0, 1.0, 200)
-AFTERS = (1.0, 16.0, 15)
-LOUDS = (0.0, 1.0, 100)
+TIMES = (1.0, 16.0, 15)
+AMOUNTS = (0.0, 1.0, 100)
 #: What the engine takes for a setting that a channel does not have. A setting put back to it is taken out of the
 #: file. The two settings of an echo are not here: an echo must have both.
 ABSENT = {"gain": 1, "pan": 0}
 #: The echo a channel gets when its echo is switched on and was not switched off here before: the one the
 #: examples use.
 USUAL_ECHO = {"rows": 3, "gain": 0.3}
-
-#: The parts that give way in a bar too narrow for all of them, the first first. The two toggles of the view stay.
-DROPPED = (("after", "loud"), ("pan",), ("level",), ("echo",), ("inst",), ("name",))
-#: The parts that are knobs: they are as high as the bar, and the others as high as a button.
-KNOBS = ("level", "pan", "after", "loud")
 
 
 def pan_text(pan: float) -> str:
@@ -74,6 +67,24 @@ def pan_text(pan: float) -> str:
     """
     far = math.floor(abs(pan) * 100 + 0.5)
     return "C" if far == 0 else f"{'L' if pan < 0 else 'R'} {far}"
+
+
+def rows_text(rows: float) -> str:
+    """A number of rows in words, as "1 row" and "3 rows"."""
+    return f"{plain(rows)} {'row' if rows == 1 else 'rows'}"
+
+
+#: How wide the room for the channel's name is, the field of the instrument, and the least a knob with its two
+#: lines. A knob whose name or whose longest value is wider has the room of that, and a pixel free at each end.
+NAME_W = Font.width("m" * 15)
+INST_W = 78
+KNOB_W = 33
+VOLUME_W = max(KNOB_W, Font.width(VOLUME) + 2)
+TIME_W = max(KNOB_W, Font.width(rows_text(TIMES[1])) + 2)
+AMOUNT_W = max(KNOB_W, Font.width(AMOUNT) + 2)
+#: How wide the switch of the echo is, and each of the two toggles of the view, which stand one over the other.
+ECHO_W = Font.width(ECHO) + 2 * theme.PAD
+TOGGLE_W = max(Font.width(text) for text in (FOLLOW, GHOSTS)) + 2 * theme.PAD
 
 
 def tidy(value: float) -> int | float:
@@ -108,37 +119,6 @@ def instruments(project: Project, song: str | None) -> list[str]:
     return [*own, *(name for name in project.instruments if name not in own)]
 
 
-def arrange(rect: Rect) -> dict[str, Rect]:
-    """Where the parts of the bar go in its rectangle, each by what it is called, and each cut to the bar.
-
-    From the left stand "name", "inst" with "heading" over it, "level", "pan", "echo", "after" and "loud", and
-    at the right end "follow" and "ghosts". A bar too narrow for all of them drops parts in the order of
-    `DROPPED` until the rest fit, so no two ever overlap. A part that was dropped has no width.
-    """
-    x, y, w, h = rect
-    follow, ghosts, echo = (Font.width(text) + 2 * theme.PAD for text in (FOLLOW, GHOSTS, ECHO))
-    widths = {"name": NAME_W, "inst": INST_W, "level": KNOB_W, "pan": KNOB_W, "echo": echo, "after": KNOB_W,
-              "loud": KNOB_W}
-    right = follow + theme.BUTTON_GAP + ghosts
-    kept = list(widths)
-    for group in DROPPED:
-        if sum(widths[part] + SPACE for part in kept) + right <= w:
-            break
-        kept = [part for part in kept if part not in group]
-    top = y + (h - BUTTON_H) // 2
-    placed = {part: (x, y, 0, 0) for part in (*widths, "heading")}
-    at = x
-    for part in kept:
-        placed[part] = (at, y, widths[part], h) if part in KNOBS else (at, top, widths[part], BUTTON_H)
-        if part == "inst":
-            # The heading is on the line the knobs have their labels on.
-            placed["heading"] = knob_parts((at, y, widths[part], h))[0]
-        at += widths[part] + SPACE
-    placed["follow"] = (x + w - right, top, follow, BUTTON_H)
-    placed["ghosts"] = (x + w - ghosts, top, ghosts, BUTTON_H)
-    return {part: within(place, rect) for part, place in placed.items()}
-
-
 def name_parts(room: Rect, name: str, drums: bool) -> tuple[Rect, Rect]:
     """Where a channel's name goes in the room for it, and the word that comes after the name of a drum channel.
 
@@ -152,18 +132,32 @@ def name_parts(room: Rect, name: str, drums: bool) -> tuple[Rect, Rect]:
     return (x, y, wide, h), within((x + wide + apart, y, word, h), room)
 
 
+def toggle_parts(room: Rect) -> tuple[Rect, Rect]:
+    """Where the two toggles of the view go in the room they share at the right end of the bar: one over the other.
+
+    Each is as wide as the room and as high as a small button, with `theme.GAP` between the two, and the pair
+    stands in the middle of the height. FOLLOW is the upper one.
+    """
+    x, y, w, h = room
+    top = y + max(0, (h - 2 * BUTTON_H - theme.GAP) // 2)
+    return within((x, top, w, BUTTON_H), room), within((x, top + BUTTON_H + theme.GAP, w, BUTTON_H), room)
+
+
 class ChannelBar:
-    """The bar over the view of a song panel: the settings of the picked channel, and the two toggles of the view.
+    """The settings bar of a song panel: the settings of the picked channel, and the two toggles of the view.
 
     It is no panel of the frame. A song panel owns it, adds its widgets through itself, gives it a rectangle
     with `place`, a channel with `show` and a frame with `update`, and says with `seen` whether it is on the
-    window. From the left it has the channel's name in its colour, with the word DRUMS after that of a drum
-    channel, then `inst`, `level`, `pan` and `echo`, and while the echo is on `after` and `loud`: the rows
-    after a note at which it is played a second time, and how loud that second time is as a share of the note.
-    `follow` and `ghosts` are at the right end, and are the panel's to read.
+    window. `frame` is the bar every editor has, as `kit.Bar` draws it: it lays the controls out, and has the
+    name of each over it. From the left stand CHANNEL, which is the channel's name in its colour, with the word
+    DRUMS after that of a drum channel, then `inst`, `volume`, `pan` and `echo`, and while the echo is on
+    `time` and `amount`: the rows after a note at which it is played a second time, and how loud that second
+    time is as a share of the note. At the right end stand the settings its owner gives it with `place`, which
+    are the song's own, and after them `follow` over `ghosts`, which are the panel's to read. In a bar too
+    narrow for all of it the controls at the left give way, the last of them first.
 
     A knob shows its value as it is turned, and is saved when the hand has let go of it: one change to the
-    file at the channel's place, and one step that can be taken back. A level or a pan put back to what the
+    file at the channel's place, and one step that can be taken back. A volume or a pan put back to what the
     engine takes when a channel has none is taken out of the file. The instrument and the echo are saved at
     once. A new instrument is heard, one note of it. An echo that is switched off is taken out of the file,
     and its settings are kept here, so that switched on again it is the echo it was. Switched on for the
@@ -180,33 +174,33 @@ class ChannelBar:
         self.session = panel.session
         nowhere = (0, 0, 0, 0)
 
-        def knob(text: str, travel: tuple[float, float, int], usual: float, key: str, words: str, help: str,
+        def knob(travel: tuple[float, float, int], usual: float, key: str, words: str, what: str, back: str,
                  show: Callable[[float], str] = plain) -> Knob:
-            """A knob of the bar: a right click puts it back to `usual`, and let go of, it is saved at `key`."""
+            """A knob of the bar: a right press puts it back to `usual`, and let go of, it is saved at `key`."""
             low, high, steps = travel
-            return panel.add(Knob(nowhere, usual, low, high, default=usual, steps=steps, text=text, show=show,
-                                  help=help, clock=clock,
-                                  settled=lambda value: self._put(key, value, words, show)))
+            help = told(f"drag up or down {what}, slower with shift", f"back to {back}", "steps it")
+            return panel.add(Knob(nowhere, usual, low, high, default=usual, steps=steps, show=show, help=help,
+                                  clock=clock, settled=lambda value: self._put(key, value, words, show)))
 
+        # The bar itself is added first, so that it is drawn under its controls.
+        self.frame = panel.add(Bar(nowhere))
         self.name = panel.add(Label(nowhere, ""))
         self.word = panel.add(Label(nowhere, DRUMS))
-        self.heading = panel.add(Label(nowhere, INSTRUMENT, align="centre"))
-        self.inst = panel.add(Stepper(nowhere, ("",), changed=self._step,
-                                      help="the instrument the channel plays: the song's own first, then the others"))
-        self.level = knob(LEVEL, LEVELS, ABSENT["gain"], "gain", "level",
-                          "how loud the channel is in the mix: a right click is 1 again")
-        self.pan = knob(PAN, PANS, ABSENT["pan"], "pan", "pan",
-                        "where the channel is from left to right: a right click is the middle again", pan_text)
-        self.echo = panel.add(Toggle(nowhere, ECHO, changed=self._switch,
-                                     help="every note of the channel is played a second time, later and quieter"))
-        self.after = knob(AFTER, AFTERS, USUAL_ECHO["rows"], "echo.rows", "echo after",
-                          "how many rows after a note it is played the second time")
-        self.loud = knob(LOUD, LOUDS, USUAL_ECHO["gain"], "echo.gain", "echo loud",
-                         "how loud the second time is, as a share of the note")
-        self.follow = panel.add(Toggle(nowhere, FOLLOW, on=True,
-                                       help="the pattern that is shown goes along with the playing"))
-        self.ghosts = panel.add(Toggle(nowhere, GHOSTS, on=True,
-                                       help="the notes of the other channels are drawn dim behind"))
+        self.inst = panel.add(Stepper(nowhere, ("",), changed=self._step, help=told(
+            "an arrow steps to the next instrument, the song's own come first", wheel="steps through them")))
+        self.volume = knob(LEVELS, ABSENT["gain"], "gain", "volume", "for how loud the channel is", "1")
+        self.pan = knob(PANS, ABSENT["pan"], "pan", "pan", "to place the channel from left to right",
+                        "the middle", pan_text)
+        self.echo = panel.add(Toggle(nowhere, OFF, changed=self._switch, help=told(
+            "switch the echo on or off: with it every note is played a second time, later and quieter")))
+        self.time = knob(TIMES, USUAL_ECHO["rows"], "echo.rows", "echo time",
+                         "for how many rows after a note its echo comes", rows_text(USUAL_ECHO["rows"]), rows_text)
+        self.amount = knob(AMOUNTS, USUAL_ECHO["gain"], "echo.gain", "echo amount",
+                           "for how loud the echo is, as a share of the note", plain(USUAL_ECHO["gain"]))
+        self.follow = panel.add(Toggle(nowhere, FOLLOW, on=True, help=told(
+            "have the pattern that is shown go along with the playing, or stay")))
+        self.ghosts = panel.add(Toggle(nowhere, GHOSTS, on=True, help=told(
+            "show or hide the notes of the other channels, drawn dim behind")))
         #: The names of the song and of the channel that are shown, and the colour of the channel.
         self.song: str | None = None
         self.channel: str | None = None
@@ -216,11 +210,12 @@ class ChannelBar:
         self._held: dict | None = None
         #: The settings of each echo that was switched off here, by its song and its channel.
         self._echoes: dict[tuple[str, str], dict] = {}
-        #: The settings by the part of the bar each stands in, and those of them that are knobs.
-        self._settings = {"heading": self.heading, "inst": self.inst, "level": self.level, "pan": self.pan,
-                          "echo": self.echo, "after": self.after, "loud": self.loud}
-        self._knobs = tuple(self._settings[part] for part in KNOBS)
-        self._parts = arrange(nowhere)
+        #: The controls of the channel that are seen with any channel, and its knobs.
+        self._settings: tuple[Widget, ...] = (self.inst, self.volume, self.pan, self.echo, self.time, self.amount)
+        self._knobs = (self.volume, self.pan, self.time, self.amount)
+        #: The settings of the owner that stand in the right group, and the room the name of the channel has.
+        self._own: tuple[Slot, ...] = ()
+        self._room: Rect = nowhere
         self._on = False
         self._see()
 
@@ -229,11 +224,16 @@ class ChannelBar:
         """Whether a knob is under the hand: dragged, or in a run of the wheel that has not ended."""
         return any(knob.busy for knob in self._knobs)
 
-    def place(self, rect: Rect) -> None:
-        """Take the bar's rectangle, and lay the widgets out in it as `arrange` has them."""
-        self._parts = arrange(rect)
-        self._lay()
+    def place(self, rect: Rect, own: Sequence[Slot] = ()) -> list[Rect]:
+        """Take the bar's rectangle, and lay the controls out in it: the answer is the rectangles of `own`.
+
+        `own` is the settings of the owner, as slots of a bar: they stand in the right group, in the order
+        given, before the two toggles of the view. One the bar has no room for has no width.
+        """
+        self.frame.rect, self._own = rect, tuple(own)
+        rects = self._lay()
         self._see()
+        return rects
 
     def seen(self, on: bool) -> None:
         """Bring the bar onto the window, or take it off. On it, a widget is seen by what there is to show."""
@@ -277,43 +277,52 @@ class ChannelBar:
         if held is not None:
             names = instruments(project, self.song)
             self.inst.options, self.inst.picked = tuple(names), names.index(held["inst"])
-            self.level.value = held.get("gain", ABSENT["gain"])
+            self.volume.value = held.get("gain", ABSENT["gain"])
             self.pan.value = held.get("pan", ABSENT["pan"])
             echo = held.get("echo")
-            self.echo.is_on = echo is not None
+            self.echo.is_on, self.echo.text = echo is not None, OFF if echo is None else ON
             if echo is not None:
-                self.after.value, self.loud.value = echo["rows"], echo["gain"]
+                self.time.value, self.amount.value = echo["rows"], echo["gain"]
             self.name.text, self.name.colour = self.channel, self._colour
             for knob in self._knobs:
                 knob.colour = self._colour
         self._lay()
         self._see()
 
-    def _lay(self) -> None:
-        """Give each widget its rectangle: a part of the bar, and for the name and its word their share of one."""
-        parts = self._parts
-        for part, widget in self._settings.items():
-            widget.rect = parts[part]
-        self.follow.rect, self.ghosts.rect = parts["follow"], parts["ghosts"]
+    def _lay(self) -> list[Rect]:
+        """Give each widget its rectangle in the bar, and give back those of the owner's settings.
+
+        The name of the channel and its word share the room under CHANNEL, and the two toggles of the view the
+        room at the right end.
+        """
+        left = [Slot(CHANNEL, self.name, NAME_W, "left"), Slot(INSTRUMENT, self.inst, INST_W),
+                Slot(VOLUME, self.volume, VOLUME_W), Slot(PAN, self.pan, KNOB_W), Slot(ECHO, self.echo, ECHO_W),
+                Slot(TIME, self.time, TIME_W), Slot(AMOUNT, self.amount, AMOUNT_W)]
+        rects = self.frame.lay(left, [*self._own, Slot("", self.follow, TOGGLE_W, tall=True)])
+        self._room = rects[0]
         drums = bool(self._held and self._held.get("drums"))
-        self.name.rect, self.word.rect = name_parts(parts["name"], self.name.text, drums)
+        self.name.rect, self.word.rect = name_parts(self._room, self.name.text, drums)
+        self.follow.rect, self.ghosts.rect = toggle_parts(rects[-1])
+        return rects[len(left):-1]
 
     def _see(self) -> None:
         """Have each widget seen or not: by whether the bar is on the window, what there is to show, and what fits.
 
-        FOLLOW is seen with any song. The settings are seen with a channel, the knobs of the echo while it is
-        on, the word DRUMS for a drum channel and GHOSTS for a tuned one: it is the roll that has ghosts.
+        The bar and FOLLOW are seen with any song. The settings are seen with a channel, the knobs of the echo
+        while it is on, the word DRUMS for a drum channel and GHOSTS for a tuned one: it is the roll that has
+        ghosts. What the bar has no room for is not seen.
         """
         held = self._held if self._on else None
         drums = bool(held and held.get("drums"))
-        for part, widget in self._settings.items():
-            widget.visible = held is not None and self._parts[part][2] > 0
-        for knob in (self.after, self.loud):
+        for widget in self._settings:
+            widget.visible = held is not None and widget.rect[2] > 0
+        for knob in (self.time, self.amount):
             knob.visible = knob.visible and self.echo.is_on
-        self.name.visible = held is not None and self._parts["name"][2] > 0
+        self.name.visible = held is not None and self._room[2] > 0
         self.word.visible = self.name.visible and drums
-        self.follow.visible = self._on
-        self.ghosts.visible = held is not None and not drums
+        self.frame.visible = self._on
+        self.follow.visible = self._on and self.follow.rect[2] > 0
+        self.ghosts.visible = held is not None and not drums and self.ghosts.rect[2] > 0
 
     def _change(self, key: str, value: object, words: str) -> bool:
         """Put a value at a place of the channel that is shown, as one step, and show what the file then holds.

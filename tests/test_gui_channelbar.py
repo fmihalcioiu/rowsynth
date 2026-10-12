@@ -11,8 +11,9 @@ from pathlib import Path
 
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
-from rowsynth.gui.channelbar import ChannelBar, arrange, instruments, name_parts, pan_text, tidy
+from rowsynth.gui.channelbar import ChannelBar, instruments, name_parts, pan_text, rows_text, tidy, toggle_parts
 from rowsynth.gui.font import Font
+from rowsynth.gui.kit import Slot
 from rowsynth.gui.model import TEST_NOTE, Model
 from rowsynth.gui.panels import Panel
 from rowsynth.gui.session import POLL_EVERY, Session
@@ -30,9 +31,9 @@ except ImportError:
 
 NEEDS = "pygame is not installed"
 
-#: The bar as a song panel in the middle of the art surface has it, and as the least song panel has it.
-BAR = (263, 107, 516, 37)
-NARROW = (263, 107, 354, 37)
+#: The bar as a song panel in the middle of the art surface has it, and one too narrow for all of its controls.
+BAR = (128, 121, 654, 40)
+NARROW = (128, 121, 300, 40)
 
 #: A song with two instruments of its own, one of them a name it gives to an instrument of the project. Its first
 #: channel says every setting, its second none, and its third is a drum channel.
@@ -59,9 +60,7 @@ RATE = 8000
 STAMP = 1_700_000_000 * 10**9
 
 #: The widgets of a bar, by what the bar calls them.
-WIDGETS = ("name", "word", "heading", "inst", "level", "pan", "echo", "after", "loud", "follow", "ghosts")
-#: The parts of a bar that give way when it is narrow, the first first.
-GIVING = ("after", "loud", "pan", "level", "echo", "inst", "name")
+WIDGETS = ("name", "word", "inst", "volume", "pan", "echo", "time", "amount", "follow", "ghosts")
 
 
 class Speaker:
@@ -138,30 +137,10 @@ class Sums(unittest.TestCase):
         self.assertEqual(instruments(project, "walk"), ["own", "buzz", "tone", "thud"])
         self.assertEqual([instruments(project, song) for song in ("plain", None)], [["tone", "thud", "buzz"]] * 2)
 
-    def test_the_parts_stand_from_the_left_with_the_two_toggles_at_the_right_end(self) -> None:
-        self.assertEqual(arrange(BAR), {
-            "name": (263, 119, 89, 13), "heading": (358, 107, 78, 11), "inst": (358, 119, 78, 13),
-            "level": (442, 107, 33, 37), "pan": (481, 107, 33, 37), "echo": (520, 119, 31, 13),
-            "after": (557, 107, 33, 37), "loud": (596, 107, 33, 37),
-            "follow": (691, 119, 43, 13), "ghosts": (736, 119, 43, 13)})
-
-    def test_a_narrow_bar_drops_the_knobs_of_the_echo_then_the_pan_then_the_level_and_no_two_parts_overlap(
-            self) -> None:
-        dropped = {}
-        for wide in (460, 459, 382, 381, NARROW[2], 342, 303, 266, 182, 40, 0):
-            bar = (263, 107, wide, 37)
-            parts = arrange(bar)
-            dropped[wide] = sum(parts[part][2] == 0 for part in GIVING)
-            # What is dropped is dropped in the one order, and what is left is inside the bar, side by side.
-            self.assertEqual([part for part in GIVING if parts[part][2] == 0], list(GIVING[:dropped[wide]]), wide)
-            self.assertTrue(all(lies_in(part, bar) for part in parts.values()), wide)
-            spans = sorted((x, x + w) for name, (x, _, w, _) in parts.items() if w and name != "heading")
-            self.assertTrue(all(end <= start for (_, end), (start, _) in zip(spans, spans[1:])), wide)
-        self.assertEqual(dropped, {460: 0, 459: 2, 382: 2, 381: 3, 354: 3, 342: 4, 303: 5, 266: 6, 182: 7, 40: 7,
-                                   0: 7})
-        # In the least song panel the level is there, and the toggles are at the right end as in any.
-        self.assertEqual([arrange(NARROW)[part] for part in ("level", "echo", "follow", "ghosts")],
-                         [(442, 107, 33, 37), (481, 119, 31, 13), (529, 119, 43, 13), (574, 119, 43, 13)])
+    def test_the_two_toggles_stand_one_over_the_other_and_a_time_is_told_in_rows(self) -> None:
+        self.assertEqual(toggle_parts((733, 123, 43, 37)), ((733, 127, 43, 13), (733, 143, 43, 13)))
+        self.assertEqual(toggle_parts((0, 0, 0, 0)), ((0, 0, 0, 0), (0, 0, 0, 0)))
+        self.assertEqual([rows_text(rows) for rows in (1, 3, 16)], ["1 row", "3 rows", "16 rows"])
 
     def test_the_word_of_a_drum_channel_stands_after_its_name_and_a_long_name_is_cut_to_leave_it_whole(self) -> None:
         room = (263, 119, 89, 13)
@@ -239,27 +218,38 @@ class Opened(unittest.TestCase):
 class Shown(Opened):
     def test_a_tuned_channel_is_shown_with_its_name_in_its_colour_and_each_setting_as_the_file_has_it(self) -> None:
         bar = self.bar
-        self.assertEqual(self.seen(), ["name", "heading", "inst", "level", "pan", "echo", "after", "loud", "follow",
-                                       "ghosts"])
-        self.assertEqual((bar.name.text, bar.name.colour, bar.name.rect), ("lead", theme.SONG, (263, 119, 23, 13)))
-        self.assertEqual((bar.heading.text, bar.inst.options, bar.inst.picked),
-                         ("INSTRUMENT", ("own", "buzz", "tone", "thud"), 2))
-        knobs = (bar.level, bar.pan, bar.after, bar.loud)
+        self.assertEqual(self.seen(), ["name", "inst", "volume", "pan", "echo", "time", "amount", "follow", "ghosts"])
+        self.assertEqual((bar.name.text, bar.name.colour, bar.name.rect), ("lead", theme.SONG, (134, 135, 23, 13)))
+        self.assertEqual((bar.inst.options, bar.inst.picked), (("own", "buzz", "tone", "thud"), 2))
+        # The controls stand in the bar from its left end, each knob as high as the row, and the two toggles of
+        # the view one over the other at the right end. The bar draws the names of those that are no knobs.
+        self.assertEqual((bar.frame.rect, bar.inst.rect, bar.volume.rect, bar.pan.rect, bar.echo.rect, bar.time.rect,
+                          bar.amount.rect, bar.follow.rect, bar.ghosts.rect),
+                         (BAR, (229, 135, 78, 13), (313, 123, 37, 37), (356, 123, 33, 37), (395, 135, 31, 13),
+                          (432, 123, 43, 37), (481, 123, 37, 37), (733, 127, 43, 13), (733, 143, 43, 13)))
+        self.assertEqual([name for name, _, _, _ in bar.frame._names], ["CHANNEL", "INSTRUMENT", "ECHO"])
+        # What its owner has in the bar stands at the right end before the toggles, and is laid out by the bar.
+        self.assertEqual(bar.place(BAR, (Slot("TEMPO", None, 56),)), [(671, 135, 56, 13)])
+        knobs = (bar.volume, bar.pan, bar.time, bar.amount)
         self.assertEqual([(knob.text, knob.value, knob.low, knob.high, knob.default) for knob in knobs],
-                         [("LEVEL", 0.8, 0, 2, 1), ("PAN", -0.3, -1, 1, 0), ("AFTER", 2, 1, 16, 3),
-                          ("LOUD", 0.5, 0, 1, 0.3)])
+                         [("VOLUME", 0.8, 0, 2, 1), ("PAN", -0.3, -1, 1, 0), ("TIME", 2, 1, 16, 3),
+                          ("AMOUNT", 0.5, 0, 1, 0.3)])
         # A value is shown plainly, and the pan as its side and how far. The knobs are lit in the channel's colour.
-        self.assertEqual([knob.show(knob.value) for knob in knobs], ["0.8", "L 30", "2", "0.5"])
-        self.assertEqual(({knob.colour for knob in knobs}, bar.echo.text, bar.echo.is_on), ({theme.SONG}, "ECHO", True))
+        self.assertEqual([knob.show(knob.value) for knob in knobs], ["0.8", "L 30", "2 rows", "0.5"])
+        self.assertEqual(({knob.colour for knob in knobs}, bar.echo.text, bar.echo.is_on), ({theme.SONG}, "ON", True))
+        # A knob says what a drag, a right press and the wheel do to it.
+        self.assertEqual(bar.volume.help, "press: drag up or down for how loud the channel is, slower with shift   "
+                                          "right press: back to 1   wheel: steps it")
 
     def test_a_drum_channel_has_the_word_drums_after_its_name_and_no_ghosts_and_what_it_lacks_is_as_the_engine_takes_it(
             self) -> None:
         bar = self.bar
         bar.show("walk", "kit", theme.SALMON)
-        self.assertEqual(self.seen(), ["name", "word", "heading", "inst", "level", "pan", "echo", "follow"])
+        self.assertEqual(self.seen(), ["name", "word", "inst", "volume", "pan", "echo", "follow"])
         self.assertEqual((bar.name.text, bar.name.colour, bar.word.text, bar.word.colour, bar.word.rect),
-                         ("kit", theme.SALMON, "DRUMS", theme.DIM, (286, 119, 29, 13)))
-        self.assertEqual((bar.inst.options[bar.inst.picked], bar.level.value, bar.pan.value, bar.echo.is_on),
+                         ("kit", theme.SALMON, "DRUMS", theme.DIM, (157, 135, 29, 13)))
+        self.assertEqual((bar.echo.text, bar.echo.is_on), ("OFF", False))
+        self.assertEqual((bar.inst.options[bar.inst.picked], bar.volume.value, bar.pan.value, bar.echo.is_on),
                          ("thud", 0.6, 0, False))
         self.assertEqual(bar.pan.show(bar.pan.value), "C")
         # With no channel only FOLLOW is left, and off the window nothing is.
@@ -268,34 +258,36 @@ class Shown(Opened):
         bar.show("walk", "kit", theme.SALMON)
         bar.seen(False)
         self.assertEqual(self.seen(), [])
-        # In the least song panel the pan has no room, and is not seen.
+        # In a narrow bar the controls at the left give way from the last: here the pan and the echo have no
+        # room, and are not seen.
         bar.seen(True)
         bar.place(NARROW)
-        self.assertEqual(self.seen(), ["name", "word", "heading", "inst", "level", "echo", "follow"])
+        self.assertEqual(self.seen(), ["name", "word", "inst", "volume", "follow"])
+        self.assertEqual((bar.pan.rect[2], bar.follow.rect), (0, (379, 127, 43, 13)))
 
 
 class Saved(Opened):
     def test_a_knob_that_is_dragged_changes_nothing_in_the_file_until_it_is_let_go_and_then_its_one_place(
             self) -> None:
         bar, before = self.bar, self.data()
-        mouse = self.drag(bar.level, 5, let_go=False)
+        mouse = self.drag(bar.volume, 5, let_go=False)
         # The knob shows where the hand has it.
-        self.assertEqual((bar.level.show(bar.level.value), bar.busy), ("0.9", True))
+        self.assertEqual((bar.volume.show(bar.volume.value), bar.busy), ("0.9", True))
         self.assertEqual((self.data(), self.session.can_undo), (before, False))
         self.ui.handle(Event("up", mouse, button=1))
         self.assertEqual(differing(before, self.data()), ["songs.walk.channels.lead.gain"])
-        self.assertEqual((self.channel()["gain"], bar.level.value, bar.busy), (0.9, 0.9, False))
+        self.assertEqual((self.channel()["gain"], bar.volume.value, bar.busy), (0.9, 0.9, False))
         # It is one step, called by the channel and by what the knob shows, and taken back the knob shows that.
-        self.assertEqual(self.session.undo_label, "lead: level 0.9")
+        self.assertEqual(self.session.undo_label, "lead: volume 0.9")
         self.assertTrue(self.session.undo())
         bar.update()
-        self.assertEqual((self.data(), bar.level.value, self.session.can_undo), (before, 0.8, False))
+        self.assertEqual((self.data(), bar.volume.value, self.session.can_undo), (before, 0.8, False))
 
     def test_a_level_or_a_pan_put_back_to_what_the_engine_takes_without_it_is_taken_out_of_the_file(self) -> None:
         bar = self.bar
-        click(self.ui, middle(bar.level.rect), button=3)
-        self.assertEqual((self.channel(), self.session.undo_label, bar.level.value),
-                         ({"inst": "tone", "pan": -0.3, "echo": ECHO}, "lead: level 1", 1))
+        click(self.ui, middle(bar.volume.rect), button=3)
+        self.assertEqual((self.channel(), self.session.undo_label, bar.volume.value),
+                         ({"inst": "tone", "pan": -0.3, "echo": ECHO}, "lead: volume 1", 1))
         self.drag(bar.pan, 15)
         self.assertEqual((self.channel(), self.session.undo_label, bar.pan.value),
                          ({"inst": "tone", "echo": ECHO}, "lead: pan C", 0))
@@ -323,24 +315,24 @@ class Saved(Opened):
     def test_the_echo_is_switched_on_as_the_usual_one_and_off_and_on_again_it_is_the_echo_it_was(self) -> None:
         bar = self.bar
         bar.show("walk", "low", theme.SOUND)
-        self.assertEqual((bar.echo.is_on, bar.after.visible, bar.loud.visible), (False, False, False))
+        self.assertEqual((bar.echo.is_on, bar.time.visible, bar.amount.visible), (False, False, False))
         click(self.ui, middle(bar.echo.rect))
         self.assertEqual((self.channel("low"), self.session.undo_label),
                          ({"inst": "buzz", "echo": {"rows": 3, "gain": 0.3}}, "low: echo on"))
-        self.assertEqual((bar.echo.is_on, bar.after.visible, bar.after.value, bar.loud.visible, bar.loud.value),
+        self.assertEqual((bar.echo.is_on, bar.time.visible, bar.time.value, bar.amount.visible, bar.amount.value),
                          (True, True, 3, True, 0.3))
         # Its two knobs are saved as any knob is, each at its own place in the echo.
-        self.drag(bar.after, 14)
+        self.drag(bar.time, 14)
         self.assertEqual((self.channel("low")["echo"], self.session.undo_label),
-                         ({"rows": 5, "gain": 0.3}, "low: echo after 5"))
-        self.drag(bar.loud, 20)
+                         ({"rows": 5, "gain": 0.3}, "low: echo time 5 rows"))
+        self.drag(bar.amount, 20)
         self.assertEqual((self.channel("low")["echo"], self.session.undo_label),
-                         ({"rows": 5, "gain": 0.5}, "low: echo loud 0.5"))
+                         ({"rows": 5, "gain": 0.5}, "low: echo amount 0.5"))
         click(self.ui, middle(bar.echo.rect))
-        self.assertEqual((self.channel("low"), self.session.undo_label, bar.echo.is_on, bar.after.visible),
+        self.assertEqual((self.channel("low"), self.session.undo_label, bar.echo.is_on, bar.time.visible),
                          ({"inst": "buzz"}, "low: echo off", False, False))
         click(self.ui, middle(bar.echo.rect))
-        self.assertEqual((self.channel("low")["echo"], bar.after.value, bar.loud.value),
+        self.assertEqual((self.channel("low")["echo"], bar.time.value, bar.amount.value),
                          ({"rows": 5, "gain": 0.5}, 5, 0.5))
         # What is kept is that channel's: the echo of another one is the usual one.
         bar.show("walk", "kit", theme.SALMON)
@@ -364,28 +356,28 @@ class Saved(Opened):
         bar = self.bar
         self.outside(lambda song: song["channels"]["lead"].update(gain=0.5))
         bar.update()
-        self.assertEqual(bar.level.value, 0.5)
+        self.assertEqual(bar.volume.value, 0.5)
         mouse = self.drag(bar.pan, 10, let_go=False)
         self.outside(lambda song: song["channels"]["lead"].update(gain=0.25, inst="thud"))
         bar.update()
         # Shown its channel again, as a song panel does when the playing moves on, the bar leaves it to the hand.
         bar.show("walk", "lead", theme.SONG)
-        self.assertEqual((bar.level.value, bar.inst.picked, bar.pan.show(bar.pan.value), bar.busy),
+        self.assertEqual((bar.volume.value, bar.inst.picked, bar.pan.show(bar.pan.value), bar.busy),
                          (0.5, 2, "L 10", True))
         # The release saves the pan beside what was written outside, and the bar then shows what the file holds.
         self.ui.handle(Event("up", mouse, button=1))
         self.assertEqual(self.channel(), {"inst": "thud", "gain": 0.25, "pan": -0.1, "echo": ECHO})
-        self.assertEqual((bar.level.value, bar.inst.picked, bar.pan.value, self.session.message),
+        self.assertEqual((bar.volume.value, bar.inst.picked, bar.pan.value, self.session.message),
                          (0.25, 3, -0.1, ""))
 
     def test_another_channel_shown_while_a_knob_is_dragged_takes_the_bar_and_nothing_is_saved(self) -> None:
         bar, before = self.bar, self.data()
-        x, y = self.drag(bar.level, 5, let_go=False)
+        x, y = self.drag(bar.volume, 5, let_go=False)
         bar.show("walk", "kit", theme.SALMON)
-        self.assertEqual((bar.busy, bar.name.text, bar.level.value), (False, "kit", 0.6))
+        self.assertEqual((bar.busy, bar.name.text, bar.volume.value), (False, "kit", 0.6))
         self.ui.handle(Event("move", (x, y - 5)))
         self.ui.handle(Event("up", (x, y - 5), button=1))
-        self.assertEqual((self.data(), self.session.can_undo, bar.level.value), (before, False, 0.6))
+        self.assertEqual((self.data(), self.session.can_undo, bar.volume.value), (before, False, 0.6))
 
     def test_a_change_that_is_refused_leaves_the_widget_showing_what_the_file_holds_and_the_session_says_why(
             self) -> None:
@@ -402,10 +394,10 @@ class Saved(Opened):
         self.assertEqual((bar.inst.options[bar.inst.picked], self.session.message),
                          ("tone", "songs.walk.channels.lead.inst: no instrument named 'own'"))
         bar.show("walk", "low", theme.SOUND)
-        self.drag(bar.level, -10)
-        self.assertEqual((bar.level.value, self.session.message), (1, "songs.walk.channels has no key 'low'"))
+        self.drag(bar.volume, -10)
+        self.assertEqual((bar.volume.value, self.session.message), (1, "songs.walk.channels has no key 'low'"))
         click(self.ui, middle(bar.echo.rect))
-        self.assertEqual((bar.echo.is_on, bar.after.visible, self.session.message),
+        self.assertEqual((bar.echo.is_on, bar.time.visible, self.session.message),
                          (False, False, "songs.walk.channels has no key 'low'"))
         # Nothing was saved, no step was kept, and no instrument was heard.
         self.assertEqual((self.data(), self.session.can_undo, self.session.messages, self.heard()),
@@ -417,11 +409,11 @@ class Drawn(Opened):
     def test_the_lit_travel_of_the_level_knob_grows_when_its_value_is_raised(self) -> None:
         surface = pygame.Surface((960, 540))
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
-        x, y, w, h = self.bar.level.rect
+        x, y, w, h = self.bar.volume.rect
         lit = []
         for up in (0, 30):
             if up:
-                self.drag(self.bar.level, up)
+                self.drag(self.bar.volume, up)
             surface.fill(theme.PANEL)
             self.ui.draw(canvas)
             lit.append(sum(surface.get_at((x + column, y + row))[:3] == theme.SONG

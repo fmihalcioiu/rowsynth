@@ -76,6 +76,7 @@ class Events(unittest.TestCase):
     def test_an_event_cannot_be_changed_and_what_it_is_not_told_is_empty(self) -> None:
         event = Event("move", (3, 4))
         self.assertEqual((event.button, event.wheel, event.key, event.mods, event.text), (0, 0, "", frozenset(), ""))
+        self.assertFalse(event.double)
         with self.assertRaises(dataclasses.FrozenInstanceError):
             event.pos = (5, 6)
         with self.assertRaises(RowSynthError) as refused:
@@ -167,6 +168,63 @@ class Handing(unittest.TestCase):
         self.assertTrue(ui.handle(Event("key", key="space")))
         self.assertEqual((ui.focus, called, deaf.seen, keen.seen),
                          (keen, ["play", "undo", "play"], ["down", "up", "key"], ["down", "up", "key"]))
+
+
+class Twice(unittest.TestCase):
+    def setUp(self) -> None:
+        self.now = 10.0
+        self.ui = Ui(lambda: self.now)
+        self.doubles: list[tuple[str, bool]] = []
+
+    def taker(self, rect: layout.Rect, called: str, uses: bool = True) -> Widget:
+        """A widget on the Ui that notes each press it is offered, with whether it was a double one."""
+        outer = self
+
+        class Taker(Widget):
+            def on(self, event: Event, ui: Ui) -> bool:
+                if event.kind == "down":
+                    outer.doubles.append((called, event.double))
+                return uses and event.kind == "down"
+
+        return self.ui.add(Taker(rect))
+
+    def press(self, pos: tuple[int, int], after: float = 0.1, button: int = 1) -> bool:
+        """Press a button at a position so many seconds after the press before, and let it go. Was it double."""
+        self.now += after
+        click(self.ui, pos, button)
+        return self.doubles[-1][1]
+
+    def test_a_press_that_follows_another_on_the_same_widget_soon_and_near_is_a_double_press(self) -> None:
+        self.taker((0, 0, 40, 40), "a")
+        self.taker((50, 0, 40, 40), "b")
+        # The second of two is double, and the one after it is a first one again.
+        self.assertEqual([self.press((10, 10)), self.press((13, 7)), self.press((13, 7)), self.press((13, 7))],
+                         [False, True, False, True])
+        self.assertEqual((theme.DOUBLE_PRESS, theme.DOUBLE_REACH), (0.4, 3))
+        # Later than the time, further than the reach either way, with another button, and on another widget.
+        self.press((10, 10))
+        self.assertEqual([self.press((10, 10), 0.41), self.press((14, 10)), self.press((14, 14)),
+                          self.press((14, 14), button=3), self.press((60, 14))], [False] * 5)
+        self.assertEqual([self.press((60, 14), 0.3), self.press((10, 10))], [True, False])
+
+    def test_a_press_no_widget_used_is_no_first_press_and_one_a_widget_passed_on_does_not_stand_between_two(
+            self) -> None:
+        self.taker((0, 0, 40, 40), "under")
+        self.taker((0, 0, 20, 40), "over", uses=False)
+        # Both are offered each press, the one on top first, and it is the one that uses them that has the two.
+        self.press((10, 10))
+        self.press((10, 10))
+        self.assertEqual(self.doubles, [("over", False), ("under", False), ("over", False), ("under", True)])
+        # A press on empty ground between two is the end of the first.
+        self.assertEqual([self.press((30, 10)), click(self.ui, (90, 90)), self.press((30, 10))], [False, False, False])
+        # A widget that is open over the others is handed its own second press as a double one.
+        top = Probe((0, 0, 99, 99))
+        seen: list[tuple[str, bool]] = []
+        top.on = lambda event, ui: seen.append((event.kind, event.double)) or True
+        self.ui.open(top)
+        for _ in range(2):
+            click(self.ui, (30, 10))
+        self.assertEqual(seen, [("down", False), ("up", False), ("down", True), ("up", False)])
 
 
 class Focus(unittest.TestCase):
@@ -420,6 +478,20 @@ class Drawn(unittest.TestCase):
         button.visible = label.visible = False
         self.ui.draw(self.canvas)
         self.assertEqual(self.colours((0, 0, 100, 30)), {theme.PANEL})
+
+    def test_a_button_that_opens_a_list_has_a_small_dim_arrow_after_its_text_that_points_down(self) -> None:
+        # The 23 pixels of the text, 3 of air and the 5 of the arrow stand in the middle of the 50, from x 19.
+        self.ui.add(Button((10, 5, 50, 13), "KIND", arrow=True))
+        plain = self.ui.add(Button((10, 18, 50, 12), "KIND"))
+        self.ui.draw(self.canvas)
+        dim = {(x, y) for x in range(100) for y in range(30) if self.at(x, y) == theme.DIM}
+        self.assertEqual(dim, {(45 + step + column, 10 + step) for step in range(3) for column in range(5 - 2 * step)})
+        inked = sorted(x for x in range(10, 60) if theme.TEXT in self.colours((x, 5, 1, 13)))
+        self.assertEqual((inked[0], inked[-1] < 45, plain.arrow), (19, True, False))
+        # Sunk, the arrow sits a pixel lower with the text.
+        self.ui.handle(Event("down", (12, 11), button=1))
+        self.ui.draw(self.canvas)
+        self.assertEqual((self.at(47, 13), self.at(47, 10)), (theme.DIM, theme.BACKGROUND))
 
     def test_what_is_on_has_its_text_and_a_strip_along_its_lower_edge_in_its_colour(self) -> None:
         toggle = self.ui.add(Toggle((10, 5, 40, 13), "LOOP", colour=theme.SONG))

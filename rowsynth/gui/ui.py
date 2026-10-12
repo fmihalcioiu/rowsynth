@@ -1,8 +1,9 @@
 """The kit: what the user did as plain events, the widgets that take them and draw, and the Ui that holds them."""
 from __future__ import annotations
 
+import time
 from collections.abc import Callable, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
@@ -33,7 +34,8 @@ class Event:
     `pos` is where the mouse is, in art pixels. `button` is 1 for the left, 2 for the middle and 3 for the right.
     `wheel` is in steps, and up is positive. `key` is pygame's name of the key, such as "space" or "z". `mods` holds
     those of "ctrl", "shift" and "alt" that are held. `text` is the characters of a "text": what was typed, as
-    the system makes it of the keys, which is not the name of a key.
+    the system makes it of the keys, which is not the name of a key. `double` is of a "down" as a widget is
+    handed it: whether it is the second of two presses on that widget, as the `Ui` tells them.
     """
 
     kind: str
@@ -43,6 +45,7 @@ class Event:
     key: str = ""
     mods: frozenset[str] = frozenset()
     text: str = ""
+    double: bool = False
 
     def __post_init__(self) -> None:
         if self.kind not in KINDS:
@@ -148,9 +151,15 @@ class Ui:
     `modal` is the one widget that is open over all the others, or None: a menu, or a box that is typed into.
     While there is one, every event goes to it alone, wherever the mouse is. `size` is the size of the art
     surface, as the last frame was drawn on it.
+
+    `clock` gives the time in seconds, which two presses are told apart by. A press that a widget uses within
+    `theme.DOUBLE_PRESS` seconds of the one it used before, with the same button and no more than
+    `theme.DOUBLE_REACH` pixels from it either way, is handed to that widget as a double press. The press after
+    a double press is a first one again.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, clock: Callable[[], float] = time.perf_counter) -> None:
+        self.clock = clock
         self.widgets: list[Widget] = []
         self.keys: dict[tuple[str, frozenset[str]], Callable[[], object]] = {}
         self.mouse: Pos = NOWHERE
@@ -159,6 +168,8 @@ class Ui:
         self.modal: Widget | None = None
         self.size: tuple[int, int] = theme.DESIGN
         self._button = 0
+        # The press that was used last and can be the first of two: its widget, its time, its place and its button.
+        self._last: tuple[Widget, float, Pos, int] | None = None
         self._focus: Widget | None = None
         # Whether the event before this one was a key that no widget that takes text was handed.
         self._was_key = False
@@ -260,21 +271,37 @@ class Ui:
             if event.kind == "up" and event.button == self._button:
                 self.held = None
             return True
+        now = self.clock() if event.kind == "down" else 0.0
         if self.modal is not None:
             modal = self.modal
-            modal.on(event, self)
+            self._press(event, modal, now)
             if event.kind == "down":
                 self.held, self._button = modal, event.button
             return True
         for widget in self._live():
-            if widget.hit(event.pos) and widget.on(event, self):
+            if widget.hit(event.pos) and self._press(event, widget, now):
                 if event.kind == "down":
                     self.held, self._button = widget, event.button
                     self._focus = widget
                 return True
         if event.kind == "down":
-            self._focus = None
+            self._focus = self._last = None
         return False
+
+    def _press(self, event: Event, widget: Widget, now: float) -> bool:
+        """Hand a widget what the mouse did, a press that is the second of two on it marked as double: was it used.
+
+        `now` is the time of a press. One that is used is kept as the press the next is held against, and a
+        double press is kept as none: the press after it is a first one again.
+        """
+        last = self._last
+        double = (event.kind == "down" and last is not None and last[0] is widget and last[3] == event.button
+                  and now - last[1] <= theme.DOUBLE_PRESS
+                  and max(abs(event.pos[0] - last[2][0]), abs(event.pos[1] - last[2][1])) <= theme.DOUBLE_REACH)
+        used = bool(widget.on(replace(event, double=True) if double else event, self))
+        if event.kind == "down" and (used or widget is self.modal):
+            self._last = None if double else (widget, now, event.pos, event.button)
+        return used
 
     def _typed(self, event: Event, said: bool) -> bool:
         """Hand a key or typed characters to the widget that has the focus, and a key it leaves to `keys`.
@@ -334,11 +361,12 @@ class Label(Widget):
 
 
 def draw_button(canvas: Canvas, rect: Rect, text: str = "", icon: str = "", ink: Colour = theme.TEXT,
-                hot: bool = False, pressed: bool = False, strip: Colour | None = None) -> None:
+                hot: bool = False, pressed: bool = False, strip: Colour | None = None, arrow: bool = False) -> None:
     """Draw a button: its face and outline, then its icon, its text, or its icon and then its text, in the middle.
 
     The face is lit when `hot`. When `pressed` it is sunk, and what is on it sits one pixel lower. `strip` is the
-    colour of a strip along the lower edge.
+    colour of a strip along the lower edge. With `arrow` a small dim arrow that points down stands after the
+    text: the mark of a button that opens a list.
     """
     x, y, w, h = rect
     canvas.box(rect, theme.BACKGROUND if pressed else theme.LIT if hot else theme.RAISED)
@@ -350,27 +378,34 @@ def draw_button(canvas: Canvas, rect: Rect, text: str = "", icon: str = "", ink:
         canvas.box((x, y + h - theme.STRIP, w, theme.STRIP), strip)
     icon_w, icon_h = canvas.icon_size(icon) if icon else (0, 0)
     gap = theme.GAP if icon and text else 0
-    shown = fit(text, w - 2 * theme.PAD - icon_w - gap)
-    left = x + (w - icon_w - gap - Font.width(shown)) // 2
+    tail = theme.GAP + theme.DOWN_ARROW if arrow else 0
+    shown = fit(text, w - 2 * theme.PAD - icon_w - gap - tail)
+    left = x + (w - icon_w - gap - Font.width(shown) - tail) // 2
     top = y + int(pressed)
     with canvas.clip(rect):
         if icon:
             canvas.icon(icon, left, top + (h - icon_h) // 2, ink)
         canvas.text_in(shown, (left + icon_w + gap, top, Font.width(shown), h), ink)
+        deep = (theme.DOWN_ARROW + 1) // 2 if arrow else 0
+        for step in range(deep):
+            canvas.hline(left + icon_w + gap + Font.width(shown) + theme.GAP + step, top + (h - deep) // 2 + step,
+                         theme.DOWN_ARROW - 2 * step, theme.DIM)
 
 
 class Button(Widget):
     """A button with an icon, a text, or an icon and then a text. `action` is called when it is pressed.
 
-    It is pressed by the left button, on the release, and only when the release is still on it.
+    It is pressed by the left button, on the release, and only when the release is still on it. One with an
+    `arrow` has a small arrow after its text that points down: a left press on it opens a list.
     """
 
     def __init__(self, rect: Rect, text: str = "", icon: str = "", action: Callable[[], object] | None = None,
-                 help: str = "") -> None:
+                 help: str = "", arrow: bool = False) -> None:
         super().__init__(rect, help)
         self.text = text
         self.icon = icon
         self.action = action
+        self.arrow = arrow
 
     def on(self, event: Event, ui: Ui) -> bool:
         """Use a press of the left button, and fire on its release when that is still on the button."""
@@ -388,7 +423,7 @@ class Button(Widget):
     def draw(self, canvas: Canvas) -> None:
         """Draw it raised, lit when hot, and sunk while it is held with the mouse on it. Dim when not enabled."""
         draw_button(canvas, self.rect, self.text, self.icon, theme.TEXT if self.enabled else theme.DIM,
-                    self.hot, self.hot and self.held)
+                    self.hot, self.hot and self.held, arrow=self.arrow)
 
 
 class Toggle(Button):

@@ -154,8 +154,47 @@ TEXT_PAD = 3
 TEXT_BOX_H = 13
 TEXT_BOX_MIN_W = 72
 
-# A press on a row that follows another press on the same row within this many seconds is a double press.
+# A press that follows another press on the same thing within this many seconds is a double press, where the
+# mouse has strayed no more than DOUBLE_REACH pixels either way between the two.
 DOUBLE_PRESS = 0.4
+DOUBLE_REACH = 3
+
+# The skeleton the editors of a song, a sound and an instrument share, from the top: a heading of one line, the bar
+# of the settings, the main area with a column down its side, and a foot. How high the heading, the bar and the
+# foot are, and how wide the side column is.
+HEAD_H = 17
+BAR_H = 40
+FOOT_H = 72
+SIDE_W = 124
+# A small button, as a heading and a settings bar have them: how high it is. A button that opens a list has a small
+# arrow after its text that points down: how wide the arrow is at its back. It is half that high, rounded up.
+BUTTON_H = 13
+DOWN_ARROW = 5
+# A heading: from its kind to its name, and from its name to the facts after it.
+HEAD_SPACE = 6
+HEAD_FACTS = 12
+# A settings bar. From its top to the row of its controls, and how high that row is: a knob with the line of its
+# name over it and the line of its value under it. From one control to the next.
+BAR_TOP = 2
+BAR_ROW_H = 37
+BAR_GAP = 6
+# The upright keyboard beside a grid: how wide it is, how high a key is, and the share of its width a black key
+# takes. A key lower than KEY_LINES_FROM has no outline. How much of its light a white key keeps under the mouse.
+KEYS_W = 40
+KEY_H = 11
+KEY_BLACK = 0.6
+KEY_LINES_FROM = 4
+KEY_HOT = 0.85
+# The scroll bar of a grid: how thick it is, and how far it keeps from the grid.
+SCROLL_W = 4
+SCROLL_GAP = 1
+# The velocity lane: how wide the bar of a note is where the note is not narrower, and from the outline of the lane
+# to the bars, the outline counted.
+VELOCITY_W = 3
+VELOCITY_PAD = 2
+# The small button that adds one more of something: its side, and how long each of the two strokes of its plus.
+PLUS = 11
+PLUS_STROKE = 5
 # The file chooser. How wide and how high its box is, and from a side of it to what it shows. How high the line
 # of its title is, and each of the two under it: the folder it is in, and what it has to say. Between two of its
 # parts. How high the row at its foot is, where the name is typed, and how wide each of the two buttons there.

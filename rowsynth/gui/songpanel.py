@@ -1,4 +1,4 @@
-"""The middle of the window for a song: its order, and under it a pattern of one channel or the mixer of them all."""
+"""The middle of the window for a song: its heading, its order, its settings, the notes of a channel or the mixer."""
 from __future__ import annotations
 
 import json
@@ -9,11 +9,12 @@ from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
 from ..note import TICK_HZ
-from . import channelbar, chordview, songedit, songview, theme
+from . import chordview, roll, songedit, songview, theme
 from .channelbar import ChannelBar
 from .chordview import ChordBox
 from .dials import Stepper, plain
 from .font import Font
+from .kit import Heading, Slot, told
 from .layerview import Layers
 from .layout import Rect
 from .lists import List, Row
@@ -35,42 +36,40 @@ if TYPE_CHECKING:
 
 #: From the sides of the panel to its parts, and from one part to the next.
 MARGIN = 4
+GAP = 2
 #: How high the song strip is. Under the names of its blocks that leaves 54 pixels for the lanes of the channels:
 #: 3 for each of 18 channels, the least at which a note has three heights and two drum channels stand apart.
 STRIP_H = 74
-#: How wide the list of the channels is, its frame counted. The view takes what is left beside it.
-CHANNELS_W = 128
-#: From the frame of a part to what stands in it.
+#: From the frame of the side column to the list of the channels in it, and from the frame the mixer and the
+#: layers stand in to what stands in it.
+LIST_INSET = 2
 INSET = 3
-#: From the top of the view's part to the roll or the steps: the room the bar of the picked channel stands in.
-HEAD_H = INSET + channelbar.HEIGHT + 2
-#: From the top of the channels' part to the list, and from the top of the mixer's part to its strips: the room
-#: the choice of what is shown stands in.
-PICK_H = INSET + channelbar.BUTTON_H + 2
 
-#: What the three things are called that the panel shows under the strip, one at a time: a pattern as the notes
-#: of a channel, the mixer of all the channels, and the layers of the song with its intro.
+#: What the song is headed as, and the three things the panel shows under its settings, one at a time: a pattern
+#: as the notes of a channel, the mixer of all the channels, and the layers of the song with its intro.
+SONG = "SONG"
 NOTES = "NOTES"
 MIXER = "MIXER"
 LAYERS = "LAYERS"
 #: What the two headings of the list of channels read.
 TUNED = "TUNED"
 DRUMS = "DRUMS"
-#: What the list of the channels says of itself where the mouse is on no row, and the roll and the steps where a
-#: press would do nothing.
-LIST_HELP = "the channels of the song: a dim one is not heard just now, or this pattern has nothing written for it"
-ROLL_HELP = ("the wheel moves along the keys, with shift along the rows, and with ctrl it zooms: the right button "
-             "removes a note")
+#: What the wheel does over the list of the channels, as the help line says it. What the list says of itself where
+#: the mouse is on no row, and the roll and the steps where a press would do nothing.
+LIST_WHEEL = "along the channels"
+LIST_HELP = f"a dim channel is not heard just now, or has nothing in this pattern   {told(wheel=LIST_WHEEL)}"
+ROLL_HELP = told(wheel=roll.WHEEL_HELP)
 STEPS_HELP = "a lane for each drum: the wheel on a hit sets its level, and anywhere else it moves along the lanes"
 #: What is said, after the channel and its pattern, of an edit that ended after the channel was changed outside.
 MEANWHILE = "was changed outside while it was edited here: this edit stands, and undo brings the other back"
-#: The song's own settings are two lines, each as high as a small button: its tempo and its key. These are the
-#: words the two start with, how wide the room of such a word is, its air counted, and how high the settings
-#: are where one stands over the other.
+#: The song's own settings stand at the right end of the settings bar: its tempo, then the room of the stepper of
+#: its grid, and its key. These are what the tempo and the key are called there, and how wide the three are. The
+#: key is a small button at each end, and between them the room of a count of two figures with its sign.
 TEMPO = "TEMPO"
 KEY = "KEY"
-WORD_W = Font.width(TEMPO) + theme.GAP
-SONG_H = 2 * channelbar.BUTTON_H + 2
+TEMPO_W = 56
+GRID_W = 34
+KEY_W = 2 * theme.BUTTON_H + Font.width("+12") + 2 * theme.GAP + 1
 #: What is said, after the name of the song, where its order or its channels were changed outside while a block
 #: was carried here, or a menu or a box was open.
 ELSEWHERE = "was changed outside meanwhile, so nothing was done here"
@@ -209,87 +208,104 @@ def channel_rows(channels: Sequence[Channel], heard: Collection[str] | None = No
 def channel_help(row: Row) -> str:
     """The line of help of a row of the list of the channels: of a heading, and of a channel by its name."""
     if row.head:
-        return "click to fold these channels away or bring them back"
-    return f"click to show channel {row.key}, or press the right button for more"
+        return told("fold these channels away or bring them back", wheel=LIST_WHEEL)
+    return told(f"show channel {row.key}, twice to rename it", "its menu", LIST_WHEEL)
+
+
+def facts(song: dict) -> str:
+    """The few facts the heading has of a song: how many patterns it has, and how many channels."""
+    counts = ((len(song.get("patterns", ())), "pattern"), (len(song.get("channels", ())), "channel"))
+    return ", ".join(f"{count} {word}{'' if count == 1 else 's'}" for count, word in counts)
 
 
 def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
-    "strip" runs along the top, `STRIP_H` high. Under it "channels" stands at the left, `CHANNELS_W` wide: inside
-    its frame "choice" is at the top, where NOTES or MIXER is chosen, under it "song", the room of the song's
-    own settings, and "list" under that. "view" takes the rest: "bar" along its top, which is where the
-    settings of the picked channel go as `channelbar.arrange` lays them out, and under it "body", which is
-    where the roll or the steps go.
+    They are the skeleton every editor has, from the top: "head" is the heading, `theme.HEAD_H` high, "strip"
+    the order of the song, `STRIP_H` high, and "bar" the settings bar, `theme.BAR_H` high. "foot" is at the
+    lower end, `theme.FOOT_H` high: the velocity lane stands in it. The main area is what is left between the
+    bar and the foot: "side" is the column down its left, `theme.SIDE_W` wide, with "list", the list of the
+    channels, inside its frame, and "body" is the rest, which is where the roll or the steps go.
 
-    "mixer" is all there is under the strip, where the mixer stands in place of the channels and the view. The
-    choice is at the top of its frame as it is of the channels', and "desk" is the room under the choice, as
-    wide as the frame lets it be: that is where the strips of the mixer go. "beside" is the rest of the line
-    the choice is on, which is where the song's own settings go while the mixer is shown.
+    "mixer" is the main area and the foot together, where the mixer or the layers stand in place of the notes,
+    and "desk" is the room inside its frame.
     """
     x, y, w, h = rect
-    top, high = y + 2 * MARGIN + STRIP_H, h - 3 * MARGIN - STRIP_H
-    left, wide = x + 2 * MARGIN + CHANNELS_W, w - 3 * MARGIN - CHANNELS_W
-    inner, down = CHANNELS_W - 2 * INSET, PICK_H + SONG_H + 2
+    left, wide, end = x + MARGIN, w - 2 * MARGIN, y + h - MARGIN
+    strip = y + MARGIN + theme.HEAD_H + GAP
+    bar = strip + STRIP_H + GAP
+    top = bar + theme.BAR_H + GAP
+    foot = max(top, end - theme.FOOT_H)
+    high = foot - GAP - top
     placed = {
-        "strip": (x + MARGIN, y + MARGIN, w - 2 * MARGIN, STRIP_H),
-        "channels": (x + MARGIN, top, CHANNELS_W, high),
-        "choice": (x + MARGIN + INSET, top + INSET, inner, channelbar.BUTTON_H),
-        "song": (x + MARGIN + INSET, top + PICK_H, inner, SONG_H),
-        "list": (x + MARGIN + INSET, top + down, inner, high - down - INSET),
-        "beside": (x + MARGIN + INSET + inner + channelbar.SPACE, top + INSET,
-                   w - 2 * MARGIN - 2 * INSET - inner - channelbar.SPACE, channelbar.BUTTON_H),
-        "view": (left, top, wide, high),
-        "bar": (left + INSET, top + INSET, wide - 2 * INSET, channelbar.HEIGHT),
-        "body": (left + INSET, top + HEAD_H, wide - 2 * INSET, high - HEAD_H - INSET),
-        "mixer": (x + MARGIN, top, w - 2 * MARGIN, high),
-        "desk": (x + MARGIN + INSET, top + PICK_H, w - 2 * MARGIN - 2 * INSET, high - PICK_H - INSET),
+        "head": (left, y + MARGIN, wide, theme.HEAD_H),
+        "strip": (left, strip, wide, STRIP_H),
+        "bar": (left, bar, wide, theme.BAR_H),
+        "side": (left, top, theme.SIDE_W, high),
+        "list": (left + LIST_INSET, top + LIST_INSET, theme.SIDE_W - 2 * LIST_INSET, high - 2 * LIST_INSET),
+        "body": (left + theme.SIDE_W + GAP, top, wide - theme.SIDE_W - GAP, high),
+        "foot": (left, foot, wide, theme.FOOT_H),
+        "mixer": (left, top, wide, end - top),
+        "desk": (left + INSET, top + INSET, wide - 2 * INSET, end - top - 2 * INSET),
     }
     return {part: within(place, rect) for part, place in placed.items()}
 
 
-def song_parts(room: Rect) -> dict[str, Rect]:
-    """Where the song's own settings go in the room they have, each by what it is called, and each cut to the room.
+def key_parts(room: Rect) -> tuple[Rect, Rect, Rect]:
+    """Where the three widgets of the song's key go in the room they have in the settings bar, from the left.
 
-    A setting is one line, as wide as the list of the channels where the room lets it be: its word at the left,
-    "tempo_word" or "key_word", and after it what is set. For the tempo that is "tempo", the field of a stepper.
-    For the key it is "lower" and "higher", a small button at each end, and between them "shifted", where the
-    count stands. In a room high enough for two lines the tempo stands over the key. In a lower one they are
-    side by side, the tempo first.
+    A button that is as wide as it is high stands at each end, the one that moves the song lower first, and
+    the count of the semitones it was moved has the room between them.
     """
     x, y, w, h = room
-    side = channelbar.BUTTON_H
-    wide = min(w, CHANNELS_W - 2 * INSET)
-    left, top = (x, y + side + 2) if h >= SONG_H else (x + wide + theme.GROUP_GAP, y)
-    placed = {
-        "tempo_word": (x, y, WORD_W, side),
-        "tempo": (x + WORD_W, y, wide - WORD_W, side),
-        "key_word": (left, top, WORD_W, side),
-        "lower": (left + WORD_W, top, side, side),
-        "shifted": (left + WORD_W + side, top, wide - WORD_W - 2 * side, side),
-        "higher": (left + wide - side, top, side, side),
-    }
-    return {part: within(place, room) for part, place in placed.items()}
+    side = min(h, w // 2)
+    return (x, y, side, h), (x + side, y, w - 2 * side, h), (x + w - side, y, side, h)
+
+
+class Channels(List):
+    """The list of the channels of a song, down the side of its notes: a double press on a channel renames it.
+
+    `named` is called with the name of the channel that the second of two presses is on, for its owner to
+    open the box the name is typed in. The first of the two has picked the channel, as any press does.
+    """
+
+    def __init__(self, rect: Rect, changed: Callable[[str], object] | None = None, help: str = "",
+                 asked: Callable[[str, Pos], object] | None = None,
+                 named: Callable[[str], object] | None = None) -> None:
+        super().__init__(rect, changed=changed, help=help, asked=asked)
+        self.named = named
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Tell of a double press of the left button on a channel, and leave anything else to the list."""
+        row = self.at(event.pos) if event.kind == "down" and event.button == 1 and event.double else None
+        if row is None or row.head or self.named is None:
+            return super().on(event, ui)
+        self.named(row.key)
+        return True
 
 
 class SongPanel(Panel):
-    """The middle of the window: the picked song as its order, and under that its notes or its mixer.
+    """The middle of the window: the picked song under its heading, as its order, its settings and its notes.
 
-    `strip` is the order as blocks. `strip.picked` is the picked place in it, which the panel keeps nowhere else:
-    it is None for a song with no order. `channel` is the name of the picked channel. A tuned channel is shown in
-    `roll`. With a drum channel picked, `steps` shows the drums of the pattern from all its drum channels
-    together, the picked one's labels lit. One of the two is seen at a time. Over them `bar` has the settings
-    of the picked channel, which are changed there, and the toggles FOLLOW and GHOSTS. While a sound, an
-    instrument or nothing is picked the panel shows nothing. A song the engine refuses is not shown: `fault`
-    has the refusal's words. The song is read, and the strip shown it, when another thing is picked and when
-    the model has loaded its file again, and at no other time.
+    It is laid out as every editor is. `heading` says what song it is, and how many patterns and channels it
+    has. `strip` is the order as blocks. `strip.picked` is the picked place in it, which the panel keeps nowhere
+    else: it is None for a song with no order. `bar` is the settings bar: the settings of the picked channel,
+    which are changed there, at its right end the song's own, and the toggles FOLLOW and GHOSTS. `channel` is
+    the name of the picked channel. `list` is the side column, the channels of the song. A tuned channel is
+    shown in `roll`, between its keyboard and its scroll bars, with its velocity lane in the foot. With a drum
+    channel picked, `steps` shows the drums of the pattern from all its drum channels together, the picked
+    one's labels lit. One of the two is seen at a time. While a sound, an instrument or nothing is picked the
+    panel shows nothing. A song the engine refuses is not shown: `fault` has the refusal's words. The song is
+    read, and the strip shown it, when another thing is picked and when the model has loaded its file again,
+    and at no other time.
 
-    `choice` is what stands under the strip: NOTES is the list of the channels with the bar and the view of
-    the picked one, and MIXER is `mixer`, every channel side by side, in place of all three. It stays as it was
-    chosen for as long as the song stays picked, and another song starts with its notes. A press on the name
-    of a channel in the mixer picks that channel and shows its notes. In the list a channel that is not heard
-    just now, muted or silenced by the solo of another, is dim, as one the pattern has no text for is.
-    LAYERS is `layers`, in the room the mixer has: the groups and the versions of the song, and its intro.
+    `choice` stands at the right end of the heading, and is what stands under the settings bar: NOTES is the
+    list of the channels with the view of the picked one and the lane, and MIXER is `mixer`, every channel side
+    by side, in place of all three. It stays as it was chosen for as long as the song stays picked, and another
+    song starts with its notes. A press on the name of a channel in the mixer picks that channel and shows its
+    notes. In the list a channel that is not heard just now, muted or silenced by the solo of another, is dim,
+    as one the pattern has no text for is. LAYERS is `layers`, in the room the mixer has: the groups and the
+    versions of the song, and its intro.
 
     What the mouse and the keys make of the notes in the roll or the steps is saved at once: the channel's notes
     are written as its text for the pattern, and that is one change to the file, and one step that can be taken
@@ -310,7 +326,8 @@ class SongPanel(Panel):
     after it, name it anew, make it longer or shorter, and take the block out. The right button on a channel of
     the list opens one to name it anew, move it up or down, make a new channel that plays its instrument, and
     remove it. A name, and the bars of a pattern, are typed into a box that opens over the name: a double
-    press on the name of a block opens it as well. A text that is refused leaves the box open, so that the
+    press on the name of a block opens it as well, and so does one on a channel of the list. A text that is
+    refused leaves the box open, so that the
     reason can be read and the text mended. A new block, and a new channel, is the picked one. Anything else
     leaves picked what was, where the song still has it: a pattern and a channel also under a new name.
 
@@ -322,10 +339,11 @@ class SongPanel(Panel):
     `chordview.ChordBox`, where a chord is made of a root and a kind and named. It is added to the chords of the
     project and set on the bar as one: one write to the file, and one step that can be taken back.
 
-    `tempo` and the two buttons `lower` and `higher` are the song's own settings. They stand under the choice,
-    and beside it while the mixer is shown. The tempo is one of those `tempo_steps` gives, shown in beats a
-    minute. The buttons move every tuned note of the song a semitone down or up, and `shifted` between them
-    counts the semitones since the song was opened: a move that is taken back is counted back.
+    `tempo` and the two buttons `lower` and `higher` are the song's own settings. They stand at the right end
+    of the settings bar, whatever is shown under it. The tempo is one of those `tempo_steps` gives, shown in
+    beats a minute. The buttons move every tuned note of the song a semitone down or up, and `shifted` between
+    them counts the semitones since the song was opened: a move that is taken back is counted back. Between
+    the tempo and the key the bar has the room of one more stepper, that of the song's grid.
 
     A press on a block of the strip counts as a gesture under way from the press to its release, and so does a
     menu or a box of the panel's for as long as it is open. Where the order or the channels of the song were
@@ -335,32 +353,34 @@ class SongPanel(Panel):
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
         nowhere = (0, 0, 0, 0)
+        # The heading and the bar are added before what stands on them, so that they are drawn under it.
+        self.heading = self.add(Heading(nowhere, SONG, theme.SONG))
+        self.choice = self.add(Choice(nowhere, (NOTES, MIXER, LAYERS), changed=lambda index: self._seen(), help=told(
+            "show the notes of one channel, the mixer of them all, or the layers and the intro")))
         self.strip = self.add(SongStrip(nowhere, changed=lambda place: self._view(),
                                         help="the patterns in the order they play: a click shows one",
                                         moved=self._moved, copied=self._copied, asked=self._ask_block,
                                         named=self._rename))
-        self.choice = self.add(Choice(nowhere, (NOTES, MIXER, LAYERS), changed=lambda index: self._seen(),
-                                      help="the notes of one channel, the levels of them all, or the layers and intro"))
-        self.list = self.add(List(nowhere, changed=self._pick, help=LIST_HELP, asked=self._ask_channel))
-        self.list.told = channel_help
         self.bar = ChannelBar(self)
+        self.tempo = self.add(Stepper(nowhere, ("",), changed=self._tempo, help=told(
+            "an arrow steps the tempo, in beats a minute", wheel="steps it")))
+        self.lower = self.add(Button(nowhere, "-", action=lambda: self._shift(-1),
+                                     help=told("every tuned note of the song a semitone lower")))
+        self.shifted = self.add(Label(nowhere, shift_text(0), theme.TEXT, "centre"))
+        self.higher = self.add(Button(nowhere, "+", action=lambda: self._shift(1),
+                                      help=told("every tuned note of the song a semitone higher")))
+        # The song's own settings, which stand in the settings bar.
+        self._settings: tuple[Widget, ...] = (self.tempo, self.lower, self.shifted, self.higher)
+        self.list = self.add(Channels(nowhere, changed=self._pick, help=LIST_HELP, asked=self._ask_channel,
+                                      named=self._rename_channel))
+        self.list.told = channel_help
         self.roll = self.add(Roll(nowhere, ROLL_HELP,
                                   edited=lambda notes, label: self._save(self.roll.channel, notes, label),
                                   sounded=self._sound, typed=self._key, chord_asked=self._ask_chord))
+        for part in self.roll.parts:
+            self.add(part)
         self.steps = self.add(Steps(nowhere, STEPS_HELP, edited=self._save, sounded=self._drum))
         self.fault = self.add(Label(nowhere, "", theme.FAULT, "centre"))
-        self.tempo = self.add(Stepper(nowhere, ("",), changed=self._tempo,
-                                      help="how fast the song plays, in beats a minute"))
-        self.lower = self.add(Button(nowhere, "-", action=lambda: self._shift(-1),
-                                     help="every tuned note of the song a semitone lower"))
-        self.shifted = self.add(Label(nowhere, shift_text(0), theme.TEXT, "centre"))
-        self.higher = self.add(Button(nowhere, "+", action=lambda: self._shift(1),
-                                      help="every tuned note of the song a semitone higher"))
-        # The song's own settings by the part of their room each stands in.
-        self._settings: dict[str, Widget] = {
-            "tempo_word": self.add(Label(nowhere, TEMPO)), "tempo": self.tempo,
-            "key_word": self.add(Label(nowhere, KEY)), "lower": self.lower, "shifted": self.shifted,
-            "higher": self.higher}
         self.layers = Layers(self)
         self.mixer = Mixer(self, picked=self._choose)
         self.channel: str | None = None
@@ -400,9 +420,14 @@ class SongPanel(Panel):
         """Take the panel's rectangle, and lay the widgets out in it as `arrange` has them."""
         super().place(rect)
         self._parts = parts = arrange(rect)
-        self.strip.rect, self.choice.rect, self.list.rect = parts["strip"], parts["choice"], parts["list"]
-        self.bar.place(parts["bar"])
+        self.heading.rect, self.strip.rect, self.list.rect = parts["head"], parts["strip"], parts["list"]
+        self.heading.right([self.choice])
+        # The room between the tempo and the key is that of the stepper of the grid.
+        own = self.bar.place(parts["bar"], (Slot(TEMPO, self.tempo, TEMPO_W), Slot("", None, GRID_W),
+                                            Slot(KEY, None, KEY_W)))
+        self.lower.rect, self.shifted.rect, self.higher.rect = key_parts(own[2])
         self.roll.rect = self.steps.rect = parts["body"]
+        self.roll.lane.rect = parts["foot"]
         self.fault.rect = rect
         self.mixer.place(parts["desk"])
         self.layers.place(parts["desk"])
@@ -440,9 +465,9 @@ class SongPanel(Panel):
         self.layers.update()
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the framed parts: those the list and the view stand in, or the one of the mixer. None with no song."""
+        """Draw the framed parts: the side column and the foot, or the one of the mixer. None with no song."""
         if self._song is not None:
-            for part in ("mixer",) if self.mixing or self.layering else ("channels", "view"):
+            for part in ("mixer",) if self.mixing or self.layering else ("side", "foot"):
                 canvas.box(self._parts[part], theme.PANEL)
                 canvas.frame(self._parts[part], theme.LINE)
 
@@ -551,6 +576,7 @@ class SongPanel(Panel):
         if fresh or self.channel not in song["channels"]:
             self.channel = first_channel(self._channels())
         self._song = song
+        self.heading.show(self._picked[1], facts(song))
         steps = tempo_steps(song["row_ticks"], song.get("rows_per_beat", 4))
         self._ticks = [ticks for ticks, _ in steps]
         self.tempo.options = tuple(tempo_text(beats) for _, beats in steps)
@@ -785,7 +811,10 @@ class SongPanel(Panel):
                   MOST_DIGITS)
 
     def _rename_channel(self, old: str) -> None:
-        """Open a box over the name of a channel in the list: enter gives the channel that name everywhere."""
+        """Open a box over the name of a channel in the list: enter gives the channel that name everywhere.
+
+        It is what the menu of the channel opens, and a double press on the channel.
+        """
         self._ask(self.list.name_rect(old) or self.list.rect, old, in_name,
                   lambda new: new == old or self._change(lambda song: songedit.channel_renamed(song, old, new),
                                                          f"channel {old} renamed to {new}",
@@ -876,19 +905,20 @@ class SongPanel(Panel):
     def _seen(self) -> None:
         """Have each widget seen or not: by whether the panel is on the window, and by what there is to show.
 
-        The strip and the choice are seen with any song. Under them it is the notes, the mixer or the layers
+        The heading with the choice, the strip and the settings bar are seen with any song, the song's own
+        settings as far as the bar has room for them. Under the bar it is the notes, the mixer or the layers
         that are seen, as is chosen: the widgets of the others are off the window, and take nothing from the
-        mouse. The song's own settings are seen with each, as far as there is room: under the choice with the
-        notes, and beside it with the mixer and with the layers.
+        mouse. The roll is seen with its four parts.
         """
         song = self.shown and self._song is not None
         notes = song and not self.mixing and not self.layering
-        self.strip.visible = self.choice.visible = song
-        for part, rect in song_parts(self._parts["beside" if self.mixing or self.layering else "song"]).items():
-            self._settings[part].rect, self._settings[part].visible = rect, song and rect[2] > 0
+        self.heading.visible = self.strip.visible = self.choice.visible = song
+        self.bar.seen(song)
+        for widget in self._settings:
+            widget.visible = song and widget.rect[2] > 0
         self.list.visible = notes
-        self.bar.seen(notes)
-        self.roll.visible = notes and self._drums is False
+        for widget in (self.roll, *self.roll.parts):
+            widget.visible = notes and self._drums is False
         self.steps.visible = notes and self._drums is True
         self.mixer.seen(song and self.mixing)
         self.layers.seen(song and self.layering)

@@ -19,7 +19,7 @@ from rowsynth.gui.model import Model
 from rowsynth.gui.popups import Menu, TextBox
 from rowsynth.gui.session import POLL_EVERY, Session
 from rowsynth.gui.songpanel import (ELSEWHERE, MIXER, SongPanel, arrange, bars_text, free_name, in_name, shift_text,
-                                    song_parts, step_to, tempo_steps, tempo_text)
+                                    step_to, tempo_steps, tempo_text)
 from rowsynth.gui.strips import EDGE_PX
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -652,12 +652,12 @@ class Settings(Opened):
         self.assertEqual((self.path.read_text(encoding="utf-8"), self.session.can_undo, self.shown()[1]),
                          (before, False, "0"))
 
-    def test_with_the_mixer_shown_the_settings_of_the_song_are_beside_the_choice_and_work_there(self) -> None:
+    def test_with_the_mixer_shown_the_settings_of_the_song_are_in_the_bar_as_before_and_work_there(self) -> None:
         panel = self.panel
+        places = (panel.tempo.rect, panel.lower.rect)
         panel.choice.pick(panel.choice.options.index(MIXER))
-        parts = song_parts(arrange(RECT)["beside"])
         self.assertEqual((panel.tempo.rect, panel.lower.rect, panel.tempo.visible, panel.list.visible),
-                         (parts["tempo"], parts["lower"], True, False))
+                         (*places, True, False))
         self.step(-1)
         self.click(middle(panel.higher.rect))
         self.assertEqual((self.song()["row_ticks"], self.shown(), panel.mixing), (7, ("128.6", "+1"), True))
@@ -732,11 +732,13 @@ class Drawn(Opened):
         return sum(self.surface.get_at((x + column, y + row))[:3] == colour for column in range(w) for row in range(h))
 
     def test_the_settings_of_the_song_the_menu_of_a_block_and_the_box_over_a_name_are_drawn(self) -> None:
-        parts = song_parts(arrange(RECT)["song"])
-        # The two words are dim, and the count between the two buttons is one figure in the colour of text.
-        self.assertEqual([self.ink(parts[part], theme.DIM) > 0 for part in ("tempo_word", "key_word", "shifted")],
-                         [True, True, False])
-        self.assertGreater(self.ink(parts["shifted"], theme.TEXT), 0)
+        # The names of the tempo and of the key are dim, on the line over them in the settings bar, and the count
+        # between the two buttons of the key is one figure in the colour of text.
+        panel = self.panel
+        over = [(x, arrange(RECT)["bar"][1] + theme.BAR_TOP, w, Font.LINE)
+                for x, _, w, _ in (panel.tempo.rect, panel.shifted.rect)]
+        self.assertEqual([self.ink(room, theme.DIM) > 0 for room in (*over, panel.shifted.rect)], [True, True, False])
+        self.assertGreater(self.ink(panel.shifted.rect, theme.TEXT), 0)
         # The menu is drawn over the strip and the bar, its outline whole.
         x, y, w, h = self.menu(self.block(1)).rect
         self.assertEqual((self.ink((x, y, w, 1), theme.LINE), self.ink((x, y, 1, h), theme.LINE)), (w, h))
@@ -745,7 +747,7 @@ class Drawn(Opened):
         self.choose(self.row("bass"), "Rename")
         x, y, w, h = self.box().rect
         self.assertEqual((self.ink((x, y, w, 1), theme.ACTIVE), self.ink((x, y, 1, h), theme.ACTIVE)), (w, h))
-        self.assertTrue(lies_in((x, y, w, h), arrange(RECT)["channels"]))
+        self.assertTrue(lies_in((x, y, w, h), arrange(RECT)["side"]))
 
 
 if __name__ == "__main__":

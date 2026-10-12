@@ -23,8 +23,9 @@ from rowsynth.gui import browser, exports, files, fmview, instpanel, layerview, 
 from rowsynth.gui import model as gui_model
 from rowsynth.gui import start, theme
 from rowsynth.gui.font import Font
+from rowsynth.gui.kit import VELOCITY_HELP
 from rowsynth.gui.lists import List, Row
-from rowsynth.gui.roll import Roll
+from rowsynth.gui.roll import ACROSS_HELP, ALONG_HELP, Roll
 from rowsynth.gui.ui import Event, Ui, Widget, inside
 
 try:
@@ -57,15 +58,16 @@ KINDS: dict[str, tuple[str, ...]] = {
     "the left list, under its rows": (browser.LIST_HELP,),
     "the strip, a block": ("drag to move a, ",),
     "the strip, off its blocks": ("the patterns in the order they play",),
-    "the channels, a heading": ("click to fold these channels away",),
-    "the channels, a channel": ("click to show channel lead, ",),
+    "the channels, a heading": ("press: fold these channels away",),
+    "the channels, a channel": ("press: show channel lead, twice to rename it   right press: its menu   wheel: ",),
     "the channels, under the rows": (songpanel.LIST_HELP,),
-    "the roll, a note": ("move ", "stretch "),
-    "the roll, empty grid": ("place a note at ",),
-    "the roll, a key": ("hear ",),
+    "the roll, a note": ("press: pick ",),
+    "the roll, empty grid": ("press: put a note at ",),
+    "the roll, a key": ("press: hear ",),
     "the roll, the ruler": (songpanel.ROLL_HELP,),
-    "the roll, the chord of a bar": ("pick the chord of bar ",),
-    "the roll, the levels": ("set the level of ",),
+    "the roll, the chord of a bar": ("press: pick the chord of bar ",),
+    "the roll, its scroll bars": (ALONG_HELP, ACROSS_HELP),
+    "the roll, the velocity lane": (VELOCITY_HELP,),
     "the steps, the squares": ("take the hit away: ", "put a hit: "),
     "the steps, the names of the drums": (songpanel.STEPS_HELP,),
     "the mixer, the name of a channel": ("lead, lead: a click shows its notes",),
@@ -343,7 +345,8 @@ class Walked(unittest.TestCase):
         cls.at("the roll, a key", app, [middle(seen.keys)])
         cls.at("the roll, the ruler", app, [middle(seen.ruler)])
         cls.at("the roll, the chord of a bar", app, [middle(seen.chords)])
-        cls.at("the roll, the levels", app, along(seen.lane))
+        cls.at("the roll, its scroll bars", app, [middle(seen.along), middle(seen.across)])
+        cls.at("the roll, the velocity lane", app, along(roll.lane.rect))
 
     @classmethod
     def sounds(cls, app: App) -> None:
