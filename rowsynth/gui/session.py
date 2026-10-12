@@ -104,6 +104,10 @@ class Session:
     The channels of the picked song can be muted and soloed, with `mute` and `solo`, and the song can be heard
     in another key, with `key`. That is a way of listening and no change: nothing of it is in the file, it is
     no step, and another thing picked has none of it.
+
+    Two switches are ways of listening as well, and stay as they are set whatever is picked. With `pattern`
+    on, what plays and goes round of a song is the one pattern the song view shows, which that view names in
+    `shown`. With `dry` on, what plays has no echoes.
     """
 
     def __init__(self, model: Model, player: Player | None = None,
@@ -151,6 +155,12 @@ class Session:
         # The channels of the picked song that are muted, and those that are soloed, by their names.
         self._muted: frozenset[str] = frozenset()
         self._soloed: frozenset[str] = frozenset()
+        #: The pattern the song view shows, by its name, or None: the view sets it, and `pattern` plays it alone.
+        #: The session only reads it, and takes a name that is no pattern of the picked song for none.
+        self.shown: str | None = None
+        # Whether one pattern is played alone, and whether what plays has no echoes.
+        self._alone = False
+        self._dry = False
         # The steps made to the project, here and outside.
         self._history = History()
 
@@ -232,6 +242,36 @@ class Session:
             self.player.loop(self._loop)
 
     @property
+    def pattern(self) -> bool:
+        """Whether play and loop are of one pattern alone: the one the song view shows, which `shown` names.
+
+        It is off to start with. On, the model renders the picked song with that pattern as all of its order,
+        and that is what plays, goes round and is as long as the time says. Another pattern shown is followed
+        by the next `tick`. A loop that plays takes the change up as soon as its render is there. While `shown`
+        names no pattern of the picked song, and for a sound or an instrument, it changes nothing.
+        """
+        return self._alone
+
+    @pattern.setter
+    def pattern(self, on: bool) -> None:
+        self._alone = bool(on)
+        self._switched()
+
+    @property
+    def dry(self) -> bool:
+        """Whether what plays has no echoes: a song with the echo of its channels left out, a sound with its off.
+
+        It is off to start with. A loop that plays takes the change up as soon as its render is there, and a
+        sound has it the next time it is played.
+        """
+        return self._dry
+
+    @dry.setter
+    def dry(self, on: bool) -> None:
+        self._dry = bool(on)
+        self._switched()
+
+    @property
     def playing(self) -> bool:
         """Whether the picked thing sounds, or is to as soon as its render is ready."""
         return self._waiting or self._sounding()
@@ -268,6 +308,8 @@ class Session:
             first, self._looked = self._looked is None, now
             self._look(now, first)
         self._notify(now)
+        # Another pattern that the song view shows is the one that plays alone from here on.
+        self._switched()
         picked = self.model.picked is not None
         if not self._taken and picked and self.model.render_ready():
             self._take()
@@ -291,6 +333,7 @@ class Session:
         self._drop()
         self.say("")
         self._waiting = self.audition and kind != "song" and self.player is not None
+        self._ways()
         self.model.start_render()
 
     def say(self, words: str) -> None:
@@ -544,6 +587,19 @@ class Session:
             # Whatever the render went wrong with, which the model raises again each time it is asked.
             return None
 
+    def join(self) -> list | None:
+        """What the "join" rule finds where the loop of the picked thing goes round, as the model gives it.
+
+        An empty list is a loop that comes round clean. None while the render is not ready, for a render
+        that went wrong, and for a thing with no loop: `Model.loops` tells that one from the others.
+        """
+        if not self.model.numbers_ready():
+            return None
+        try:
+            return self.model.join()
+        except Exception:
+            return None
+
     def finding_count(self) -> int | None:
         """How many findings the checks have for the project, or None while the checks run.
 
@@ -616,8 +672,27 @@ class Session:
         if self._hear():
             self._follow()
 
+    def _ways(self) -> bool:
+        """Has the model hear the picked thing as the two switches have it. True when it did not hear it so before.
+
+        The pattern heard alone is the one `shown` names, while that switch is on and the picked song has it.
+        """
+        kind, name = self.model.picked or (None, None)
+        patterns = self.model.project.songs[name]["patterns"] if kind == "song" else ()
+        alone = self.shown if self._alone and self.shown in patterns else None
+        if (alone, self._dry) == (self.model.pattern, self.model.dry):
+            return False
+        self.model.pattern, self.model.dry = alone, self._dry
+        return True
+
+    def _switched(self) -> None:
+        """Has what plays follow the two switches, where they are not what the model hears the picked thing by."""
+        if self._ways() and self.model.picked is not None:
+            self._follow()
+
     def _follow(self) -> None:
-        """Has what plays follow another way of listening to the picked song: other channels, or another key.
+        """Has what plays follow another way of listening to the picked thing: other channels, another key, one
+        pattern alone, or no echoes.
 
         The render of it is begun, and is taken up here where the model has it at once, and else by a later `tick`.
         """
@@ -741,8 +816,9 @@ class Session:
                 if things:
                     self.model.pick(KINDS[section], things[0][0])
                     break
-        # A song whose channels are not the ones it had is heard whole by the model, until it is told again.
-        if self._hear():
+        # A song whose channels are not the ones it had is heard whole by the model, until it is told again. So
+        # is one that no longer has the pattern that was heard alone.
+        if self._hear() | self._ways():
             self._taken = False
         if self.model.picked is not None:
             self.model.start_render()

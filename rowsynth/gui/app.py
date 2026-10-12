@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import shutil
 from collections.abc import Callable, Container
+from functools import partial
 from pathlib import Path
 
 import pygame
@@ -16,17 +17,18 @@ from .browser import Browser
 from .canvas import Canvas
 from .exports import open_export
 from .font import Font
-from .inspector import Inspector
+from .inspector import Inspector, Measured, measured
+from .kit import told
 from .layout import Rect
 from .middle import Middle
 from .model import Model, own
-from .panels import Panel
+from .panels import Border, Panel
 from .popups import Menu
 from .screen import Screen
 from .session import Session
 from .theme import Colour
-from .topbar import TopBar
-from .ui import Pos, Ui, translate
+from .topbar import CLOSE, MINIMISE, Title, TopBar
+from .ui import NOWHERE, Pos, Ui, translate
 
 FPS = 60
 # The seconds a message that was just said has the status bar, whatever the mouse is on.
@@ -46,8 +48,12 @@ _OPEN = "OPEN A PROJECT"
 _NEW = "A FILE FOR THE NEW PROJECT"
 _COPY = "A FILE FOR THE COPY"
 _EXAMPLE = "A FILE FOR YOUR COPY OF THE EXAMPLE"
+_WAV = "A WAV FILE TO MEASURE"
 # What the file of a new project is called until it is given another name.
 _NEW_NAME = "project" + files.ENDING
+# What each border between two columns says of itself with the mouse on it.
+_BORDERS = {"left": told("drag to give the list more room or less"),
+            "right": told("drag to give the numbers and the findings more room or less")}
 
 
 def picked_words(picked: tuple[str, str] | None, shared: Container[str] = ()) -> str:
@@ -103,6 +109,11 @@ class App:
     The window works on one file at a time, and another can be opened in it: `open` puts a new session in the
     place of the one there was. `actions` is from a word of the FILE menu to what does it. `recent` is the
     files opened last, the latest first, and `started` the folder the program was started in.
+
+    Where the window has no frame of the system's, `title` is its own title row, which stands over everything
+    and moves the window, and the edges and corners of the window resize it. With the system's frame there is
+    no title row: `title` is None. `borders` is the two borders between the columns, which are dragged, and
+    `columns` how wide the left panel and the right one are: they stay as they were dragged for the run.
     """
 
     def __init__(self, path: str | Path | None = None, scale: int | None = None,
@@ -128,11 +139,20 @@ class App:
         self.canvas = Canvas(self.screen.art, Font(sprites.load("font")), sprites.load("icons"))
         self.actions: dict[str, Callable[..., object]] = {
             "new": self.new, "open": self.browse, "copy": self.keep_copy, "recent": self.again,
-            "example": self.example, "export": self.export, "close": self.leave}
+            "example": self.example, "export": self.export, "measure": self.measure, "close": self.leave}
         self.model: Model | None = None
         self.session: Session | None = None
         self.first: files.First | None = None
         self.panels: dict[str, Panel] = {}
+        self.title: Title | None = None
+        self.borders: dict[str, Border] = {}
+        self.columns: tuple[int, int] = (theme.LEFT_W, theme.RIGHT_W)
+        # A drag of the window's frame that is under way: the edge or corner it has hold of, or that it moves
+        # the window, where the window stood as it began, and where on the desktop the mouse then was.
+        self._drag: tuple[str, Rect, Pos] | None = None
+        # Where in the window the mouse was last seen, and the place of it that a drag has yet to follow.
+        self._mouse: Pos = NOWHERE
+        self._pulled: Pos | None = None
         self.ui = Ui()
         # What the app has to say while no session is open to say it, and how many times it had something.
         self._own = ""
@@ -151,7 +171,9 @@ class App:
         self.ui = Ui()
         self.ui.size = self._size
         self.panels = {}
+        self.borders = {}
         self.first = None
+        self.title = self.ui.add(Title((0, 0, 0, 0), "", self.frame_do, self._grab)) if self.screen.frameless else None
         self._own, self._owns = "", 0
         self._said, self._age = 0, MESSAGE_TIME
 
@@ -183,6 +205,10 @@ class App:
                        "left": Browser(self.session, self.ui),
                        "middle": Middle(self.session, self.ui),
                        "right": Inspector(self.session, self.ui)}
+        # The borders lie over the panels on each side of them.
+        self.borders = {side: self.ui.add(Border((0, 0, 0, 0), partial(self.pull, side), help))
+                        for side, help in _BORDERS.items()}
+        self._named()
         self.place(self._size)
         self._keep(files.remembered(self.recent, path))
 
@@ -192,7 +218,15 @@ class App:
         self._fresh()
         self.model = self.session = self.path = None
         self.first = files.First(self.ui, self.new, self.browse, self.do, files.examples(), self.recent, self.say)
+        self._named()
         self.place(self._size)
+
+    def _named(self) -> None:
+        """Have the title row and what the system calls the window name the open file: none with no file open."""
+        name = "" if self.model is None else self.model.path.name
+        if self.title is not None:
+            self.title.name = name
+        self.screen.name(name)
 
     def open(self, path: str | Path) -> bool:
         """Open the project in a file in the place of what is open, and say whether it was opened.
@@ -255,6 +289,47 @@ class App:
         """Open the window that writes files, for the project that is open. With none open there is nothing to write."""
         if self.session is not None:
             open_export(self.ui, self.session)
+
+    def measure(self) -> None:
+        """Ask for a WAV file, and show its numbers in a small window of their own."""
+        self.ui.open(files.Chooser(self._folder(), self._measure, title=_WAV, ending=files.WAV))
+
+    def _measure(self, path: Path) -> None:
+        """Show the numbers of a WAV file. A file that cannot be read is said in the status bar."""
+        try:
+            rows = measured(path)
+        except RowSynthError as error:
+            self.say(str(error))
+            return
+        self.ui.open(Measured(path.name, rows))
+
+    def frame_do(self, what: str) -> None:
+        """Do to the window what a button of the title row asks for, as `topbar.act` calls it.
+
+        The window is closed, taken off the screen, or made to fill the desktop and put back.
+        """
+        if what == CLOSE:
+            self.closed = True
+        elif what == MINIMISE:
+            self.screen.minimise()
+        else:
+            self.screen.fill()
+
+    def pull(self, border: str, x: int) -> None:
+        """Take a border between two columns to an x of the art surface, and lay the panels out anew.
+
+        `border` is "left" or "right". Each column keeps a least width, as `layout.pulled` has it.
+        """
+        self.columns = layout.pulled(self._size[0], *self.columns, border, x)
+        self.place(self._size)
+
+    def parts(self, size: tuple[int, int]) -> dict[str, Rect]:
+        """The parts of the frame on an art surface of a size, as `layout.frame` gives them.
+
+        There is a title row where the window has no frame of the system's, and the two side panels are as
+        wide as their borders were dragged.
+        """
+        return layout.frame(size, layout.TITLE_H if self.screen.frameless else 0, *self.columns)
 
     def say(self, words: str) -> None:
         """Put words in the status bar: through the session where a project is open, and as the app's own if not."""
@@ -325,37 +400,129 @@ class App:
         return self._own, self._owns
 
     def place(self, size: tuple[int, int]) -> None:
-        """Give each panel its part of the frame on an art surface of a size.
+        """Give each panel its part of the frame on an art surface of a size, and the title row and borders theirs.
 
-        With no project open, the first screen gets all of the surface but the status bar.
+        With no project open, the first screen gets all of the surface but the title row and the status bar.
         """
         self._size = size
-        parts = layout.frame(size)
+        parts = self.parts(size)
         for name, panel in self.panels.items():
             panel.place(parts[name])
+        if self.title is not None:
+            self.title.rect = parts["title"]
+        for side, border in self.borders.items():
+            border.rect = layout.borders(parts)[side]
         if self.first is not None:
-            self.first.place((0, 0, size[0], parts["status"][1]))
+            top = parts["title"][3]
+            self.first.place((0, top, size[0], parts["status"][1] - top))
 
     def handle(self, event: pygame.event.Event) -> None:
         """Take in one thing that happened to the window. What the mouse and the keys did, and what was typed,
         goes on to the widgets.
 
-        The window's size is followed by the screen, and needs nothing here.
+        What the mouse does to the frame of a window with no frame of the system's is taken first: a press on
+        an edge or a corner, and the drag that follows it or a press on the title row. The window's size is
+        followed by the screen, and needs nothing here.
         """
         if event.type == pygame.QUIT:
             self.closed = True
             return
+        if self._framed(event):
+            return
         happened = translate(event, self.screen.to_art)
         if happened is not None:
             self.ui.handle(happened)
+
+    def _grip(self, pos: Pos) -> str:
+        """The edge or corner of the window that a position of the window takes hold of, and "" for none.
+
+        There is none with the system's frame, none while the window fills the desktop or a widget is held,
+        and none on a button of the title row.
+        """
+        screen = self.screen
+        if not screen.frameless or screen.big or self.ui.held is not None:
+            return ""
+        if self.title is not None and self.title.at(screen.to_art(pos)) is not None:
+            return ""
+        return layout.grip(screen.window.get_size(), pos)
+
+    def _grab(self) -> None:
+        """Begin to move the window with the mouse: the title row was pressed. One that fills the desktop stays."""
+        if not self.screen.big:
+            self._begin(layout.MOVE)
+
+    def _begin(self, grip: str) -> None:
+        """Begin a drag of the window's frame from where the mouse is, with a grip as `layout.dragged` takes one."""
+        stand = self.screen.stand()
+        if stand is not None:
+            self._drag = (grip, stand, (stand[0] + self._mouse[0], stand[1] + self._mouse[1]))
+            self._pulled = None
+
+    def _framed(self, event: pygame.event.Event) -> bool:
+        """Take what the mouse does to the frame of the window, and say whether the event was the frame's alone.
+
+        A press of the left button on an edge or a corner begins a drag that resizes the window. While a drag
+        of the frame is under way the mouse is followed by the window and by no widget, and the release of
+        the button ends it. The release that ends a move of the window goes on to the widgets, where the title
+        row had the press.
+        """
+        if event.type not in (pygame.MOUSEMOTION, pygame.MOUSEBUTTONDOWN, pygame.MOUSEBUTTONUP):
+            return False
+        self._mouse = (int(event.pos[0]), int(event.pos[1]))
+        if event.type == pygame.MOUSEMOTION:
+            if self._drag is not None:
+                self._pulled = self._mouse
+            return self._drag is not None
+        if event.button != 1:
+            return False
+        if event.type == pygame.MOUSEBUTTONDOWN:
+            grip = self._grip(self._mouse)
+            if grip:
+                self._begin(grip)
+            return bool(grip) and self._drag is not None
+        # The mouse was let go where it was last seen to move: the window goes there, and no further.
+        self._pull()
+        drag, self._drag = self._drag, None
+        return drag is not None and drag[0] != layout.MOVE
+
+    def _pull(self) -> None:
+        """Have the window follow the mouse to the place it was last seen at in a drag of the frame.
+
+        The place is counted on the desktop from where the window stands now, so a window that has moved
+        under a mouse that has not is left where it is.
+        """
+        if self._drag is None or self._pulled is None:
+            return
+        (grip, start, origin), pos, self._pulled = self._drag, self._pulled, None
+        stand = self.screen.stand()
+        if stand is not None:
+            by = (stand[0] + pos[0] - origin[0], stand[1] + pos[1] - origin[1])
+            self.screen.put(layout.dragged(start, grip, by))
+
+    def _shape(self) -> str:
+        """The shape the mouse pointer has now, as `Screen.pointer` takes it.
+
+        Over an edge or a corner of the window, and while one is dragged, it is that of the edge. Over a border
+        between two columns, and while one is dragged, it points across. Anywhere else it is the usual one.
+        """
+        grip = self._drag[0] if self._drag is not None else self._grip(self._mouse)
+        if grip in layout.POINTERS:
+            return layout.POINTERS[grip]
+        over = self.ui.held or self.ui.hot
+        return "ew" if any(over is border for border in self.borders.values()) else ""
 
     def update(self, passed: float = 0.0) -> None:
         """A frame's share of what is not drawing: the session's waiting work, then what each panel shows.
 
         `passed` is the seconds since the frame before, which each panel is told. They are also what the age of
         the message is counted in: it is 0 in the frame that finds something said since the frame before, and
-        older by `passed` in each frame after that.
+        older by `passed` in each frame after that. Before all that the window follows a drag of its frame,
+        and the mouse pointer is given the shape of what it is on.
         """
+        self._pull()
+        if self.title is not None:
+            self.title.big = self.screen.big
+        self.screen.pointer(self._shape())
         if self.session is not None:
             self.session.tick()
         for panel in self.panels.values():
@@ -377,7 +544,7 @@ class App:
         if size != self._size:
             self.place(size)
         canvas.box((0, 0, *size), theme.BACKGROUND)
-        parts = layout.frame(size)
+        parts = self.parts(size)
         for name, side in _LINES.items():
             if self.first is None or name == "status":
                 canvas.box(parts[name], theme.PANEL)

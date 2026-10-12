@@ -22,7 +22,8 @@ try:
 except ImportError:
     pygame = None
 else:
-    from rowsynth.gui.screen import Screen, dpi_aware, fit, opening
+    from rowsynth.gui import screen as gui_screen
+    from rowsynth.gui.screen import Screen, dpi_aware, fit, opening, work_area
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
@@ -145,6 +146,57 @@ class Window(unittest.TestCase):
         # Each time, the system was told whose the pixels are before the display was started.
         self.assertEqual(started, [False, False])
 
+    def test_it_opens_with_no_frame_of_the_systems_and_is_moved_sized_and_made_to_fill_the_desktop(self) -> None:
+        screen = self.opened((960, 540))
+        flags = pygame.display.get_surface().get_flags()
+        self.assertEqual((screen.frameless, screen.big, bool(flags & pygame.NOFRAME), bool(flags & pygame.RESIZABLE)),
+                         (True, False, True, True))
+        screen.put((10, 20, 800, 500))
+        self.assertEqual((screen.stand(), screen.begin().get_size()), ((10, 20, 800, 500), (800, 500)))
+        # pygame points what it tells of the window at the handle it gave out last, so that one is held on to.
+        told = [event.window for event in pygame.event.get() if getattr(event, "window", None) is not None]
+        self.assertTrue(told and all(window is gui_screen._HANDLES[0] for window in told))
+        self.assertEqual(len(gui_screen._HANDLES), 1)
+        # The window fills what the task bar leaves of the display its middle is on, and is put back from there.
+        work = (0, 0, 1920, 1032)
+        with mock.patch("pygame.display.get_desktop_sizes", return_value=[(1920, 1080)]), \
+                mock.patch.object(gui_screen, "work_area", return_value=work) as asked:
+            screen.fill()
+            self.assertEqual((screen.stand(), screen.big, screen.kept), (work, True, (10, 20, 800, 500)))
+            screen.fill()
+        # It was asked with the middle of the window as it stood.
+        self.assertEqual(asked.call_args_list[0], mock.call((410, 270), (1920, 1080)))
+        self.assertEqual((screen.stand(), screen.big), ((10, 20, 800, 500), False))
+        # Taken off the screen it stands where it stood. The dummy display has no pointers, which is passed over.
+        screen.minimise()
+        for shape in ("ew", "nwse", ""):
+            screen.pointer(shape)
+        self.assertEqual(screen.stand(), (10, 20, 800, 500))
+
+    def test_where_pygame_cannot_stand_in_for_the_frame_the_window_keeps_the_systems_and_stays_where_it_is(
+            self) -> None:
+        # A pygame with no handle of the window at all, and one whose handle cannot be reached after all.
+        for lacking in (mock.patch.object(gui_screen, "own_frame", return_value=None),
+                        mock.patch.object(Screen, "_reach", side_effect=RuntimeError("no such window"))):
+            with lacking:
+                screen = self.opened((960, 540))
+            flags = pygame.display.get_surface().get_flags()
+            self.assertEqual((screen.frameless, bool(flags & pygame.NOFRAME), bool(flags & pygame.RESIZABLE)),
+                             (False, False, True))
+            screen.put((10, 20, 800, 500))
+            screen.fill()
+            screen.minimise()
+            self.assertEqual((screen.stand(), screen.big, pygame.display.get_surface().get_size()),
+                             (None, False, (960, 540)))
+            screen.close()
+
+    def test_the_part_of_the_desktop_a_window_may_fill_is_all_of_it_where_windows_cannot_be_asked(self) -> None:
+        with mock.patch.object(sys, "platform", "linux"):
+            self.assertEqual(work_area((100, 100), (1920, 1080)), (0, 0, 1920, 1080))
+        refused = mock.patch.object(gui_screen.ctypes, "WinDLL", create=True, side_effect=OSError("no such thing"))
+        with mock.patch.object(sys, "platform", "win32"), refused:
+            self.assertEqual(work_area((100, 100), (1366, 768)), (0, 0, 1366, 768))
+
     def test_to_art_turns_a_position_in_the_window_into_art_pixels(self) -> None:
         screen = self.opened((1920, 1080))
         self.assertEqual([screen.to_art(pos) for pos in ((0, 0), (1, 1), (2, 5), (1919, 1079))],
@@ -211,11 +263,12 @@ class Run(unittest.TestCase):
             drawn = pygame.image.load(file, ".png")
         # The window was 1920 by 984, to fit the desktop, and so at twice.
         self.assertEqual(drawn.get_size(), (960, 492))
-        # The top bar and its line, the left panel's line, the middle, the right panel's line and the status bar's.
-        self.assertEqual([drawn.get_at(pos)[:3] for pos in ((0, 0), (0, 21), (123, 22), (124, 22), (786, 300),
-                                                            (787, 300), (500, 478), (500, 491))],
-                         [theme.PANEL, theme.LINE, theme.LINE, theme.BACKGROUND, theme.LINE, theme.PANEL,
-                          theme.LINE, theme.PANEL])
+        # The title row and its line, the top bar and its line, the left panel's line, the middle, the right
+        # panel's line and the status bar's.
+        self.assertEqual([drawn.get_at(pos)[:3] for pos in ((0, 0), (0, 13), (0, 14), (0, 35), (123, 36), (124, 36),
+                                                            (786, 300), (787, 300), (500, 478), (500, 491))],
+                         [theme.BACKGROUND, theme.LINE, theme.PANEL, theme.LINE, theme.LINE, theme.BACKGROUND,
+                          theme.LINE, theme.PANEL, theme.LINE, theme.PANEL])
 
     def test_a_run_for_no_frames_is_refused_before_any_window_is_opened(self) -> None:
         for frames in (0, -2):

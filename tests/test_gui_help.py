@@ -19,9 +19,9 @@ os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from rowsynth import checks
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import browser, exports, files, fmview, instpanel, layerview, layout, mixer, songpanel, soundpanel
+from rowsynth.gui import browser, exports, files, fmview, inspector, instpanel, layerview, layout, mixer, songpanel
 from rowsynth.gui import model as gui_model
-from rowsynth.gui import start, theme
+from rowsynth.gui import soundpanel, start, theme, topbar
 from rowsynth.gui.font import Font
 from rowsynth.gui.kit import VELOCITY_HELP
 from rowsynth.gui.lists import List, Row
@@ -117,7 +117,11 @@ KINDS: dict[str, tuple[str, ...]] = {
     "a chooser, its foot": tuple(files.PART_HELP.values()),
     "a chooser, off its parts": (files.CHOOSER_HELP,),
     "a chooser for a new file, a file": (files.OLD_FILE_HELP,),
-    "the first screen, its list": ("an example is opened as a copy of your own",),
+    "the first screen, its list": ("press: open an example as a copy of your own",),
+    "the title row, its buttons": tuple(topbar.BUTTON_HELP[button] for button in topbar.BUTTONS),
+    "the title row, off its buttons": (topbar.TITLE_HELP,),
+    "the borders between the columns": ("press: drag to give the list ", "press: drag to give the numbers "),
+    "the window of a WAV file": (inspector.WAV_HELP, inspector.CLOSE_HELP),
 }
 
 
@@ -420,6 +424,12 @@ class Walked(unittest.TestCase):
         """Walk the window that writes files on each of its tabs, and the chooser as it opens a file and names one."""
         session, ui = app.session, app.ui
         session.pick("song", "tune")
+        cls.at("the borders between the columns", app, [middle(border.rect) for border in app.borders.values()])
+        numbers = ui.open(inspector.Measured("tone.wav", inspector.table("", None)))
+        cls.walk(app, "the window of a WAV file")
+        at = inspector.wav_parts(ui.size, len(numbers.rows))
+        cls.at("the window of a WAV file", app, [middle(at["table"]), middle(at["close"])])
+        ui.close(numbers)
         app.export()
         window = ui.modal
         at = exports.parts(ui.size)
@@ -459,6 +469,9 @@ class Walked(unittest.TestCase):
         gone = str(cls.folder / "gone.json")
         app.first.show(files.examples(), [str(cls.folder / "arcade.json"), gone])
         cls.walk(app, "the first screen")
+        at = topbar.title_parts(app.title.rect)
+        cls.at("the title row, its buttons", app, [middle(at[button]) for button in topbar.BUTTONS])
+        cls.at("the title row, off its buttons", app, [middle(at["program"]), middle(app.title.rect)])
         rows = app.first.list
         cls.at("the first screen, its list", app, [spot(rows, key) for key in ("examples", ("recent", gone))])
 

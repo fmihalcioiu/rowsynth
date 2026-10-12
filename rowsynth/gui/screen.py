@@ -3,11 +3,40 @@ from __future__ import annotations
 
 import ctypes
 import sys
+import warnings
 
 import pygame
 
 from ..errors import RowSynthError
-from . import theme
+from . import layout, theme
+from .layout import Rect
+
+#: What pygame's own handle of a window has to have for a window with no frame of the system's: the way to it,
+#: where the window stands, how big it is, and the way to take it off the screen.
+NEEDS = ("from_display_module", "position", "size", "minimize")
+#: The pointers of the system by the shape they are asked for with, "" for the usual arrow: the names pygame has.
+POINTERS = {"": "SYSTEM_CURSOR_ARROW", "ew": "SYSTEM_CURSOR_SIZEWE", "ns": "SYSTEM_CURSOR_SIZENS",
+            "nwse": "SYSTEM_CURSOR_SIZENWSE", "nesw": "SYSTEM_CURSOR_SIZENESW"}
+#: What Windows is asked with for the display nearest to a point.
+_NEAREST = 2
+# The handle of the window that pygame gave out last. Classic pygame leaves a bare pointer to it in the window
+# and follows that pointer each time it tells what happened to the window, whether the handle is still there or
+# not. So the last one is held on to for as long as the program runs, and a handle that is let go of too soon
+# cannot bring the program down.
+_HANDLES: list[object] = []
+
+
+class _Point(ctypes.Structure):
+    """A point of the desktop, as Windows takes one."""
+
+    _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
+
+
+class _Display(ctypes.Structure):
+    """What Windows tells of a display: all of it, and the part the task bar leaves, each as its four sides."""
+
+    _fields_ = [("size", ctypes.c_ulong), ("whole", ctypes.c_long * 4), ("work", ctypes.c_long * 4),
+                ("flags", ctypes.c_ulong)]
 
 
 def fit(window: tuple[int, int], scale: int | None = None) -> tuple[int, tuple[int, int]]:
@@ -52,8 +81,48 @@ def dpi_aware() -> None:
         pass
 
 
+def own_frame() -> type | None:
+    """pygame's own handle of a window, where the running pygame has all that a window with no frame needs.
+
+    None where it lacks any of `NEEDS`, or the flag that opens a window with no frame: the window then keeps
+    the frame of the system. What is asked for is what classic pygame 2.3 and pygame-ce both have.
+    """
+    try:
+        from pygame._sdl2.video import Window
+    except ImportError:
+        return None
+    return Window if hasattr(pygame, "NOFRAME") and all(hasattr(Window, name) for name in NEEDS) else None
+
+
+def work_area(at: tuple[int, int], desktop: tuple[int, int]) -> Rect:
+    """The part of the desktop a window may fill, as (x, y, w, h): what the task bar leaves of a display.
+
+    On Windows it is that of the display nearest to the point `at`. On any other system, and where Windows
+    cannot be asked, it is all of a desktop of the size `desktop`, from its upper left corner.
+    """
+    if sys.platform == "win32":
+        try:
+            user32 = ctypes.WinDLL("user32")
+            user32.MonitorFromPoint.restype = ctypes.c_void_p
+            user32.MonitorFromPoint.argtypes = [_Point, ctypes.c_ulong]
+            user32.GetMonitorInfoW.argtypes = [ctypes.c_void_p, ctypes.POINTER(_Display)]
+            told = _Display(size=ctypes.sizeof(_Display))
+            if user32.GetMonitorInfoW(user32.MonitorFromPoint(_Point(*at), _NEAREST), ctypes.byref(told)):
+                left, top, right, bottom = told.work
+                return left, top, right - left, bottom - top
+        except (AttributeError, OSError, TypeError, ValueError):
+            pass
+    return 0, 0, desktop[0], desktop[1]
+
+
 class Screen:
-    """The window and the art surface. Everything is drawn on the art surface, in art pixels."""
+    """The window and the art surface. Everything is drawn on the art surface, in art pixels.
+
+    `frameless` is whether the window has no frame of the system's: it is then moved, sized, taken off the
+    screen and made to fill the desktop from here, and whoever draws in it draws a title row of its own. Where
+    the running pygame cannot do that, the window keeps the system's frame, and none of those does anything.
+    `kept` is where a window that fills the desktop stood before, and None for one that does not fill it.
+    """
 
     def __init__(self, size: tuple[int, int] | None = None, scale: int | None = None) -> None:
         """Open a window that can be resized. `scale` is kept at every size when one is given.
@@ -69,10 +138,110 @@ class Screen:
         if size is None:
             size = opening(pygame.display.get_desktop_sizes()[0], scale)
         pygame.display.set_caption("rowsynth")
-        self.window = pygame.display.set_mode(size, pygame.RESIZABLE)
+        self.frameless = False
+        self.kept: Rect | None = None
+        self._shape = ""
+        self.window = self._open(size)
         # The window may not have come out at the size asked for, so its own size is the one that counts.
         self.scale, art = fit(self.window.get_size(), scale)
         self.art = pygame.Surface(art)
+
+    def _open(self, size: tuple[int, int]) -> pygame.Surface:
+        """Open the window with no frame of the system's where pygame can stand in for the frame, and else with it.
+
+        A window that came out with no frame and cannot be reached after all is opened again with the frame:
+        it is never left as one that cannot be moved or closed.
+        """
+        if own_frame() is not None:
+            try:
+                window = pygame.display.set_mode(size, pygame.RESIZABLE | pygame.NOFRAME)
+                handle = self._reach()
+                self.frameless = len(tuple(handle.position)) == 2 and len(tuple(handle.size)) == 2
+            except Exception:
+                # Whatever it is that this pygame or this system does not do: the frame of the system does it.
+                self.frameless = False
+            if self.frameless:
+                return window
+            # The display is started anew, so that nothing is left of the window with no frame.
+            pygame.display.quit()
+            pygame.display.init()
+            pygame.display.set_caption("rowsynth")
+        return pygame.display.set_mode(size, pygame.RESIZABLE)
+
+    @staticmethod
+    def _reach() -> object:
+        """pygame's own handle of the window that is open, by which it is moved and sized.
+
+        It is asked for anew each time, so that it is never the handle of a window that is gone, and it takes
+        the place of the one in `_HANDLES`, which pygame no longer points to once there is a newer one.
+        """
+        from pygame._sdl2.video import Window
+
+        with warnings.catch_warnings():
+            # pygame-ce says of this way to the window that it is an old one. It is the one both have.
+            warnings.simplefilter("ignore", DeprecationWarning)
+            handle = Window.from_display_module()
+        _HANDLES[:] = [handle]
+        return handle
+
+    @property
+    def big(self) -> bool:
+        """Whether the window was made to fill the desktop, and was not put back since."""
+        return self.kept is not None
+
+    def stand(self) -> Rect | None:
+        """Where the window stands on the desktop and how big it is, as (x, y, w, h). None with the system's frame."""
+        if not self.frameless:
+            return None
+        try:
+            handle = self._reach()
+            return (*map(int, handle.position), *map(int, handle.size))
+        except pygame.error:
+            return None
+
+    def put(self, rect: Rect) -> None:
+        """Have the window stand at a place of the desktop, at a size. With the system's frame, nothing happens."""
+        if not self.frameless:
+            return
+        try:
+            handle = self._reach()
+            if tuple(handle.size) != tuple(rect[2:]):
+                handle.size = rect[2:]
+            if tuple(handle.position) != tuple(rect[:2]):
+                handle.position = rect[:2]
+        except pygame.error:
+            pass
+
+    def minimise(self) -> None:
+        """Take the window off the screen, down to where the system keeps the windows that are open."""
+        if self.frameless:
+            try:
+                self._reach().minimize()
+            except pygame.error:
+                pass
+
+    def fill(self) -> None:
+        """Have the window fill the part of its display that a window may fill, or put it back where it stood."""
+        stand = self.stand()
+        if stand is not None:
+            middle = (stand[0] + stand[2] // 2, stand[1] + stand[3] // 2)
+            work = work_area(middle, pygame.display.get_desktop_sizes()[0])
+            rect, self.kept = layout.filled(stand, self.kept, work)
+            self.put(rect)
+
+    def pointer(self, shape: str) -> None:
+        """Give the mouse pointer a shape of `POINTERS`, "" for the usual arrow. Where there is none, nothing."""
+        if shape == self._shape:
+            return
+        self._shape = shape
+        try:
+            pygame.mouse.set_cursor(getattr(pygame, POINTERS[shape]))
+        except (pygame.error, AttributeError):
+            pass
+
+    def name(self, text: str) -> None:
+        """Put the name of the open file after the program's in what the system calls the window. "" for none."""
+        pygame.display.set_caption(f"rowsynth  {text}" if text else "rowsynth")
 
     def begin(self) -> pygame.Surface:
         """The art surface, to draw the next frame on. It follows the window: after a resize it has a new size."""

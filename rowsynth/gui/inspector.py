@@ -2,20 +2,27 @@
 from __future__ import annotations
 
 import math
+import re
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from pathlib import Path
 from typing import TYPE_CHECKING, NamedTuple
 
 from ..checks import Finding, songs, sounds
+from ..commands import load_file
+from ..commands.measure import _numbers
 from ..edit import steps
 from ..errors import RowSynthError
+from ..wav import load_wav
 from . import fixes, theme
 from .fixes import Fix
 from .font import Font, wrap
+from .kit import ALONG, ScrollBar, told, wheel
 from .layout import Rect
 from .lists import Scroll
 from .model import KINDS
 from .panels import Panel, within
+from .popups import ENTER
 from .theme import Colour
 from .ui import NOWHERE, Button, Event, Pos, Ui, Widget, draw_button, inside
 
@@ -68,6 +75,36 @@ VARIANT = "variant"
 #: The numbers of a render in the order they are shown, each with its label.
 LABELS = {"seconds": "LENGTH", "peak_db": "PEAK", "rms_db": "LOUDNESS", "dc": "OFFSET", "clipped": "CLIPPED",
           "head_step": "START", "tail_step": "END", "above_4k": "HIGHS", "centroid_hz": "BRIGHTNESS"}
+
+#: What the findings say of themselves, what the bar beside them says, and what the button says that makes every
+#: safe repair.
+SCROLLS = "go through what was found"
+LIST_HELP = told("go to the thing a finding is in", wheel=SCROLLS)
+BAR_HELP = told("drag the bar to go through what was found, or press beside it to jump", wheel=SCROLLS)
+ALL_HELP = told("make every repair that is safe, each a step of its own")
+
+#: What the row of the join of a loop is called. What it says of a loop that comes round clean, and of one the
+#: rule finds a step in where the rule's own words name no number.
+JOIN = "LOOP JOIN"
+CLEAN = "clean"
+CLICKS = "clicks"
+#: The step in what a "join" finding says: the number after the word it is told by.
+_STEP = re.compile(r" by ([0-9][0-9.e+-]*[0-9]|[0-9])")
+
+#: The two rows that stand over the numbers of a WAV file: its samples a second, and its one side or its two.
+RATE = "RATE"
+SIDES = "CHANNELS"
+MONO, STEREO = "mono", "stereo"
+#: The window the numbers of a WAV file are shown in: how wide it is, from a side of it to what it shows, and
+#: between its parts. Its one button, how wide that is and how high, and what the window and the button say.
+WAV_W = 190
+WAV_PAD = 8
+WAV_GAP = 6
+CLOSE = "CLOSE"
+CLOSE_W = Font.width(CLOSE) + 2 * theme.PAD + 8
+CLOSE_H = 16
+WAV_HELP = "the numbers of a WAV file, in the words of the numbers of a picked thing"
+CLOSE_HELP = told("close the window, as escape and enter do")
 
 #: The numbers the checks hold a thing of a kind to, each with what tells a value that breaks the rule. The
 #: limits are the checks' own. A song goes round, so its first and its last sample are no steps out of silence.
@@ -130,6 +167,127 @@ def table(kind: str, numbers: Mapping[str, float] | None) -> list[tuple[str, str
         return [(label, DOTS, theme.DIM) for label in LABELS.values()]
     return [(label, worded(key, numbers[key]), theme.FAULT if faulty(kind, key, numbers[key]) else theme.TEXT)
             for key, label in LABELS.items()]
+
+
+def join_row(found: Sequence[Finding] | None) -> tuple[str, str, Colour]:
+    """The row of the join of a loop as it is shown: its label, the step in words, and the colour of those.
+
+    `found` is what the "join" rule of the checks finds where the loop goes round, as `Model.join` gives it.
+    None is for a render that is not ready: dim dots. Nothing found is `CLEAN`. Anything found is the step
+    the rule holds the loop to, as the rule's own words give the number, the largest of them where it found
+    several, in the colour of what is wrong. Where its words name no number it is `CLICKS`.
+    """
+    if found is None:
+        return JOIN, DOTS, theme.DIM
+    if not found:
+        return JOIN, CLEAN, theme.TEXT
+    steps_found = [step[1] for step in (_STEP.search(finding.message) for finding in found) if step]
+    return JOIN, max(steps_found, key=float, default=CLICKS), theme.FAULT
+
+
+def measured(path: str | Path) -> list[tuple[str, str, Colour]]:
+    """The numbers of a WAV file as they are shown: for each its label, its value in words, and a colour.
+
+    They are the ones the `measure` command gives for the file, worked out as the command works them out: its
+    rate, whether it has one side or two, and then the rows of `table`, measured on the mean of its sides. A
+    file is held to no rule, so no value is in the colour of what is wrong. A file that is not there, cannot
+    be read or is no WAV file the package reads is refused.
+    """
+    try:
+        sides, rate = load_file(load_wav, path)
+    except OSError as error:
+        raise RowSynthError(f"{path}: {error.strerror or error}") from None
+    given = _numbers(sides, rate, None, "file")
+    return [(RATE, f"{given['rate']} Hz", theme.TEXT),
+            (SIDES, STEREO if given["channels"] == 2 else MONO, theme.TEXT),
+            *table("", {**given["measure"], **given["brightness"]})]
+
+
+def wav_parts(size: tuple[int, int], rows: int) -> dict[str, Rect]:
+    """Where the parts of the window of a WAV file go on an art surface of a size, for so many rows of numbers.
+
+    "box" is the whole of it, in the middle of the surface and never larger than it. From the top stand
+    "title", "name" and "table", each the whole width, and at the foot "close", at the right. Every part is
+    cut to the box.
+    """
+    high = min(size[1], 2 * WAV_PAD + (rows + 2) * Font.LINE + 2 * WAV_GAP + CLOSE_H)
+    wide = min(size[0], WAV_W)
+    x, y = (size[0] - wide) // 2, (size[1] - high) // 2
+    left, inner = x + WAV_PAD, wide - 2 * WAV_PAD
+    top = y + WAV_PAD + 2 * Font.LINE + WAV_GAP
+    placed = {"box": (x, y, wide, high),
+              "title": (left, y + WAV_PAD, inner, Font.LINE),
+              "name": (left, y + WAV_PAD + Font.LINE, inner, Font.LINE),
+              "table": (left, top, inner, rows * Font.LINE),
+              "close": (left + inner - CLOSE_W, top + rows * Font.LINE + WAV_GAP, CLOSE_W, CLOSE_H)}
+    return {part: within(place, placed["box"]) for part, place in placed.items()}
+
+
+class Measured(Widget):
+    """The numbers of a WAV file in a small window of their own, opened as the modal widget.
+
+    `name` is the name of the file, and `rows` its numbers as `measured` gives them. The one button closes
+    the window, and so do escape, enter and a press off the window.
+    """
+
+    def __init__(self, name: str, rows: Sequence[tuple[str, str, Colour]]) -> None:
+        super().__init__((0, 0, 0, 0), WAV_HELP)
+        self.name = name
+        self.rows = list(rows)
+        self._mouse: Pos = NOWHERE
+        # Whether the left press went down on the button, and its release has not come.
+        self._down = False
+        self._places = wav_parts(theme.DESIGN, len(self.rows))
+        self.keep_in(theme.DESIGN)
+
+    @property
+    def help(self) -> str:
+        """The line of the button with the mouse on it, and anywhere else the window's own."""
+        return CLOSE_HELP if inside(self._places["close"], self._mouse) else self._help
+
+    @help.setter
+    def help(self, line: str) -> None:
+        self._help = line
+
+    def keep_in(self, size: tuple[int, int]) -> None:
+        """Take the size of the art surface, and lay the window out in the middle of it."""
+        self._places = wav_parts(size, len(self.rows))
+        self.rect = self._places["box"]
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Use everything: close on escape, on enter, on a press off the window and on a press of the button."""
+        if event.kind == "key":
+            if event.key == "escape" or event.key in ENTER:
+                ui.close(self)
+        elif event.kind != "text":
+            self._mouse = event.pos
+            over = inside(self._places["close"], event.pos)
+            if event.kind == "down":
+                self._down = over and event.button == 1
+                if not self.hit(event.pos):
+                    ui.close(self)
+            elif event.kind == "up" and event.button == 1:
+                pressed, self._down = self._down, False
+                if pressed and over:
+                    ui.close(self)
+        return True
+
+    def draw(self, canvas: Canvas) -> None:
+        """Draw the box, the heading, the name of the file, its numbers as the panel draws them, and the button."""
+        places = self._places
+        x, y, w, _ = places["table"]
+        with canvas.clip(self.rect):
+            canvas.box(self.rect, theme.RAISED)
+            canvas.frame(self.rect, theme.LINE)
+            canvas.text_in(MEASURED, places["title"], theme.DIM)
+            canvas.text_in(self.name, places["name"], theme.TEXT)
+            with canvas.clip(places["table"]):
+                for row, (label, value, colour) in enumerate(self.rows):
+                    top = y + row * Font.LINE
+                    canvas.text_in(value, (x, top, w, Font.LINE), colour, "right")
+                    canvas.text_in(label, (x, top, max(0, w - Font.width(value) - SPACE), Font.LINE), theme.DIM)
+            hot = inside(places["close"], self._mouse)
+            draw_button(canvas, places["close"], CLOSE, hot=hot, pressed=hot and self._down)
 
 
 def _path(target: str) -> list[str | int]:
@@ -244,26 +402,30 @@ def arrange(rect: Rect) -> dict[str, Rect]:
     """Where the parts of the panel go in its rectangle, each by what it is called, and each cut to the panel.
 
     From the top: "measured" is the line of the upper heading, and "table" the lines of the numbers, which take
-    what they need. "rule" is the line that parts the two halves, "found" the line of the lower heading, and
-    "list" all that is left under it, for the findings. "all" is the button at the right of the lower heading,
-    which makes every safe repair.
+    what they need: a line for each number and one more, for the join of a thing that has a loop. "rule" is
+    the line that parts the two halves, "found" the line of the lower heading, and "list" all that is left
+    under it, for the findings. "all" is the button at the right of the lower heading, which makes every safe
+    repair, and "bar" the thin bar down the right side of the list, which shows how far it is scrolled.
     """
     x, y, w, h = rect
     left, wide = x + PAD, w - 2 * PAD
     table_top = y + HEAD_TOP + HEAD_H
-    rule = table_top + len(LABELS) * Font.LINE + FOOT
+    lines = len(LABELS) + 1
+    rule = table_top + lines * Font.LINE + FOOT
     list_top = rule + HEAD_TOP + HEAD_H
     placed = {"measured": (left, y + HEAD_TOP, wide, Font.LINE),
-              "table": (left, table_top, wide, len(LABELS) * Font.LINE),
+              "table": (left, table_top, wide, lines * Font.LINE),
               "rule": (x, rule, w, 1),
               "found": (left, rule + HEAD_TOP, wide, Font.LINE),
               "all": (left + wide - FIX_ALL_W, rule + HEAD_TOP - 1, FIX_ALL_W, FIX_H),
-              "list": (x, list_top, w, y + h - list_top)}
+              "list": (x, list_top, w, y + h - list_top),
+              "bar": (x + w - theme.SCROLL_W, list_top, theme.SCROLL_W, y + h - list_top)}
     return {part: within(place, rect) for part, place in placed.items()}
 
 
 class Findings(Widget):
-    """What the checks found, as blocks of text one under the other. The wheel scrolls them when they do not fit.
+    """What the checks found, as blocks of text one under the other. The wheel scrolls them when they do not fit:
+    it is read by `kit.wheel`, and goes up and down with nothing held.
 
     `found` is the findings to show, or None while the checks run: dim dots stand for them then. `picked` is the
     thing whose findings come first. `mends` has the safe repair of each finding that has one, and such a
@@ -296,7 +458,7 @@ class Findings(Widget):
     def help(self) -> str:
         """The one line of help: over the button of a repair, what the repair does."""
         fix = self.over(self._mouse)
-        return self._help if fix is None else f"fix: {fix.label}"
+        return self._help if fix is None else told(f"fix {fix.label}")
 
     @help.setter
     def help(self, line: str) -> None:
@@ -359,7 +521,9 @@ class Findings(Widget):
         self._settle()
         self._mouse = event.pos
         if event.kind == "wheel":
-            self.scroll.by(-theme.LIST_WHEEL * event.wheel)
+            way, steps_up = wheel(event)
+            if way == ALONG:
+                self.scroll.by(-theme.LIST_WHEEL * steps_up)
             return True
         if event.kind == "up" and event.button == 1:
             pressed, self._pressed = self._pressed, None
@@ -426,8 +590,10 @@ class Findings(Widget):
 class Inspector(Panel):
     """The panel at the right: the numbers of the picked thing, and under them what the checks found.
 
-    `values` is the table as it is shown now, as `table` gives it. `list` shows the findings: a click on one
-    picks the thing it is in, in the session.
+    `values` is the table as it is shown now, as `table` gives it, and for a song and a held sound one row
+    more, as `join_row` gives it: the join of its loop. `list` shows the findings: a click on one picks the
+    thing it is in, in the session. `bar` is the thin bar beside them, which is there while they do not all
+    fit and can be dragged.
 
     A finding that has a safe repair has a button that makes it, and `all` is the button that makes every one
     of them: it is there while two findings or more have a repair. The repairs are worked out once for the
@@ -438,11 +604,12 @@ class Inspector(Panel):
     def __init__(self, session: Session, ui: Ui) -> None:
         super().__init__(session, ui)
         self.values = table("", None)
-        self.list = self.add(Findings(self.rect, changed=lambda thing: session.pick(*thing),
-                                      help="click a finding to go to the thing it is in", mend=self.mend))
-        self.all = self.add(Button(self.rect, FIX_ALL, action=self.mend_all,
-                                   help="make every repair that is safe, each a step of its own"))
+        self.list = self.add(Findings(self.rect, changed=lambda thing: session.pick(*thing), help=LIST_HELP,
+                                      mend=self.mend))
+        self.all = self.add(Button(self.rect, FIX_ALL, action=self.mend_all, help=ALL_HELP))
         self.all.visible = False
+        self.bar = self.add(ScrollBar(self.rect, lambda offset: self.list.scroll.to(offset), BAR_HELP))
+        self.bar.visible = False
         self._places = arrange(self.rect)
         # Held where the two below are read and changed: what the repairs were last asked for, the project and
         # its findings, and the repairs that were worked out, with what they were asked for.
@@ -456,6 +623,7 @@ class Inspector(Panel):
         self._places = arrange(rect)
         self.list.rect = self._places["list"]
         self.all.rect = self._places["all"]
+        self.bar.rect = self._places["bar"]
 
     def mend(self, fix: Fix) -> bool:
         """Make a repair, as one step that can be taken back, and say what was done. False where it is refused.
@@ -519,6 +687,8 @@ class Inspector(Panel):
         session = self.session
         picked = session.model.picked
         self.values = table(picked[0] if picked else "", session.numbers())
+        if session.model.loops():
+            self.values.append(join_row(session.join()))
         # Findings that are not there yet are not asked for: the asking would wait for them. Nor are those of
         # checks that could not read the project: there are none, and the asking would raise their refusal.
         refused = session.findings_refused
@@ -528,6 +698,10 @@ class Inspector(Panel):
         self.list.picked = picked
         self.list.mends = self._mends(self.list.found)
         self.all.visible = self.shown and len(self.list.mends) > 1
+        # The findings are laid out as they are asked for their blocks, and the bar shows how far they are scrolled.
+        scroll = self.list.scroll if self.list.blocks else Scroll()
+        self.bar.show(scroll.content, scroll.view, scroll.offset)
+        self.bar.visible = self.shown and scroll.most > 0
 
     def draw(self, canvas: Canvas) -> None:
         """Draw the two headings, the table of the numbers, and the line between the two halves."""

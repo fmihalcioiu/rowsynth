@@ -28,7 +28,8 @@ from rowsynth.gui.font import Font
 from rowsynth.gui.lists import List, Row
 from rowsynth.gui.panels import within
 from rowsynth.gui.session import Session
-from rowsynth.gui.topbar import REFUSED, TopBar, arrange, moment, timing
+from rowsynth.gui.topbar import (BUTTON_HELP, CLOSE, MAXIMISE, MINIMISE, REFUSED, RESTORE, TITLE_HELP, Title, TopBar,
+                                 act, arrange, moment, timing, title_parts)
 from rowsynth.gui.ui import Event, Ui
 
 try:
@@ -43,13 +44,15 @@ EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
 #: The top bar and the left panel on the art surface the layout is drawn for, and the two in a far smaller window.
 BAR, SIDE = (0, 0, 960, 22), (0, 22, 124, 504)
-SMALL_BAR, SMALL_SIDE = (40, 10, 243, 22), (40, 32, 60, 30)
+SMALL_BAR, SMALL_SIDE = (40, 10, 280, 22), (40, 32, 60, 30)
 #: The level, from 0 to 1, that is 24 decibels under the top: half the way along a meter.
 HALF = 10 ** (-24 / 20)
 #: What stands in the bar from its left end, up to the last of its buttons.
-ROW = ("file", "name", "undo", "redo", "play", "stop", "loop")
-#: The air between each of those and the one after it: the FILE button and the name stand alone, the rest in groups.
-GAPS = [theme.GROUP_GAP, theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, theme.BUTTON_GAP, theme.BUTTON_GAP]
+ROW = ("file", "undo", "redo", "play", "stop", "loop", "pattern", "dry")
+#: The air between each of those and the one after it: the FILE button stands alone, the rest in two groups.
+GAPS = [theme.GROUP_GAP, theme.BUTTON_GAP, theme.GROUP_GAP, *[theme.BUTTON_GAP] * 4]
+#: The window's own title row on the art surface the layout is drawn for.
+TITLE = (0, 0, 960, 14)
 #: A small project: one instrument, and one song of one bar on one channel.
 SMALL = {
     "instruments": {"beep": {"vol": [15, 12, 9, 6]}},
@@ -87,6 +90,8 @@ class Stand:
         self.asked: list[tuple] = []
         self.playing = False
         self.loop = True
+        self.pattern = False
+        self.dry = False
         self.seconds = 0.0
         self.at = 0.0
         self.loud = (0.0, 0.0)
@@ -237,9 +242,8 @@ class Cutting(unittest.TestCase):
 
 
 class Top(unittest.TestCase):
-    def test_play_stop_and_loop_call_the_session_and_each_has_a_line_of_help(self) -> None:
+    def test_play_stop_loop_and_the_two_switches_call_the_session_and_each_has_a_line_of_help(self) -> None:
         stand, ui, bar = bar_on()
-        self.assertEqual(bar.name.text, "arcade.json")
         click(ui, middle(bar.play.rect))
         click(ui, middle(bar.stop.rect))
         self.assertEqual(stand.asked, [("play",), ("stop",)])
@@ -248,8 +252,20 @@ class Top(unittest.TestCase):
         self.assertFalse(stand.loop)
         click(ui, middle(bar.loop.rect))
         self.assertTrue(stand.loop)
-        lines = {bar.play.help, bar.stop.help, bar.loop.help}
-        self.assertEqual((len(lines), "" in lines), (3, False))
+        # The two switches beside loop read as words, are off to start with, and each tells the session.
+        self.assertEqual((bar.pattern.text, bar.dry.text, bar.pattern.is_on, bar.dry.is_on),
+                         ("PATTERN", "DRY", False, False))
+        click(ui, middle(bar.pattern.rect))
+        self.assertEqual((stand.pattern, stand.dry), (True, False))
+        click(ui, middle(bar.dry.rect))
+        click(ui, middle(bar.pattern.rect))
+        self.assertEqual((stand.pattern, stand.dry), (False, True))
+        # What the session has is what they show, whoever set it.
+        stand.pattern, stand.dry = True, False
+        bar.update()
+        self.assertEqual((bar.pattern.is_on, bar.dry.is_on), (True, False))
+        lines = [widget.help for widget in (bar.file, bar.play, bar.stop, bar.loop, bar.pattern, bar.dry)]
+        self.assertEqual((len(set(lines)), all(line.startswith("press: ") for line in lines)), (6, True))
 
     def test_undo_and_redo_are_enabled_only_while_the_session_has_a_step_for_them(self) -> None:
         stand, _, bar = bar_on()
@@ -292,32 +308,32 @@ class Top(unittest.TestCase):
         stand.can_redo, stand.redo_label = True, "changed outside: zap"
         bar.update()
         self.assertEqual((bar.undo.help, bar.redo.help),
-                         ("undo: lead of pattern a: note placed", "redo: changed outside: zap"))
+                         ("press: undo lead of pattern a: note placed", "press: redo changed outside: zap"))
         # With the mouse on the button, that is the line there is to show.
         ui.handle(Event("move", middle(bar.redo.rect)))
-        self.assertEqual(ui.help, "redo: changed outside: zap")
+        self.assertEqual(ui.help, "press: redo changed outside: zap")
 
-    def test_in_a_wide_bar_undo_and_redo_stand_after_the_name_with_a_gap_before_play(self) -> None:
-        places = arrange(BAR, "arcade.json")
-        # The FILE button stands at the left end, as wide as its word needs, and the name after it.
+    def test_in_a_wide_bar_undo_and_redo_stand_after_the_file_button_with_a_gap_before_play(self) -> None:
+        places = arrange(BAR)
+        # The FILE button stands at the left end, as wide as its word needs, and each switch as wide as its own.
         self.assertEqual([places[thing] for thing in ROW],
-                         [(6, 3, 31, 16), (49, 0, 65, 22), (126, 3, 17, 16), (145, 3, 17, 16), (174, 3, 17, 16),
-                          (193, 3, 17, 16), (212, 3, 17, 16)])
+                         [(6, 3, 31, 16), (49, 3, 17, 16), (68, 3, 17, 16), (97, 3, 17, 16), (116, 3, 17, 16),
+                          (135, 3, 17, 16), (154, 3, 49, 16), (205, 3, 25, 16)])
         self.assertTrue(all(lies_in(places[thing], BAR) for thing in ROW))
-        # Undo and redo are a group as play, stop and loop are: a gap before it, and less between its buttons.
+        # Undo and redo are a group as play, stop, loop and the switches are: a gap before it, and less inside it.
         self.assertEqual(gaps(places), GAPS)
 
     def test_in_a_narrow_bar_undo_and_redo_stay_as_the_buttons_of_play_do_and_in_their_order(self) -> None:
-        # A bar with no meter, one with no time either, and one in which the name has given way as well.
-        for rect, gone in (((0, 0, 470, 22), ["meter"]), ((0, 0, 396, 22), ["time", "meter"]),
+        # A bar with no meter, one with no time either, and one that has just the room for its buttons.
+        for rect, gone in (((0, 0, 471, 22), ["meter"]), ((0, 0, 397, 22), ["time", "meter"]),
                            (SMALL_BAR, ["time", "meter"])):
-            places = arrange(rect, "arcade.json")
+            places = arrange(rect)
             self.assertEqual([thing for thing in ("time", "meter") if not places[thing][2]], gone, rect)
-            self.assertEqual([places[thing][2:] for thing in ROW[2:]], [theme.ICON_BUTTON] * 5, rect)
+            self.assertEqual([places[thing][2:] for thing in ROW[1:6]], [theme.ICON_BUTTON] * 5, rect)
             self.assertTrue(all(lies_in(places[thing], rect) for thing in ROW), rect)
             self.assertEqual(gaps(places), GAPS, rect)
             # The last of the buttons ends a gap before the findings, or sooner.
-            self.assertLessEqual(places["loop"][0] + places["loop"][2] + theme.GROUP_GAP, places["found"][0], rect)
+            self.assertLessEqual(places["dry"][0] + places["dry"][2] + theme.GROUP_GAP, places["found"][0], rect)
 
     def test_with_a_real_session_the_undo_button_and_then_the_redo_button_leave_the_file_as_it_should_be(self) -> None:
         folder = tempfile.TemporaryDirectory()
@@ -344,10 +360,10 @@ class Top(unittest.TestCase):
         after = json.loads(json.dumps(SMALL))
         after["songs"]["tune"]["patterns"]["a"]["tune"] = "l2 c e"
         self.assertEqual((held(), buttons(), bar.undo.help),
-                         (after, (True, False), "undo: tune of pattern a: note removed"))
+                         (after, (True, False), "press: undo tune of pattern a: note removed"))
         click(ui, middle(bar.undo.rect))
         self.assertEqual((held(), buttons(), bar.redo.help),
-                         (SMALL, (False, True), "redo: tune of pattern a: note removed"))
+                         (SMALL, (False, True), "press: redo tune of pattern a: note removed"))
         click(ui, middle(bar.redo.rect))
         self.assertEqual((held(), buttons()), (after, (True, False)))
 
@@ -377,7 +393,7 @@ class Top(unittest.TestCase):
         stand, ui, bar = bar_on()
         # The session counts no findings where the checks gave none.
         stand.count = 0
-        ui.handle(Event("move", middle(arrange(BAR, "arcade.json")["found"])))
+        ui.handle(Event("move", middle(arrange(BAR)["found"])))
         shown = []
         for refused in (False, True, False):
             stand.findings_refused = refused
@@ -410,50 +426,103 @@ class Top(unittest.TestCase):
         self.assertEqual(bar.meter.levels, (0.0, 0.0))
 
     def test_a_bar_wide_enough_has_the_meter_after_the_time_as_high_as_the_buttons(self) -> None:
-        places = arrange(BAR, "arcade.json")
+        places = arrange(BAR)
         self.assertEqual((places["time"], places["meter"], places["found"]),
-                         ((241, 3, 109, 16), (362, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
-        # At 471 pixels everything just fits: the meter ends a gap before the findings.
-        places = arrange((0, 0, 471, 22), "arcade.json")
-        self.assertEqual((places["meter"], places["found"]), ((362, 3, 62, 16), (436, 0, 29, 22)))
+                         ((242, 3, 109, 16), (363, 3, theme.BAR_METER_W, theme.ICON_BUTTON[1]), (925, 0, 29, 22)))
+        # At 472 pixels everything just fits: the meter ends a gap before the findings.
+        places = arrange((0, 0, 472, 22))
+        self.assertEqual((places["meter"], places["found"]), ((363, 3, 62, 16), (437, 0, 29, 22)))
 
     def test_a_bar_too_narrow_for_everything_has_no_meter_and_keeps_the_rest(self) -> None:
-        places = arrange((0, 0, 470, 22), "arcade.json")
+        places = arrange((0, 0, 471, 22))
         self.assertEqual(places["meter"][2], 0)
-        self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "time", "found")],
-                         [(49, 0, 65, 22), (174, 3, 17, 16), (193, 3, 17, 16), (212, 3, 17, 16), (241, 3, 109, 16),
-                          (435, 0, 29, 22)])
+        self.assertEqual([places[thing] for thing in ("play", "stop", "loop", "dry", "time", "found")],
+                         [(97, 3, 17, 16), (116, 3, 17, 16), (135, 3, 17, 16), (205, 3, 25, 16), (242, 3, 109, 16),
+                          (436, 0, 29, 22)])
         # The time stays down to the width at which it ends a gap before the findings.
-        self.assertEqual(arrange((0, 0, 397, 22), "arcade.json")["time"], (241, 3, 109, 16))
+        self.assertEqual(arrange((0, 0, 398, 22))["time"], (242, 3, 109, 16))
 
     def test_a_bar_too_narrow_for_the_time_as_well_has_neither_and_keeps_the_buttons_and_the_findings(self) -> None:
-        places = arrange((0, 0, 396, 22), "arcade.json")
+        places = arrange((0, 0, 397, 22))
         self.assertEqual((places["time"][2], places["meter"][2]), (0, 0))
-        self.assertEqual([places[thing] for thing in ("name", "play", "stop", "loop", "found")],
-                         [(49, 0, 65, 22), (174, 3, 17, 16), (193, 3, 17, 16), (212, 3, 17, 16), (361, 0, 29, 22)])
-        # Only after the two have gone does the name give way, and the buttons keep their size.
-        self.assertEqual([arrange((40, 10, 276, 22), "arcade.json")[thing] for thing in ("name", "play")],
-                         [(89, 10, 65, 22), (214, 13, 17, 16)])
-        self.assertEqual([arrange(SMALL_BAR, "arcade.json")[thing] for thing in ("name", "play")],
-                         [(89, 10, 32, 22), (181, 13, 17, 16)])
+        self.assertEqual([places[thing] for thing in ("play", "stop", "loop", "dry", "found")],
+                         [(97, 3, 17, 16), (116, 3, 17, 16), (135, 3, 17, 16), (205, 3, 25, 16), (362, 0, 29, 22)])
+        # The buttons keep their size and their places from the left end of the bar, wherever the bar is.
+        self.assertEqual([arrange(SMALL_BAR)[thing] for thing in ("file", "play", "dry")],
+                         [(46, 13, 31, 16), (137, 13, 17, 16), (245, 13, 25, 16)])
 
     def test_placed_at_two_sizes_every_widget_is_inside_the_bar(self) -> None:
         _, ui, bar = bar_on()
-        places = arrange(BAR, "arcade.json")
-        self.assertEqual(places, {"file": (6, 3, 31, 16), "name": (49, 0, 65, 22), "undo": (126, 3, 17, 16),
-                                  "redo": (145, 3, 17, 16), "play": (174, 3, 17, 16), "stop": (193, 3, 17, 16),
-                                  "loop": (212, 3, 17, 16), "time": (241, 3, 109, 16), "meter": (362, 3, 62, 16),
-                                  "found": (925, 0, 29, 22)})
+        places = arrange(BAR)
+        self.assertEqual(places, {"file": (6, 3, 31, 16), "undo": (49, 3, 17, 16), "redo": (68, 3, 17, 16),
+                                  "play": (97, 3, 17, 16), "stop": (116, 3, 17, 16), "loop": (135, 3, 17, 16),
+                                  "pattern": (154, 3, 49, 16), "dry": (205, 3, 25, 16), "time": (242, 3, 109, 16),
+                                  "meter": (363, 3, 62, 16), "found": (925, 0, 29, 22)})
         things = (*ROW, "time", "meter")
         self.assertEqual([getattr(bar, thing).rect for thing in things], [places[thing] for thing in things])
         self.assertEqual(bar.sign.rect, places["found"])
         # A wide bar, one too narrow for the meter, one too narrow for the time as well, and one for nothing at all.
-        for rect in (BAR, (0, 0, 470, 22), SMALL_BAR, (0, 0, 30, 5)):
+        for rect in (BAR, (0, 0, 471, 22), SMALL_BAR, (0, 0, 30, 5)):
             bar.place(rect)
             # A meter that has gone is not drawn at all.
-            self.assertEqual((len(ui.widgets), bar.meter.visible), (10, rect == BAR))
+            self.assertEqual((len(ui.widgets), bar.meter.visible), (11, rect == BAR))
             self.assertTrue(all(lies_in(widget.rect, rect) for widget in ui.widgets), rect)
-            self.assertTrue(all(lies_in(place, rect) for place in arrange(rect, "arcade.json").values()), rect)
+            self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
+
+
+class TitleRow(unittest.TestCase):
+    def test_the_row_has_the_square_the_two_names_and_three_buttons_and_the_middle_one_puts_a_big_window_back(
+            self) -> None:
+        places = title_parts(TITLE, "piece.json")
+        self.assertEqual(places, {"mark": (6, 4, 5, 5), "program": (15, 0, 47, 14), "name": (74, 0, 59, 14),
+                                  "minimise": (900, 0, 20, 14), "maximise": (920, 0, 20, 14),
+                                  "close": (940, 0, 20, 14)})
+        # A name too long for the row is cut a gap before the buttons, and everything is cut to the row.
+        self.assertEqual(title_parts(TITLE, "n" * 200)["name"], (74, 0, 900 - theme.GROUP_GAP - 74, 14))
+        self.assertTrue(all(lies_in(place, (0, 0, 50, 6)) for place in title_parts((0, 0, 50, 6), "a.json").values()))
+        self.assertEqual([act(button, False) for button in (MINIMISE, MAXIMISE, CLOSE)],
+                         ["minimise", "maximise", "close"])
+        self.assertEqual([act(button, True) for button in (MINIMISE, MAXIMISE, CLOSE)],
+                         ["minimise", "restore", "close"])
+
+    def test_a_button_acts_on_its_release_and_an_empty_place_grabs_the_row_or_with_two_presses_fills_the_screen(
+            self) -> None:
+        told: list[str] = []
+        now = [0.0]
+        ui = Ui(clock=lambda: now[0])
+        row = ui.add(Title(TITLE, "piece.json", told.append, lambda: told.append("grabbed")))
+        places = title_parts(TITLE)
+        for button in (MINIMISE, MAXIMISE, CLOSE):
+            click(ui, middle(places[button]))
+        self.assertEqual(told, ["minimise", "maximise", "close"])
+        # A press that is let go off its button does nothing, and a window that fills the screen is put back.
+        ui.handle(Event("down", middle(places[CLOSE]), button=1))
+        ui.handle(Event("up", (400, 7), button=1))
+        row.big = True
+        click(ui, middle(places[MAXIMISE]))
+        self.assertEqual(told[3:], ["restore"])
+        # A press on an empty place grabs the row, and the second of two there acts as the middle button does.
+        del told[:]
+        now[0] = 10.0
+        click(ui, (400, 7))
+        now[0] = 10.2
+        click(ui, (400, 7))
+        row.big = False
+        now[0] = 20.0
+        click(ui, (400, 7))
+        now[0] = 20.2
+        click(ui, (401, 7))
+        self.assertEqual(told, ["grabbed", "restore", "grabbed", "maximise"])
+        # Each button says what it does to the window as it is, and the rest of the row what a drag does.
+        ui.handle(Event("move", (400, 7)))
+        self.assertEqual((ui.help, row.at((400, 7)), row.at(middle(places[CLOSE]))), (TITLE_HELP, None, CLOSE))
+        said = []
+        for big in (False, True):
+            row.big = big
+            for button in (MINIMISE, MAXIMISE, CLOSE):
+                ui.handle(Event("move", middle(places[button])))
+                said.append(ui.help)
+        self.assertEqual(said, [BUTTON_HELP[what] for what in (MINIMISE, MAXIMISE, CLOSE, MINIMISE, RESTORE, CLOSE)])
 
 
 class Left(unittest.TestCase):
@@ -734,7 +803,7 @@ class Drawn(unittest.TestCase):
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
-        places = arrange(rect, "arcade.json")
+        places = arrange(rect)
         x, y, w, h = places["found"]
         # The last is of checks that could not run.
         for count, refused, colour, has_icon in ((None, False, theme.DIM, False), (0, False, theme.GOOD, True),
@@ -758,15 +827,15 @@ class Drawn(unittest.TestCase):
                          (w - 2) * (h - 2) - ink(surface, places["time"], theme.TEXT))
 
     def test_the_bar_draws_the_left_side_in_the_upper_bar_of_the_meter_and_no_meter_that_has_gone(self) -> None:
-        rect = (0, 0, 471, theme.TOP_H)
+        rect = (0, 0, 472, theme.TOP_H)
         surface = pygame.Surface(rect[2:])
         canvas = Canvas(surface, Font(sprites.load("font")), sprites.load("icons"))
         stand, ui, bar = bar_on(rect)
         stand.loud = (1.0, 0.0)
-        meter = arrange(rect, "arcade.json")["meter"]
+        meter = arrange(rect)["meter"]
         upper, lower = bars(meter, 2, lying=True)
         shown = []
-        for wide in (471, 470):
+        for wide in (472, 471):
             bar.place((0, 0, wide, theme.TOP_H))
             surface.fill(theme.PANEL)
             bar.update()
@@ -828,15 +897,20 @@ class InTheApp(unittest.TestCase):
         self.assertEqual((pygame.display.get_surface(), pygame.mixer.get_init()), (None, None))
         with open(shot, "rb") as file:
             drawn = pygame.image.load(file, ".png")
-        parts = layout.frame(drawn.get_size())
-        places = arrange(parts["top"], "arcade.json")
-        # The FILE button stands first, and the name after it.
-        x, y, w, h = places["name"]
-        self.assertEqual((places["file"][0], w), (theme.BAR_MARGIN, Font.width("arcade.json")))
+        parts = layout.frame(drawn.get_size(), layout.TITLE_H)
+        # The title row has the square in the colour of what is switched on, the program's name and, dim, the
+        # name of the file. Its three buttons stand at its right end.
+        title = title_parts(parts["title"], "arcade.json")
+        self.assertEqual((ink(drawn, title["mark"], theme.ACTIVE), title["name"][2]), (25, Font.width("arcade.json")))
+        self.assertGreater(ink(drawn, title["program"], theme.TEXT), 0)
+        self.assertGreater(ink(drawn, title["name"], theme.DIM), 0)
+        self.assertTrue(all(ink(drawn, title[button], theme.TEXT) > 0 for button in (MINIMISE, MAXIMISE, CLOSE)))
+        # The FILE button stands first in the top bar, and the name of the file is not there.
+        places = arrange(parts["top"])
+        x, y, w, h = places["file"]
+        self.assertEqual(x, theme.BAR_MARGIN)
         self.assertGreater(ink(drawn, places["file"], theme.TEXT), 0)
-        self.assertGreater(ink(drawn, places["name"], theme.TEXT), 0)
-        # After the name there is air, up to the first button.
-        self.assertEqual(ink(drawn, (x + w, y, theme.GROUP_GAP, h - 1), theme.PANEL), theme.GROUP_GAP * (h - 1))
+        self.assertEqual(ink(drawn, (x + w, y, theme.GROUP_GAP, h), theme.PANEL), theme.GROUP_GAP * h)
         # The first row of the list in the left panel is the heading of the songs, in their colour.
         x, y, _, _ = parts["left"]
         heading = (x + theme.BROWSER_PAD + theme.LIST_PAD + theme.LIST_SQUARE + theme.LIST_SPACE,
@@ -855,7 +929,7 @@ class InTheApp(unittest.TestCase):
         app.update()
         art = app.screen.begin()
         app.draw(art)
-        parts = layout.frame(art.get_size())
+        parts = app.parts(art.get_size())
         shown = app.panels["middle"]
         song = shown.panels["song"]
         self.assertEqual((shown.fits, song.channel, song.roll.colour), ("song", "lead", theme.SONG))
@@ -874,7 +948,7 @@ class InTheApp(unittest.TestCase):
         app = start(EXAMPLES / "arcade.json")
         art = app.screen.begin()
         shown, rows = app.panels["middle"], app.panels["left"].list
-        head = soundpanel.arrange(layout.frame(art.get_size())["middle"])["head"]
+        head = soundpanel.arrange(app.parts(art.get_size())["middle"])["head"]
 
         def named() -> bool:
             """Of a frame made now: is something written in the colour of a sound where a sound has its name."""
@@ -906,24 +980,24 @@ class InTheApp(unittest.TestCase):
         self.space(app)
         self.assertFalse(app.session.playing)
 
-    def test_a_text_box_over_the_name_in_the_top_bar_takes_what_is_typed_and_the_space_bar_plays_nothing(self) -> None:
+    def test_a_text_box_over_the_time_in_the_top_bar_takes_what_is_typed_and_the_space_bar_plays_nothing(self) -> None:
         self.held()
         with mock.patch("pygame.key.start_text_input") as asked:
             app = start(EXAMPLES / "arcade.json")
         # The window asks for what is typed to be told as text, apart from the keys.
         asked.assert_called_once_with()
         named: list[str] = []
-        box = popups.ask(app.ui, app.panels["top"].name.rect, "arcade", named.append)
+        box = popups.ask(app.ui, app.panels["top"].time.rect, "arcade", named.append)
         # The window tells a key that types twice: as the key that went down, and then as its character.
         for key, typed in ((pygame.K_a, "a"), (pygame.K_SPACE, " "), (pygame.K_z, "z")):
             app.handle(pygame.event.Event(pygame.KEYDOWN, key=key, mod=0, unicode=typed))
             app.handle(pygame.event.Event(pygame.TEXTINPUT, text=typed))
         self.assertEqual((box.text, app.session.playing, app.ui.modal), ("a z", False, box))
-        # The box is drawn over the bar, where the name stands: its outline is in the colour of what is switched on.
+        # The box is drawn over the bar, where the time stands: its outline is in the colour of what is switched on.
         art = app.screen.begin()
         self.assertEqual(ink(art, box.rect, theme.ACTIVE), 0)
         app.draw(art)
-        self.assertTrue(lies_in(box.rect, layout.frame(art.get_size())["top"]))
+        self.assertTrue(lies_in(box.rect, app.parts(art.get_size())["top"]))
         self.assertGreater(ink(art, box.rect, theme.ACTIVE), 0)
         app.handle(pygame.event.Event(pygame.KEYDOWN, key=pygame.K_RETURN, mod=0))
         self.assertEqual((named, app.ui.modal), (["a z"], None))
@@ -931,6 +1005,111 @@ class InTheApp(unittest.TestCase):
         self.space(app)
         app.handle(pygame.event.Event(pygame.TEXTINPUT, text=" "))
         self.assertTrue(app.session.playing)
+
+    def mouse(self, app: App, kind: int, pos: tuple[int, int]) -> None:
+        """Tell the window what the mouse did at a position of the window: it moved, or its left button did."""
+        more = {"rel": (0, 0), "buttons": (1, 0, 0)} if kind == pygame.MOUSEMOTION else {"button": 1}
+        app.handle(pygame.event.Event(kind, pos=pos, **more))
+
+    def test_the_title_row_moves_the_window_its_buttons_act_on_it_and_an_edge_resizes_it(self) -> None:
+        self.held()
+        app = self.silent()
+        down, move, up = pygame.MOUSEBUTTONDOWN, pygame.MOUSEMOTION, pygame.MOUSEBUTTONUP
+        x, y, w, h = app.screen.stand()
+        self.assertEqual((app.screen.frameless, app.title.name, app.title.rect, (w, h), app.screen.scale),
+                         (True, "arcade.json", (0, 0, 960, 14), (1920, 984), 2))
+        # A press on an empty place of the row takes hold of the window, which then goes with the mouse.
+        self.mouse(app, down, (300, 10))
+        self.mouse(app, move, (340, 35))
+        app.update()
+        self.assertEqual((app.screen.stand(), app.ui.held), ((x + 40, y + 25, w, h), app.title))
+        # The window is under the mouse again as it was pressed: it stays, and the release lets go of it.
+        self.mouse(app, move, (300, 10))
+        self.mouse(app, up, (300, 10))
+        self.mouse(app, move, (500, 300))
+        app.update()
+        self.assertEqual((app.screen.stand(), app.ui.held, app._shape()), ((x + 40, y + 25, w, h), None, ""))
+        # An edge shows by the pointer which way it goes, and a press on it has that edge go with the mouse.
+        self.mouse(app, move, (w - 2, 500))
+        self.assertEqual(app._shape(), "ew")
+        self.mouse(app, down, (w - 2, 500))
+        self.mouse(app, move, (w - 102, 500))
+        app.update()
+        self.assertEqual((app.screen.stand(), app.ui.held, app._shape()), ((x + 40, y + 25, w - 100, h), None, "ew"))
+        self.mouse(app, up, (w - 102, 500))
+        self.assertEqual(app.screen.begin().get_size(), (w - 100, h))
+        # No edge has hold of the mouse on a button of the row, in its corner: the middle one fills the desktop.
+        work = (0, 0, 1920, 1032)
+        at = tuple(part * app.screen.scale for part in middle(title_parts(app.title.rect)[MAXIMISE]))
+        with mock.patch("rowsynth.gui.screen.work_area", return_value=work):
+            self.mouse(app, down, at)
+            self.mouse(app, up, at)
+            app.update()
+            self.assertEqual((app.screen.stand(), app.title.big), (work, True))
+            # A window that fills the desktop is not moved by its row, and has no edges to take: it is put back.
+            self.mouse(app, down, (300, 10))
+            self.mouse(app, move, (340, 35))
+            self.mouse(app, up, (340, 35))
+            self.mouse(app, move, (1, 500))
+            app.update()
+            self.assertEqual((app.screen.stand(), app._shape()), (work, ""))
+            app.frame_do(RESTORE)
+        self.assertEqual((app.screen.stand(), app.screen.big, app.closed), ((x + 40, y + 25, w - 100, h), False, False))
+        app.frame_do(CLOSE)
+        self.assertTrue(app.closed)
+
+    def test_with_the_frame_of_the_system_kept_there_is_no_title_row_and_the_system_names_the_file(self) -> None:
+        self.held()
+        with mock.patch("rowsynth.gui.screen.own_frame", return_value=None):
+            app = self.silent()
+        size = app.screen.begin().get_size()
+        self.assertEqual((app.screen.frameless, app.title, app.parts(size), app.panels["top"].rect),
+                         (False, None, layout.frame(size), (0, 0, 960, 22)))
+        self.assertEqual(pygame.display.get_caption()[0], "rowsynth  arcade.json")
+        # The edges are the system's: a press on one takes hold of nothing here, and the buttons do nothing.
+        self.mouse(app, pygame.MOUSEBUTTONDOWN, (1, 500))
+        self.mouse(app, pygame.MOUSEMOTION, (40, 500))
+        app.update()
+        app.frame_do(MAXIMISE)
+        self.assertEqual((app._drag, app._shape(), app.screen.big, pygame.display.get_surface().get_size()),
+                         (None, "", False, (1920, 984)))
+        app.leave()
+        self.assertEqual(pygame.display.get_caption()[0], "rowsynth")
+
+    def test_a_border_between_two_columns_is_dragged_and_stays_for_the_run_and_each_column_keeps_a_least_width(
+            self) -> None:
+        self.held()
+        app = self.silent()
+        ui, (left, right) = app.ui, (app.borders["left"], app.borders["right"])
+        self.assertEqual((app.columns, left.line(), right.line()), ((124, 174), 123, 786))
+        self.assertTrue(left.help.startswith("press: drag ") and right.help.startswith("press: drag "))
+        # The mouse on a border has the pointer that points across, and a drag takes the line with it.
+        ui.handle(Event("move", (124, 200)))
+        self.assertEqual((ui.hot, app._shape()), (left, "ew"))
+        ui.handle(Event("down", (124, 200), button=1))
+        ui.handle(Event("move", (200, 210)))
+        parts = app.parts(ui.size)
+        self.assertEqual((app.columns, left.line(), parts["left"][2], parts["middle"][0]), ((200, 174), 199, 200, 200))
+        self.assertEqual([app.panels[name].rect for name in ("left", "middle", "right")],
+                         [parts[name] for name in ("left", "middle", "right")])
+        # Each column keeps a least width, wherever the mouse goes.
+        ui.handle(Event("move", (-40, 210)))
+        self.assertEqual(app.columns, (layout.LEAST_SIDE, 174))
+        ui.handle(Event("move", (900, 210)))
+        self.assertEqual(app.columns, (960 - 174 - layout.LEAST_MIDDLE, 174))
+        ui.handle(Event("move", (300, 210)))
+        ui.handle(Event("up", (300, 210), button=1))
+        ui.handle(Event("down", (786, 100), button=1))
+        ui.handle(Event("move", (700, 100)))
+        ui.handle(Event("up", (700, 100), button=1))
+        self.assertEqual((app.columns, right.line(), app.panels["right"].rect[:3:2]), ((300, 260), 700, (700, 260)))
+        # They stay as they were dragged for the run: on the first screen there are none, and in the next file
+        # that is opened they are where they were.
+        app.leave()
+        self.assertEqual((app.borders, app.columns), ({}, (300, 260)))
+        self.assertTrue(app.open(EXAMPLES / "arcade.json"))
+        self.assertEqual((app.borders["left"].line(), app.borders["right"].line(), app.panels["left"].rect[2]),
+                         (299, 700, 300))
 
     def test_ctrl_and_z_is_undo_and_ctrl_and_y_or_ctrl_and_shift_and_z_is_redo_whatever_has_the_focus(self) -> None:
         self.held()

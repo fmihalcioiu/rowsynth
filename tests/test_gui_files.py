@@ -24,10 +24,12 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import files, layout, start, theme
 from rowsynth.gui import model as gui_model
 from rowsynth.gui.exports import Export
+from rowsynth.gui.inspector import Measured
 from rowsynth.gui.lists import List
 from rowsynth.gui.popups import Menu
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
+from rowsynth.wav import save_wav
 
 try:
     import pygame
@@ -124,6 +126,20 @@ class Folders(InAFolder):
         self.assertEqual(files.examples(self.folder), [])
         (self.folder / "pyproject.toml").write_text("", encoding="utf-8")
         self.assertEqual(files.examples(self.folder), [self.folder / "examples" / "tune.json"])
+
+    def test_with_another_ending_a_folder_holds_and_a_chooser_lists_and_takes_the_files_that_end_so(self) -> None:
+        for name in ("hit.wav", "Loop.WAV"):
+            (self.folder / name).write_bytes(b"")
+        self.assertEqual(files.holds(self.folder, files.WAV), files.Held(("Beta", "sub"), ("hit.wav", "Loop.WAV")))
+        ui, box, taken = self.chooser(ending=files.WAV)
+        self.assertEqual([row.text for row in box.list.rows], ["..", "Beta", "sub", "hit.wav", "Loop.WAV"])
+        # A name with no ending finds the file that has that one, and a project file of the name is not looked for.
+        self.assertEqual((files.chosen(self.folder, "hit", False, files.WAV), files.chosen(self.folder, "a", False,
+                                                                                         files.WAV)),
+                         ((self.folder / "hit.wav", ""), (None, "a: no such file")))
+        write(ui, "hit")
+        press(ui, "return")
+        self.assertEqual((taken, ui.modal), ([self.folder / "hit.wav"], None))
 
     def test_the_files_opened_last_are_read_and_written_and_are_eight_at_the_most(self) -> None:
         settings = self.folder / "settings" / "rowsynth"
@@ -380,7 +396,11 @@ class InTheWindow(unittest.TestCase):
         art = app.screen.begin()
         app.update()
         app.draw(art)
-        parts = layout.frame(art.get_size())
+        parts = app.parts(art.get_size())
+        # The first screen stands under the window's own title row, which names no file.
+        high = layout.TITLE_H
+        self.assertEqual((app.title.name, app.title.rect, first.rect),
+                         ("", (0, 0, 960, high), (0, high, 960, parts["status"][1] - high)))
         # The program's name is drawn, and of the frame only the status bar: where the top bar is, nothing.
         self.assertGreater(ink(art, files.first_places(first.rect)["name"], theme.TEXT), 0)
         self.assertEqual(ink(art, parts["top"], theme.BACKGROUND), parts["top"][2] * parts["top"][3])
@@ -424,7 +444,7 @@ class InTheWindow(unittest.TestCase):
         top = app.panels["top"]
         self.assertEqual((app.session is old, app.session.model is app.model, app.model.path, app.session.can_undo),
                          (False, True, two, False))
-        self.assertEqual((top.session is app.session, top.name.text, pygame.mixer.get_init() is None),
+        self.assertEqual((top.session is app.session, app.title.name, pygame.mixer.get_init() is None),
                          (True, "two.json", False))
         # A file that is no project, and one that is not there, are refused in the status bar: the open one stays.
         session = app.session
@@ -436,8 +456,8 @@ class InTheWindow(unittest.TestCase):
         self.assertEqual(app.recent, [str(two), str(one)])
         # Close goes back to the first screen, with no session and no sound output.
         app.do(("close",))
-        self.assertEqual((app.first is None, app.session, app.panels, pygame.mixer.get_init()),
-                         (False, None, {}, None))
+        self.assertEqual((app.first is None, app.session, app.panels, pygame.mixer.get_init(), app.title.name),
+                         (False, None, {}, None, ""))
 
     def test_an_example_is_opened_as_a_copy_of_ones_own_and_the_bytes_of_the_example_are_untouched(self) -> None:
         example = files.examples()[0]
@@ -516,14 +536,40 @@ class InTheWindow(unittest.TestCase):
         self.assertEqual((type(menu), menu.rect[:2]), (Menu, (x, y + h)))
         here = self.folder.name + os.sep
         self.assertEqual([item and item.text for item in menu.items],
-                         ["New project...", "Open...", "Save a copy as...", "Export...", None,
+                         ["New project...", "Open...", "Save a copy as...", "Export...", "Measure a WAV file...", None,
                           here + "one.json", here + "two.json", None, "Close"])
         for item in menu.items:
             if item is not None:
                 menu.chosen(item.value)
         self.assertEqual(asked.mock_calls, [mock.call.new(), mock.call.open(), mock.call.copy(),
-                                            mock.call.export(), mock.call.recent(str(one)),
+                                            mock.call.export(), mock.call.measure(), mock.call.recent(str(one)),
                                             mock.call.recent(str(two)), mock.call.close()])
+
+    def test_a_wav_file_is_chosen_and_measured_in_a_window_of_its_own_and_one_that_cannot_be_read_is_said(
+            self) -> None:
+        save_wav(self.folder / "tone.wav", [0.0, 0.5, -0.5, 0.25] * 500, 8000)
+        (self.folder / "broken.wav").write_text("o4 l8 c e g", encoding="utf-8")
+        app = start(self.saved("one.json"), settings=self.settings)
+        app.do(("measure",))
+        chooser = app.ui.modal
+        self.assertEqual((type(chooser), chooser.new, chooser.title, chooser.folder),
+                         (files.Chooser, False, "A WAV FILE TO MEASURE", self.folder))
+        # Of the folder it lists the files of sound, and no project file.
+        self.assertEqual([row.text for row in chooser.list.rows], ["..", "settings", "broken.wav", "tone.wav"]
+                         if self.settings.exists() else ["..", "broken.wav", "tone.wav"])
+        write(app.ui, "tone")
+        press(app.ui, "return")
+        window = app.ui.modal
+        self.assertEqual((type(window), window.name, window.rows[0], window.rows[2]),
+                         (Measured, "tone.wav", ("RATE", "8000 Hz", theme.TEXT), ("LENGTH", "0.25 s", theme.TEXT)))
+        click(app.ui, (2, 200))
+        self.assertIsNone(app.ui.modal)
+        # A file that is no WAV file opens no window, and the status line says what is wrong with it.
+        app.do(("measure",))
+        write(app.ui, "broken")
+        press(app.ui, "return")
+        broken = self.folder / "broken.wav"
+        self.assertEqual((app.ui.modal, app.session.message), (None, f"{broken}: not a RIFF/WAVE file"))
 
     def test_export_opens_the_window_that_writes_files_over_the_open_project_and_does_nothing_with_none(self) -> None:
         app = start(self.saved("one.json"), settings=self.settings)

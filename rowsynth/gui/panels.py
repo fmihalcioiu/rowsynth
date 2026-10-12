@@ -1,10 +1,12 @@
 """A part of the window: a panel has a rectangle, the widgets it lays out there, and a background of its own."""
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
+from . import theme
 from .layout import Rect
-from .ui import Ui, Widget
+from .ui import Event, Ui, Widget
 
 if TYPE_CHECKING:
     from .canvas import Canvas
@@ -19,6 +21,39 @@ def within(rect: Rect, bounds: Rect) -> Rect:
     right = max(left, min(rect[0] + rect[2], x + w))
     bottom = max(top, min(rect[1] + rect[3], y + h))
     return left, top, right - left, bottom - top
+
+
+class Border(Widget):
+    """The border between two columns of the window, taken by the strip around its line: a drag moves the line.
+
+    While the left button is held on it, `moved` is called each time the mouse moves, with the x the line is
+    dragged to: the line keeps under the mouse as far from it as it was pressed. Its line is lit under the
+    mouse and while it is dragged.
+    """
+
+    def __init__(self, rect: Rect, moved: Callable[[int], object] | None = None, help: str = "") -> None:
+        super().__init__(rect, help)
+        self.moved = moved
+        # How far right of the line the press was.
+        self._off = 0
+
+    def line(self) -> int:
+        """The x of the line the strip lies around: its middle."""
+        return self.rect[0] + self.rect[2] // 2
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Use a press of the left button, and tell where the line is dragged to for as long as it is held."""
+        if event.kind == "down" and event.button == 1:
+            self._off = event.pos[0] - self.line()
+            return True
+        if event.kind == "move" and ui.held is self and self.moved is not None:
+            self.moved(event.pos[0] - self._off)
+        return False
+
+    def draw(self, canvas: Canvas) -> None:
+        """Draw the line lit, under the mouse and while it is dragged. At any other time the panel's line shows."""
+        if self.hot or self.held:
+            canvas.vline(self.line(), self.rect[1], self.rect[3], theme.ACTIVE)
 
 
 class Panel:

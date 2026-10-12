@@ -1,6 +1,7 @@
 """Tests for the right panel of the GUI: the numbers of the picked thing in words, and the findings of the checks."""
 from __future__ import annotations
 
+import argparse
 import copy
 import json
 import math
@@ -11,23 +12,28 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import numpy as np
+
 # No test opens a window that can be seen, or a sound device. This is said before pygame is first imported.
 os.environ["SDL_VIDEODRIVER"] = "dummy"
 os.environ["SDL_AUDIODRIVER"] = "dummy"
 os.environ["PYGAME_HIDE_SUPPORT_PROMPT"] = "1"
 
 from rowsynth.checks import Finding, songs, sounds
+from rowsynth.commands import measure as measure_command
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.fixes import Fix
 from rowsynth.gui.font import Font
-from rowsynth.gui.inspector import (AIR, FIX_ALL_W, FIX_H, FIX_W, ICON, LABELS, PAD, RULE_AIR, Block, Inspector,
-                                    arrange, belongs, faulty, lay, where, worded)
+from rowsynth.gui.inspector import (AIR, CLOSE_HELP, FIX_ALL_W, FIX_H, FIX_W, ICON, LABELS, PAD, RULE_AIR, WAV_HELP,
+                                    Block, Inspector, Measured, arrange, belongs, faulty, join_row, lay, measured,
+                                    table, wav_parts, where, worded)
 from rowsynth.gui.model import Model
 from rowsynth.gui.session import Session
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
+from rowsynth.wav import save_wav
 
 try:
     import pygame
@@ -70,6 +76,11 @@ class Held:
         # The repairs of the findings are asked of a project, and this one has nothing that could be repaired.
         self.project = Project()
         self.rate = RATE
+        # Whether the picked thing has a loop that goes round.
+        self.looped = False
+
+    def loops(self) -> bool:
+        return self.looped
 
     def findings(self) -> list[Finding]:
         """The findings, in a list made anew each time."""
@@ -84,9 +95,14 @@ class Stand:
         self.told: dict | None = None
         self.findings_refused = False
         self.asked: list[tuple[str, str]] = []
+        # What the rule finds where the loop of the picked thing goes round. None is for a render that is not ready.
+        self.joined: list[Finding] | None = None
 
     def numbers(self) -> dict | None:
         return self.told
+
+    def join(self) -> list[Finding] | None:
+        return self.joined
 
     def finding_count(self) -> int | None:
         return None if self.model.found is None else len(self.model.found)
@@ -331,6 +347,19 @@ class Shown(unittest.TestCase):
         self.assertEqual(scroll.offset, 0)
         ui.handle(Event("wheel", over, wheel=-1000))
         self.assertEqual((scroll.offset, scroll.most > 0), (scroll.most, True))
+        # With shift or ctrl held the wheel is not for going up and down, and the findings stay.
+        for held in ("shift", "ctrl"):
+            ui.handle(Event("wheel", over, wheel=1, mods=frozenset({held})))
+        self.assertEqual(scroll.offset, scroll.most)
+        # The thin bar beside them shows how far they are scrolled, and a press above its thumb goes back a view.
+        panel.update()
+        bar = panel.bar
+        self.assertEqual((bar.visible, bar.rect, bar.scroll.offset, bar.thumb()[1] + bar.thumb()[3]),
+                         (True, arrange(RIGHT)["bar"], scroll.most, bar.rect[1] + bar.rect[3]))
+        click(ui, (bar.rect[0] + 1, bar.rect[1] + 2))
+        self.assertEqual(scroll.offset, scroll.most - panel.list.rect[3])
+        # Findings that all fit have no bar.
+        self.assertFalse(made([CLICK])[2].bar.visible)
         # The wheel over the numbers is not the findings' to use.
         self.assertFalse(ui.handle(Event("wheel", (RIGHT[0] + 50, RIGHT[1] + 50), wheel=1)))
         # Another pick lays the findings out anew, from their top.
@@ -341,15 +370,104 @@ class Shown(unittest.TestCase):
     def test_placed_at_two_heights_the_numbers_keep_their_room_and_the_findings_have_the_rest(self) -> None:
         _, ui, panel = made([CLICK, HARSH, SHORT] * 10)
         tall, low = arrange(RIGHT), arrange(LOW)
-        self.assertEqual(tall, {"measured": (792, 26, 162, 11), "table": (792, 40, 162, 99),
-                                "rule": (786, 147, 174, 1), "found": (792, 151, 162, 11),
-                                "all": (954 - FIX_ALL_W, 150, FIX_ALL_W, FIX_H), "list": (786, 165, 174, 361)})
-        self.assertEqual(low, dict(tall, list=(786, 165, 174, 157)))
+        # The table has a line for each number, and one more for the join of a loop.
+        self.assertEqual(tall, {"measured": (792, 26, 162, 11), "table": (792, 40, 162, 110),
+                                "rule": (786, 158, 174, 1), "found": (792, 162, 162, 11),
+                                "all": (954 - FIX_ALL_W, 161, FIX_ALL_W, FIX_H), "list": (786, 176, 174, 350),
+                                "bar": (956, 176, 4, 350)})
+        self.assertEqual(low, dict(tall, list=(786, 176, 174, 146), bar=(956, 176, 4, 146)))
         for rect in (RIGHT, LOW, (5, 5, 40, 30), (0, 0, 3, 2)):
             panel.place(rect)
-            self.assertEqual((panel.rect, ui.widgets), (rect, [panel.list, panel.all]))
+            self.assertEqual((panel.rect, ui.widgets), (rect, [panel.list, panel.all, panel.bar]))
             self.assertEqual((panel.list.rect, panel.all.rect), (arrange(rect)["list"], arrange(rect)["all"]))
             self.assertTrue(all(lies_in(place, rect) for place in arrange(rect).values()), rect)
+
+
+class Joined(unittest.TestCase):
+    def test_the_join_of_a_loop_is_clean_or_the_step_the_rule_found_in_the_colour_of_what_is_wrong(self) -> None:
+        self.assertEqual([join_row(None), join_row([])],
+                         [("LOOP JOIN", "...", theme.DIM), ("LOOP JOIN", "clean", theme.TEXT)])
+        # The rule of the songs and that of the sounds are asked, and each says the step in its own words.
+        loud = songs._join("songs.tune", "the loop", 0.0452)
+        self.assertEqual((songs._join("songs.tune", "the loop", 0.0199), join_row(loud)),
+                         ([], ("LOOP JOIN", "0.045", theme.FAULT)))
+        loop = np.array([0.0, 0.1, 0.2, 0.3], dtype=np.float32)
+        stepped = [found for found in sounds._joins("sounds.hum", {}, loop[:0], loop, RATE) if found.rule == "join"]
+        self.assertEqual(join_row(stepped), ("LOOP JOIN", "3.000", theme.FAULT))
+        # Where several are found it is the largest step, and words that name no number say that it clicks.
+        self.assertEqual(join_row([*loud, *stepped])[1], "3.000")
+        self.assertEqual(join_row([Finding("join", "sounds.hum", "comes round badly")]),
+                         ("LOOP JOIN", "clicks", theme.FAULT))
+
+    def test_the_row_is_there_for_a_thing_that_has_a_loop_and_for_no_other(self) -> None:
+        stand, _, panel = made()
+        stand.told = COIN
+        panel.update()
+        self.assertEqual([label for label, _, _ in panel.values], list(LABELS.values()))
+        stand.model.looped = True
+        panel.update()
+        self.assertEqual([label for label, _, _ in panel.values], [*LABELS.values(), "LOOP JOIN"])
+        self.assertEqual(panel.values[-1], ("LOOP JOIN", "...", theme.DIM))
+        stand.joined = []
+        panel.update()
+        self.assertEqual(panel.values[-1], ("LOOP JOIN", "clean", theme.TEXT))
+
+
+class Wav(unittest.TestCase):
+    def test_the_numbers_of_a_wav_file_are_those_of_the_measure_command_in_the_words_of_the_panel(self) -> None:
+        folder = tempfile.TemporaryDirectory()
+        self.addCleanup(folder.cleanup)
+        path = Path(folder.name) / "tone.wav"
+        tone = 0.5 * np.sin(np.arange(4000) * 2 * np.pi * 440 / RATE)
+        save_wav(path, [tone, tone * 0.5], RATE)
+        given = measure_command._wav(argparse.Namespace(file=str(path), name=None, rate=None, variant=None,
+                                                        part=None, at=None))
+        rows = measured(path)
+        self.assertEqual(rows[:3], [("RATE", "8000 Hz", theme.TEXT), ("CHANNELS", "stereo", theme.TEXT),
+                                    ("LENGTH", "0.50 s", theme.TEXT)])
+        self.assertEqual(rows[2:], table("", {**given["measure"], **given["brightness"]}))
+        save_wav(path, tone, RATE)
+        self.assertEqual(measured(path)[1], ("CHANNELS", "mono", theme.TEXT))
+        # A file that is not there and one that is no WAV file are refused, each by its path.
+        other = Path(folder.name) / "notes.wav"
+        with self.assertRaises(RowSynthError) as refused:
+            measured(other)
+        self.assertEqual(str(refused.exception), f"{other}: no such file")
+        other.write_text("o4 l8 c e g", encoding="utf-8")
+        with self.assertRaises(RowSynthError) as refused:
+            measured(other)
+        self.assertEqual(str(refused.exception), f"{other}: not a RIFF/WAVE file")
+
+    @unittest.skipUnless(pygame, NEEDS)
+    def test_the_window_of_a_wav_file_shows_its_rows_and_closes_by_its_button_by_a_key_and_by_a_press_off_it(
+            self) -> None:
+        rows = [("RATE", "8000 Hz", theme.TEXT), *table("", COIN)]
+        parts = wav_parts(theme.DESIGN, len(rows))
+        box = parts["box"]
+        self.assertEqual((box[0] + box[2] // 2, box[1] + box[3] // 2), (480, 270))
+        self.assertTrue(all(lies_in(part, box) for part in parts.values()))
+        self.assertEqual(parts["table"][3], len(rows) * Font.LINE)
+        ui = Ui()
+        window = ui.open(Measured("tone.wav", rows))
+        surface = pygame.Surface(theme.DESIGN)
+        surface.fill(GROUND)
+        ui.draw(Canvas(surface, Font(sprites.load("font")), sprites.load("icons")))
+        self.assertGreater(ink(surface, parts["name"], theme.TEXT), 0)
+        self.assertGreater(ink(surface, parts["table"], theme.DIM), 0)
+        self.assertEqual(ink(surface, (0, 0, 960, box[1]), GROUND), 960 * box[1])
+        # The button says what it does, and the rest of the window what the window is.
+        ui.handle(Event("move", middle(parts["close"])))
+        self.assertEqual(ui.help, CLOSE_HELP)
+        ui.handle(Event("move", middle(parts["table"])))
+        self.assertEqual(ui.help, WAV_HELP)
+        # A press on the window leaves it open. Its button closes it, and so do the two keys and a press off it.
+        click(ui, middle(parts["table"]))
+        self.assertIs(ui.modal, window)
+        for close in (lambda: click(ui, middle(parts["close"])), lambda: ui.handle(Event("key", key="escape")),
+                      lambda: ui.handle(Event("key", key="return")), lambda: click(ui, (box[0] - 5, box[1] - 5))):
+            ui.open(window)
+            close()
+            self.assertIsNone(ui.modal)
 
 
 class Mended(unittest.TestCase):
@@ -396,9 +514,9 @@ class Mended(unittest.TestCase):
         self.assertTrue(self.panel.all.visible)
         # Over a button the help line says what its repair does, and beside it what a click on the finding does.
         self.ui.handle(Event("move", middle(found.button(blocks[1]))))
-        self.assertEqual(self.ui.help, f"fix: {BASS}")
+        self.assertEqual(self.ui.help, f"press: fix {BASS}")
         self.ui.handle(Event("move", spot(self.panel, blocks[1])))
-        self.assertEqual(self.ui.help, "click a finding to go to the thing it is in")
+        self.assertEqual(self.ui.help, "press: go to the thing a finding is in   wheel: go through what was found")
 
     def test_a_press_of_the_button_makes_the_repair_as_one_step_and_undo_brings_the_fault_back(self) -> None:
         # With the sound picked its finding comes first, and the two of the song after it.

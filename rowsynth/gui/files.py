@@ -13,6 +13,7 @@ from typing import TYPE_CHECKING, NamedTuple
 from ..project import Project
 from . import theme
 from .font import ADVANCE, CUT, GLYPH_H, GLYPH_W, Font
+from .kit import told
 from .layout import Rect
 from .lists import List, Row
 from .panels import within
@@ -22,8 +23,9 @@ from .ui import NOWHERE, Button, Event, Pos, Ui, Widget, draw_button, inside
 if TYPE_CHECKING:
     from .canvas import Canvas
 
-#: How the name of a project file ends.
+#: How the name of a project file ends, and how that of a file of sound does.
 ENDING = ".json"
+WAV = ".wav"
 #: The row of a chooser that goes up, to the folder the one shown is in.
 UP = ".."
 #: What a row of a chooser is: the first part of its key. The second is its name.
@@ -52,20 +54,22 @@ DRIVES = "drives"
 NO_DRIVE = "go into a drive first, or type a whole path"
 #: The line of help of a chooser, and what its parts say of themselves with the mouse on one: the row that goes
 #: up, a folder, a file where one is opened and where a new one is named, the box of the name and the two buttons.
-CHOOSER_HELP = "a double press goes into a folder and takes a file: enter takes the name, escape closes"
-UP_HELP = "a double press goes up, to the folder this one is in"
-FOLDER_HELP = "a double press goes into this folder"
-FILE_HELP = "a press puts this name in the box, and a double press takes the file"
-OLD_FILE_HELP = "a press puts this name in the box: the new file needs a name that no file here has yet"
+ROWS = "go through the rows"
+CHOOSER_HELP = "a file is taken by two presses on it or by its name and enter, and escape closes"
+UP_HELP = told("pick the way up, twice to go up to the folder this one is in", wheel=ROWS)
+FOLDER_HELP = told("pick this folder, twice to go into it", wheel=ROWS)
+FILE_HELP = told("put this name in the box, twice to take the file", wheel=ROWS)
+OLD_FILE_HELP = told("put this name in the box: the new file needs a name that no file here has yet", wheel=ROWS)
 PART_HELP = {
-    "name": "type the name of the file here, or a whole path: a name that is a folder is gone into",
-    "cancel": "close with no file taken, as escape does",
-    "take": "take the name in the box, as enter does: with no name there, the picked folder is gone into",
+    "name": told("put the caret here, to type the name of the file or a whole path"),
+    "cancel": told("close with no file taken, as escape does"),
+    "take": told("take the name in the box, as enter does: with no name there, go into the picked folder"),
 }
 
 #: The things of the FILE menu that stand above the files opened last, each as its text and what the app is
 #: asked for. A thing that is added here needs the app to know it by that word.
-MENU = (("New project...", "new"), ("Open...", "open"), ("Save a copy as...", "copy"), ("Export...", "export"))
+MENU = (("New project...", "new"), ("Open...", "open"), ("Save a copy as...", "copy"), ("Export...", "export"),
+        ("Measure a WAV file...", "measure"))
 #: The last thing of the FILE menu, under the files opened last.
 CLOSE = ("Close", "close")
 
@@ -90,11 +94,12 @@ class Held(NamedTuple):
     problem: str = ""
 
 
-def holds(folder: str | Path) -> Held:
-    """What a folder holds that a chooser shows: its sub-folders, and its files whose names end as a project's do.
+def holds(folder: str | Path, ending: str = ENDING) -> Held:
+    """What a folder holds that a chooser shows: its sub-folders, and its files whose names end in `ending`.
 
-    Both are in the order of the alphabet, capitals and small letters together. A folder that is not there, or
-    cannot be read, holds nothing and has the reason as its `problem`: nothing is raised.
+    That is the ending of a project file unless another is given. Both are in the order of the alphabet,
+    capitals and small letters together. A folder that is not there, or cannot be read, holds nothing and has
+    the reason as its `problem`: nothing is raised.
     """
     try:
         with os.scandir(folder) as found:
@@ -106,7 +111,7 @@ def holds(folder: str | Path) -> Held:
         return tuple(sorted(names, key=lambda name: (name.lower(), name)))
 
     return Held(ordered([name for name, is_folder in entries if is_folder]),
-                ordered([name for name, is_folder in entries if not is_folder and name.lower().endswith(ENDING)]))
+                ordered([name for name, is_folder in entries if not is_folder and name.lower().endswith(ending)]))
 
 
 def rows_of(held: Held, up: bool) -> list[Row]:
@@ -119,15 +124,16 @@ def rows_of(held: Held, up: bool) -> list[Row]:
             + [Row((FILE, name), name, square=theme.PROJECT_FILE) for name in held.files])
 
 
-def chosen(folder: str | Path, typed: str, new: bool) -> tuple[Path | None, str]:
+def chosen(folder: str | Path, typed: str, new: bool, ending: str = ENDING) -> tuple[Path | None, str]:
     """The file a typed name means in a folder, or why the name is refused: one of the two is given.
 
     A name with a path in it is counted from the folder, and one that starts at a root is taken as it is. For
-    a `new` file the name gets the ending of a project file where it has none, and a file that is there already
-    is refused. Otherwise the file has to be there: a name with no ending also finds the file that has one.
+    a `new` file the name gets `ending` where it has none, which is the ending of a project file unless another
+    is given, and a file that is there already is refused. Otherwise the file has to be there: a name with no
+    ending also finds the file that has one.
     """
     path = Path(os.path.abspath(Path(folder) / typed))
-    ended = path if path.suffix.lower() == ENDING else path.with_name(path.name + ENDING)
+    ended = path if path.suffix.lower() == ending else path.with_name(path.name + ending)
     if new:
         if os.path.lexists(ended):
             return None, f"{ended.name} is there already"
@@ -324,6 +330,7 @@ class Chooser(Widget):
     At its top stand `title` and the folder it is in. Under them is `list`, with the sub-folders of that folder
     and its project files: the row `..` is the folder it is in. At its foot is `box`, where a name is typed,
     and two buttons. `words` is the one line it has to say: why a folder could not be read, or a name not taken.
+    With an `ending` the files it lists and takes are those whose names end so, in place of project files.
 
     `drives` gives the drives of the system, and where it gives any the root of a drive has the row `..` too.
     It leads to the list of the drives, each a folder row: `at_drives` is set while that is shown. That list
@@ -348,11 +355,12 @@ class Chooser(Widget):
     def __init__(self, folder: str | Path, taken: Callable[[Path], object], new: bool = False, title: str = "",
                  name: str = "", word: str = "", closed: Callable[[], object] | None = None,
                  clock: Callable[[], float] = time.perf_counter,
-                 drives: Callable[[], list[str]] = drives) -> None:
+                 drives: Callable[[], list[str]] = drives, ending: str = ENDING) -> None:
         nowhere = (0, 0, 0, 0)
         super().__init__(nowhere, CHOOSER_HELP)
         self.taken = taken
         self.new = new
+        self.ending = ending
         self.title = title
         self.word = word or (SAVE if new else OPEN)
         self.closed = closed
@@ -404,7 +412,7 @@ class Chooser(Widget):
         """
         self.folder = Path(os.path.abspath(folder))
         self.at_drives = False
-        held = holds(self.folder)
+        held = holds(self.folder, self.ending)
         self._show(rows_of(held, self.folder.parent != self.folder or bool(self._drives())), held.problem)
 
     def show_drives(self) -> None:
@@ -459,7 +467,7 @@ class Chooser(Widget):
             self.go(self.folder / typed)
             self._name("")
             return
-        path, self.words = chosen(self.folder, typed, self.new)
+        path, self.words = chosen(self.folder, typed, self.new, self.ending)
         if path is not None:
             ui.close(self)
             self.taken(path)
@@ -608,10 +616,12 @@ class First:
         self.there = there
         self.rect: Rect = nowhere
         self.new = ui.add(Button(nowhere, NEW_PROJECT, action=new,
-                                 help="a new project in a file of its own: one instrument, one sound, one song"))
-        self.open = ui.add(Button(nowhere, OPEN_FILE, action=open, help="open a project file"))
+                                 help=told("make a new project in a file of its own: one instrument, one sound, "
+                                           "one song")))
+        self.open = ui.add(Button(nowhere, OPEN_FILE, action=open, help=told("open a project file")))
         self.list = ui.add(List(nowhere, changed=self._pressed,
-                                help="an example is opened as a copy of your own, and a file opened before as it is"))
+                                help=told("open an example as a copy of your own, or a file opened before as it is",
+                                          wheel=ROWS)))
         self.list.skips_dim = True
         self._places = first_places(nowhere)
         self.show(found, recent)

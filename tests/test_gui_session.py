@@ -15,6 +15,7 @@ from unittest import mock
 import numpy as np
 
 from rowsynth import checks
+from rowsynth.bank import render_entry
 from rowsynth.edit import NOTHING
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import model as gui_model
@@ -79,6 +80,12 @@ BAND = {"row_ticks": 3,
 MIXED = {**PROJECT, "songs": {"band": BAND, **PROJECT["songs"]}}
 # The samples its loop has at RATE.
 BAND_SAMPLES = 6400
+
+# A song of two patterns, of one bar and of two, whose channel has an echo, and with it a sound that has one.
+TWO = {"row_ticks": 3, "channels": {"tune": {"inst": "beep", "echo": {"rows": 3, "gain": 0.5}}},
+       "patterns": {"a": {"tune": "l4 c e g > c"}, "b": {"tune": "l2 e g | l1 c"}}, "order": ["a", "b"]}
+WAYS = {"instruments": PROJECT["instruments"], "sounds": {"ping": {"def": {**sound("a4"), "echo": {"time": 0.05}}}},
+        "songs": {"two": TWO}}
 
 # The place of the text the song "tune" plays, and what a change to it is called.
 TUNE = "songs.tune.patterns.a.tune"
@@ -1273,6 +1280,75 @@ class KeyTest(SessionCase):
         session.pick("sound", "zap")
         self.assertFalse(session.key(2))
         self.assertEqual(session.message, "no song is picked, so there is nothing to hear in another key")
+
+
+class SwitchTest(SessionCase):
+    def test_with_pattern_on_play_and_loop_are_of_the_pattern_the_song_view_shows_and_follow_another(self):
+        session = self.opened(WAYS)
+        song = Project.from_dict(WAYS).song("two")
+        self.assertEqual([session.shown, session.pattern, session.dry, session.join()], [None, False, False, None])
+        whole = session.model.render()
+        self.assertEqual(session.join(), [])
+        # With no pattern shown the switch changes nothing: it is all of the song that plays.
+        session.pattern = True
+        session.play()
+        self.assert_played((whole, True))
+        self.assertEqual([session.pattern, session.model.pattern], [True, None])
+        # The pattern the song view shows is followed by the next tick, and the loop goes on as that one alone.
+        session.shown = "b"
+        session.tick()
+        settle()
+        session.tick()
+        alone = session.model.render()
+        loop = render_loop({**song, "order": ["b"]}, RATE)
+        self.assert_swapped(alone)
+        np.testing.assert_array_equal(alone["sides"][0], loop["left"])
+        self.assertEqual([session.model.pattern, session.seconds, session.playing], ["b", loop["seconds"], True])
+        # The numbers stay those of the whole song, and switched off the whole song is heard again at once.
+        self.assertEqual(session.numbers()["seconds"], whole["seconds"])
+        session.pattern = False
+        self.assert_swapped(alone, whole)
+        self.assertEqual([session.model.pattern, session.seconds], [None, whole["seconds"]])
+        # A name that is no pattern of the picked thing plays nothing alone: the name is the view's to set.
+        session.pattern = True
+        self.assertEqual(session.model.pattern, "b")
+        session.shown = "nowhere"
+        session.tick()
+        self.assertIsNone(session.model.pattern)
+        session.shown = "a"
+        session.pick("sound", "ping")
+        self.assertEqual([session.shown, session.pattern, session.model.pattern], ["a", True, None])
+        session.pick("song", "two")
+        self.assertEqual(session.model.pattern, "a")
+        # Nothing of it is in the file, and nothing of it is a step.
+        self.assertEqual([self.data(), session.can_undo, session.message], [WAYS, False, ""])
+
+    def test_dry_has_a_loop_that_plays_go_on_with_no_echoes_and_a_sound_play_with_its_echo_off(self):
+        session = self.opened(WAYS)
+        wet = session.model.render()
+        session.play()
+        session.dry = True
+        settle()
+        session.tick()
+        dry = session.model.render()
+        song = Project.from_dict(WAYS).song("two")
+        del song["channels"]["tune"]["echo"]
+        self.assert_played((wet, True))
+        self.assert_swapped(dry)
+        np.testing.assert_array_equal(dry["sides"][0], render_loop(song, RATE)["left"])
+        self.assertEqual([session.dry, session.model.dry, session.playing], [True, True, True])
+        # It stays on whatever is picked: a sound that is played has its echo off.
+        session.pick("sound", "ping")
+        session.play()
+        settle()
+        session.tick()
+        entry = Project.from_dict(WAYS).sound("ping")
+        del entry["def"]["echo"]
+        np.testing.assert_array_equal(self.speaker.did("play")[-1][0][0], render_entry(entry, RATE)[0])
+        # Nothing of it is in the file, and nothing of it is a step.
+        self.assertEqual([self.data(), session.can_undo, session.message], [WAYS, False, ""])
+        session.dry = False
+        self.assertEqual([session.dry, session.model.dry, session.message], [False, False, ""])
 
 
 class NoticeTest(SessionCase):

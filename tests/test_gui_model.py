@@ -123,6 +123,22 @@ LAYERED = {"instruments": PROJECT["instruments"], "sounds": {"ping": PROJECT["so
            "songs": {"keyed": KEYED, "tune": song("l4 c e g > c")}}
 
 
+# A song of two patterns, of one bar and of two, whose tune has an echo. With it a sound that has an echo, a held
+# sound whose loop comes round clean, and one whose loop is cut where it steps.
+ECHOED = {"row_ticks": 3,
+          "channels": {"tune": {"inst": "beep", "pan": -0.5, "echo": {"rows": 3, "gain": 0.5}},
+                       "low": {"inst": "hum", "pan": 0.5}},
+          "patterns": {"a": {"tune": "l4 c e g > c", "low": "o3 c1"},
+                       "b": {"tune": "l2 e g | l1 c", "low": "o3 c1 | g1"}},
+          "order": ["a", "b", "a"]}
+CUT = {"held": {"note": sound("a3", 12, "hum"), "start": 2, "loop": 5, "join": 0, "end": sound("a3", 1, "hum"),
+                "let_go": 2}}
+WAYS = {"instruments": PROJECT["instruments"],
+        "sounds": {"ping": {"def": {**sound("a4"), "echo": {"time": 0.05}}}, "drone": PROJECT["sounds"]["drone"],
+                   "cut": CUT},
+        "songs": {"two": ECHOED, "air": song("l2 e g")}}
+
+
 def stems_of(data: dict, name: str = "trio", rate: int = RATE) -> dict[str, dict]:
     """The stems the engine makes of a song of a project, each under the name of its channel."""
     return {stem["name"]: stem for stem in render_stems(Project.from_dict(data).song(name), rate)["stems"]}
@@ -646,6 +662,109 @@ class ShiftTest(ModelCase):
         # Brought back to a shift the engine takes, the song is heard again.
         model.shift = 0
         self.assert_loop(model.render(), LAYERED, "keyed")
+
+
+class ListenTest(ModelCase):
+    def test_one_pattern_alone_is_the_song_with_that_pattern_as_its_order_kept_beside_the_whole_song(self):
+        model = self.opened(WAYS)
+        song = Project.from_dict(WAYS).song("two")
+        whole, numbers = model.render(), model.numbers()
+        self.assertEqual([model.pattern, model.dry], [None, False])
+        with mock.patch.object(gui_model, "render_stems", wraps=render_stems) as engine:
+            model.pattern = "b"
+            # The numbers are there, those of the whole song, while the pattern is rendered on a thread of its own.
+            self.assertEqual([model.render_ready(), model.numbers_ready()], [False, True])
+            model.start_render()
+            (worker,) = model._varied._workers.values()
+            worker.join()
+            self.assertEqual([worker.name, model.render_ready(), engine.call_count], ["rowsynth-listen", True, 1])
+            alone = render_loop({**song, "order": ["b"]}, RATE)
+            self.assertEqual(alone["seconds"], 2 * render_loop({**song, "order": ["a"]}, RATE)["seconds"])
+            self.assert_render(model.render(), [alone["left"], alone["right"]], True)
+            self.assertIs(model.numbers(), numbers)
+            # The channels that are heard are mixed of the stems of the pattern.
+            model.hear({"low"})
+            stems = render_stems({**song, "order": ["b"]}, RATE)["stems"]
+            self.assert_mix(model.render(), [stem for stem in stems if stem["name"] == "low"])
+            model.hear(None)
+            # The whole song stayed kept beside it: heard again, it is rendered no second time.
+            model.pattern = None
+            self.assertIs(model.render(), whole)
+            self.assertEqual(engine.call_count, 1)
+
+    def test_dry_is_a_song_with_no_echo_on_its_channels_and_a_sound_with_its_echo_off(self):
+        model = self.opened(WAYS)
+        wet = model.render()
+        song = Project.from_dict(WAYS).song("two")
+        del song["channels"]["tune"]["echo"]
+        model.dry = True
+        loop = render_loop(song, RATE)
+        self.assert_render(model.render(), [loop["left"], loop["right"]], True)
+        self.assertFalse(np.array_equal(loop["left"], wet["sides"][0]))
+        # With a pattern alone as well, it is that pattern with no echoes.
+        model.pattern = "a"
+        loop = render_loop({**song, "order": ["a"]}, RATE)
+        self.assert_render(model.render(), [loop["left"], loop["right"]], True)
+        # It stays as it is set whatever is picked: a sound has its echo off, and is as short as that makes it.
+        model.pick("sound", "ping")
+        self.assertEqual([model.dry, model.pattern], [True, None])
+        entry = Project.from_dict(WAYS).sound("ping")
+        echoed = render_entry(entry, RATE)[0]
+        del entry["def"]["echo"]
+        np.testing.assert_array_equal(model.render()["sides"][0], render_entry(entry, RATE)[0])
+        self.assertLess(model.render()["seconds"], len(echoed) / RATE)
+        model.dry = False
+        np.testing.assert_array_equal(model.render()["sides"][0], echoed)
+        # Nothing of it is in the file.
+        self.assertEqual(json.loads(self.path.read_text(encoding="utf-8")), WAYS)
+
+    def test_a_pattern_is_refused_while_no_song_is_picked_and_when_the_picked_song_has_none_of_the_name(self):
+        model = self.opened(WAYS)
+        with self.assertRaises(RowSynthError) as refused:
+            model.pattern = "z"
+        self.assertEqual([str(refused.exception), model.pattern], ["the song 'two' has no pattern named 'z'", None])
+        # The same song picked again keeps its pattern, and a pattern that is gone from the file is heard no longer.
+        model.pattern = "b"
+        model.pick("song", "two")
+        self.assertEqual(model.pattern, "b")
+        data = copy.deepcopy(WAYS)
+        del data["songs"]["two"]["patterns"]["b"]
+        data["songs"]["two"]["order"] = ["a"]
+        self.write(data)
+        model.poll()
+        self.assertEqual([model.picked, model.pattern], [("song", "two"), None])
+        self.assert_loop(model.render(), data, "two")
+        # Another thing picked is heard whole, and no pattern is heard alone of what is no song.
+        model.pattern = "a"
+        model.pick("sound", "ping")
+        self.assertIsNone(model.pattern)
+        with self.assertRaises(RowSynthError) as refused:
+            model.pattern = "a"
+        self.assertEqual(str(refused.exception), "no song is picked, so there is no pattern to hear alone")
+
+    def test_the_join_of_a_loop_is_what_the_rule_finds_where_a_song_or_a_held_sound_comes_round(self):
+        model = self.opened(WAYS)
+        found = [finding for finding in found_in(WAYS) if finding.rule == "join"]
+        # The song "air" comes round with a step, and the checks find it in a stem of it: the rule says the same here.
+        model.pick("song", "air")
+        said = [finding.message.partition(" steps ")[2] for finding in model.join()]
+        self.assertEqual([model.loops(), len(said), said[0][:3]], [True, 1, "by "])
+        self.assertIn(said[0], [finding.message.partition(" steps ")[2] for finding in found
+                                if finding.target == "songs.air"])
+        # A held sound is asked about where its loop comes round: one cut where it steps, and one that is joined.
+        model.pick("sound", "cut")
+        self.assertEqual([model.loops(), [finding.message for finding in model.join()]],
+                         [True, [finding.message for finding in found
+                                 if finding.target == "sounds.cut" and "round to its beginning" in finding.message]])
+        self.assertEqual(len(model.join()), 1)
+        model.pick("sound", "drone")
+        self.assertEqual([model.loops(), model.join()], [True, []])
+        # A loop that comes round clean has nothing found, and a thing with no loop has no join at all.
+        model.pick("song", "two")
+        self.assertEqual([model.loops(), model.join()], [True, []])
+        for picked in (("sound", "ping"), ("instrument", "beep")):
+            model.pick(*picked)
+            self.assertEqual([model.loops(), model.join()], [False, None])
 
 
 class LevelsTest(ModelCase):
