@@ -95,12 +95,16 @@ def place(notes: Sequence[Note], note: Note, rows: float) -> Notes:
     """The notes with one more, in a pattern of `rows` rows, and the others as the rule leaves them.
 
     What the new note has before row 0 or past the end of the pattern is cut off. One with nothing left is refused.
+    A note that is placed takes away nothing that starts after it: it ends where the next note of the channel
+    begins, however long it was asked to be. So one press in the wrong place costs no other note. A note
+    that still sounds where the new one starts is cut short there, and one that starts on the same row gives
+    way to it, as the rule has it for every change.
     """
     cut = _inside(note, rows)
     if cut is None:
         raise RowSynthError(f"row {note.row:g}: a note of {note.rows:g} rows there has no part in the {rows:g} "
                             "rows of the pattern")
-    return _lay(notes, [cut])[0]
+    return _lay(notes, [_cut(cut, [other.row for other in notes])])[0]
 
 
 def move(notes: Sequence[Note], picked: Iterable[int], by_rows: float, by_pitch: float, rows: float,

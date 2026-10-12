@@ -485,18 +485,18 @@ class Edits(unittest.TestCase):
                          ["note placed", "note placed", "note stretched", "velocity changed", "note placed"])
         self.assertEqual(self.heard, [(62, "lead"), (62, "lead"), (70, "lead")])
 
-    def test_a_drag_places_a_longer_note_that_cuts_the_note_it_begins_in_and_removes_one_that_begins_in_it(
+    def test_a_drag_places_a_longer_note_that_cuts_the_note_it_begins_in_and_ends_where_the_next_begins(
             self) -> None:
-        # From row 2 to row 5: e4 sounds until row 4, where f4 begins.
+        # From row 2 to row 5: e4 sounds until row 4, where f4 begins. The new note stops there, and f4 stays.
         self.drag(self.at(2, 62), self.at(5, 62))
-        self.assertEqual(self.edits, [((note(0, 2, 64), note(2, 4, 62), *TUNE[2:]), "note placed")])
+        self.assertEqual(self.edits, [((note(0, 2, 64), note(2, 2, 62), *TUNE[1:]), "note placed")])
         # Dragged to the left, and to other keys, it is one step of the grid long on the key of the press.
         self.drag(self.at(20, 62), self.at(17, 70))
-        self.assertEqual(self.roll.notes[4:], (note(20, 1, 62),))
+        self.assertEqual(self.roll.notes[5:], (note(20, 1, 62),))
         # With steps of 4 rows it begins where its step does and ends with the step the mouse is in.
         self.roll.grid = 4
         self.drag(self.at(21, 70), self.at(26, 70))
-        self.assertEqual((self.roll.notes[4:], len(self.edits)), ((note(20, 8, 70),), 3))
+        self.assertEqual((self.roll.notes[5:], len(self.edits)), ((note(20, 8, 70),), 3))
 
     def test_a_press_on_a_note_picks_it_alone_and_with_no_drag_changes_nothing(self) -> None:
         self.assertTrue(self.mouse("down", self.at(0, 64)))

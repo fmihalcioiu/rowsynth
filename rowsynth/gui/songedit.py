@@ -409,10 +409,12 @@ def channel_moved(song: dict, name: str, to: int) -> dict:
 def transposed(song: dict, semis: int) -> dict:
     """A song with its tuned channels `semis` semitones higher, or lower by a number under 0.
 
-    It is `rowsynth.song.up` that moves it, and what that refuses is refused. Drum channels keep their text, and
-    every moved note is spelt with its octave in front. The chords written for the bars stay as they are: they
-    are named from the project's table, which a song cannot change. Semitones that are no whole number are
-    refused, and so is a move that takes a note out of octaves 0 to 9, which the text could not write.
+    Drum channels keep their text. The text of a moved channel is written again as the editor writes it, so a
+    song moved up and down again reads as an edited one does. A channel the editor cannot write, as one with a
+    note between two rows, is moved by `rowsynth.song.up`, which spells every note with its octave in front.
+    The chords written for the bars stay as they are: they are named from the project's table, which a song
+    cannot change. Semitones that are no whole number are refused, and so is a move that takes a note out of
+    octaves 0 to 9, which the text could not write.
     """
     _whole(semis, "the semitones a song is moved by are")
     readable = _readable(song)
@@ -421,7 +423,18 @@ def transposed(song: dict, semis: int) -> dict:
             if not channel.drums and any(not _LOWEST <= note.pitch + semis <= _HIGHEST for note in channel.notes):
                 raise RowSynthError(f"pattern {name!r}, channel {channel.name!r}: {semis} semitones up takes a "
                                     "note out of octaves 0 to 9, and the text can write no other")
-    return copy.deepcopy(up(song, semis))
+    made, spelt = copy.deepcopy(song), None
+    for name in song["patterns"]:
+        for channel in songview.pattern(readable, name).channels:
+            if channel.drums or not channel.written:
+                continue
+            notes = [replace(note, pitch=note.pitch + semis) for note in channel.notes]
+            try:
+                made["patterns"][name][channel.name] = songview.text(notes, channel.rows, channel.name, readable)
+            except RowSynthError:
+                spelt = up(song, semis) if spelt is None else spelt
+                made["patterns"][name][channel.name] = spelt["patterns"][name][channel.name]
+    return made
 
 
 def tempos(rows_per_beat: float) -> list[tuple[int, float]]:

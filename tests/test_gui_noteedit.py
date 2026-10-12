@@ -68,9 +68,11 @@ class Place(unittest.TestCase):
         # One that ends where the new one begins is left as it is.
         self.assertEqual(saved(self, place((note(0, 4),), note(4, 2, 62), 16)), (note(0, 4), note(4, 2, 62)))
 
-    def test_a_note_that_begins_inside_the_new_one_is_removed(self) -> None:
+    def test_a_placed_note_ends_where_the_next_begins_and_takes_none_after_it_away(self) -> None:
         notes = (note(0, 2), note(4, 1), note(6, 6), note(12, 2))
-        self.assertEqual(saved(self, place(notes, note(4, 4, 62), 16)), (note(0, 2), note(4, 4, 62), note(12, 2)))
+        # Asked to be 4 rows long, it is 2: the note at row 6 stays. The one that starts on its own row gives way.
+        self.assertEqual(saved(self, place(notes, note(4, 4, 62), 16)),
+                         (note(0, 2), note(4, 2, 62), note(6, 6), note(12, 2)))
         # One that begins where the new one ends stays.
         self.assertEqual(saved(self, place(notes, note(2, 2, 62), 16)), (note(0, 2), note(2, 2, 62), *notes[1:]))
 

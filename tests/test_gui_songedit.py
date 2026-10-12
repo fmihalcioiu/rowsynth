@@ -506,10 +506,13 @@ class Layers(unittest.TestCase):
 
 
 class Whole(unittest.TestCase):
-    def test_a_song_is_moved_to_another_key_as_up_moves_it_and_its_drums_stay(self) -> None:
+    def test_a_song_is_moved_to_another_key_note_for_note_as_up_moves_it_and_its_drums_stay(self) -> None:
         given = song()
         made = changed(self, transposed, given, 2)
-        self.assertEqual(made, up(given, 2))
+        self.assertEqual({name: read(made, name) for name in given["patterns"]},
+                         {name: read(up(given, 2), name) for name in given["patterns"]})
+        # The text is the editor's: moved up and down again, the song reads as one that was written by it.
+        self.assertEqual(transposed(made, -2)["patterns"], transposed(given, 0)["patterns"])
         was, now = read(given, "a"), read(made, "a")
         for channel in ("tune", "low"):
             self.assertEqual(now[channel][0], [(row, rows, pitch + 2) for row, rows, pitch in was[channel][0]])
