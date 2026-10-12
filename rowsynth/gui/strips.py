@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import math
-import time
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
@@ -10,8 +9,8 @@ from typing import TYPE_CHECKING
 from ..errors import RowSynthError
 from . import songview, theme
 from .font import CUT, fit
+from .kit import ZOOM, ScrollBar, told, wheel
 from .layout import Rect
-from .lists import Scroll
 from .songview import Block, Note, Pattern
 from .theme import Colour
 from .ui import NOWHERE, Event, Pos, Ui, Widget, inside, share
@@ -32,11 +31,14 @@ INSET = 2
 AIR_FROM = 4
 #: How high the tick of a drum hit is, where its lane has the room.
 TICK_H = 2
-#: How high the bar under the blocks is that shows where the view is, and what is left free over it.
+#: How high the scroll bar under the blocks is, and what is left free over it.
 BAR_H = 3
 BAR_GAP = 1
-#: How many pixels one step of the wheel moves a strip that scrolls.
+#: How many pixels one step of the wheel moves a strip that scrolls: a song is long.
 WHEEL_PX = 64
+#: What the wheel does on the strip, as the help line says it, and what the scroll bar says of itself.
+WHEEL_HELP = "along the song"
+BAR_HELP = told("drag the bar to go along the song, or press beside it to jump", wheel=WHEEL_HELP)
 #: How many pixels the mouse may go along the strip from where it was pressed on a block and not have picked the
 #: block up: a click wobbles.
 SLACK = 3
@@ -48,8 +50,6 @@ PLUS = 2
 #: that way, and by this many pixels a frame.
 EDGE_W = 12
 EDGE_PX = 4
-#: Two presses on the name of one block are a double press when no more than this many seconds lie between them.
-DOUBLE = 0.4
 
 
 def _px(value: float) -> int:
@@ -229,11 +229,11 @@ class Map:
             top += height
         return found
 
-    def thumb(self) -> Rect | None:
-        """The thumb of the bar under the blocks: it is to the strip what the view is to the song. None when it fits."""
+    @property
+    def bar(self) -> Rect:
+        """The scroll bar under the blocks: along the foot of the strip, and as wide."""
         x, y, w, h = self.rect
-        found = Scroll(self.width, w, self.offset).thumb(w)
-        return None if found is None else (x + found[0], y + h - BAR_H, found[1], BAR_H)
+        return x, y + max(0, h - BAR_H), w, min(h, BAR_H)
 
     def scrolled(self, pixels: int = 0) -> Map:
         """This map with the view moved on by so many pixels, and kept between the start and the end of the song."""
@@ -280,7 +280,10 @@ class SongStrip(Widget):
     block picks it, and `changed` is called with its index, also when it was picked already. `playhead` is the row
     of the song that is playing, which can be a fraction, or None: the owner sets it each frame, and the view goes
     after it when it leaves the view. `offset` is the view, as a `Map` has it. The whole song fits the strip unless
-    that makes its rows narrower than `ROW_W_MIN`: then the wheel moves it.
+    that makes its rows narrower than `ROW_W_MIN`: then it scrolls. The wheel is read by `kit.wheel`: the strip
+    only goes one way, so it goes along the song with the wheel alone and with shift, and has nothing to zoom.
+    `bar` is the scroll bar under the blocks, a part that is a widget of its own, as `kit` has it: its owner adds
+    the `parts` to the Ui after the strip, and has them seen while the strip is.
 
     The order is changed with the mouse, and the strip saves nothing: it tells its owner what the hand asked for.
     A block that is dragged more than `SLACK` pixels along the strip is picked up, and a bright line shows the gap
@@ -294,29 +297,28 @@ class SongStrip(Widget):
     for that the owner calls `update` every frame.
 
     The right button on a block calls `asked` with the place of the block and the position, and past the last block
-    with None and the position: the owner can open a menu there. Two presses on the name of one block that are no
-    more than `DOUBLE` seconds apart by `clock` call `named` with its place, and `name_rect` is where that name is
-    drawn: the owner can put a box for text over it. The strip opens nothing itself.
+    with None and the position: the owner can open a menu there. A double press on the name of a block, as the Ui
+    tells one, calls `named` with its place, and `name_rect` is where that name is drawn: the owner can put a box
+    for text over it. The strip opens nothing itself.
 
-    `help`, while the mouse is on a block, says what a press there would do; anywhere else it is the line the strip
-    was made with.
+    `help`, while the mouse is on a block, says what the presses and the wheel do there; anywhere else it is the
+    line the strip was made with.
     """
 
     def __init__(self, rect: Rect, changed: Callable[[int], object] | None = None, help: str = "",
                  moved: Callable[[int, int], object] | None = None,
                  copied: Callable[[int, int], object] | None = None,
                  asked: Callable[[int | None, Pos], object] | None = None,
-                 named: Callable[[int], object] | None = None,
-                 clock: Callable[[], float] = time.perf_counter) -> None:
-        super().__init__(rect, help)
+                 named: Callable[[int], object] | None = None) -> None:
         self.changed = changed
         self.moved = moved
         self.copied = copied
         self.asked = asked
         self.named = named
-        self.clock = clock
         self.picked: int | None = None
-        self.offset = 0
+        self.bar = ScrollBar((0, 0, 0, 0), self._go, BAR_HELP)
+        self.bar.typed = self.key
+        self._offset = 0
         self._blocks: tuple[Block, ...] = ()
         self._rows = 0.0
         self._patterns: dict[str, Pattern] = {}
@@ -328,20 +330,57 @@ class SongStrip(Widget):
         self._mods: frozenset[str] = frozenset()
         #: The press on a block that is under way, or None.
         self._drag: Drag | None = None
-        #: The last press on the name of a block, where a second one would make a double press: its place, and
-        #: what the clock said.
-        self._last: tuple[int, float] | None = None
+        super().__init__(rect, help)
+
+    @property
+    def parts(self) -> tuple[Widget, ...]:
+        """The parts that are widgets of their own: the scroll bar under the blocks."""
+        return (self.bar,)
+
+    @property
+    def rect(self) -> Rect:
+        """The rectangle of the strip: the blocks, the line under the picked one, and the scroll bar."""
+        return self._rect
+
+    @rect.setter
+    def rect(self, rect: Rect) -> None:
+        self._rect = rect
+        self._sync()
+
+    @property
+    def offset(self) -> int:
+        """The view: how many pixels of the song lie before the left edge of the strip."""
+        return self._offset
+
+    @offset.setter
+    def offset(self, pixels: int) -> None:
+        self._offset = pixels
+        self._sync()
+
+    def _sync(self) -> None:
+        """Have the scroll bar stand under the blocks and show the view there is now.
+
+        It has its room only while the song scrolls: under a song that fits there is no bar.
+        """
+        seen = self.map
+        self.bar.rect = seen.bar if seen.most else (seen.rect[0], seen.rect[1], 0, 0)
+        self.bar.show(seen.width, seen.rect[2], seen.offset)
+
+    def _go(self, offset: int) -> None:
+        """Take the view to where the scroll bar was moved: so many pixels into the song."""
+        self.offset = offset
 
     @property
     def help(self) -> str:
-        """What a press on the block the mouse is on would do, or the line the strip was made with.
+        """What the presses and the wheel do on the block the mouse is on, or the line the strip was made with.
 
         While a press on a block is under way, it is the line of that block.
         """
         index = self._drag.place if self._drag is not None else self.block_at(self._mouse)
         if index is None:
             return self._help
-        return f"drag to move {self._blocks[index].name}, ctrl to copy; right button for more"
+        return told(f"show {self._blocks[index].name}, a drag moves it, ctrl copies it, twice on its name renames "
+                    "it", "its menu", WHEEL_HELP)
 
     @help.setter
     def help(self, line: str) -> None:
@@ -350,7 +389,7 @@ class SongStrip(Widget):
     @property
     def map(self) -> Map:
         """The sums of the strip as it is now, the view kept inside the song."""
-        return Map(self.rect, self._blocks, self._rows, self.offset).scrolled()
+        return Map(self.rect, self._blocks, self._rows, self._offset).scrolled()
 
     @property
     def playhead(self) -> float | None:
@@ -405,7 +444,7 @@ class SongStrip(Widget):
         self._patterns, self._spans = patterns, spans
         self._drag = None
         if another:
-            self.picked, self.offset, self._last = (0 if found else None), 0, None
+            self.picked, self._offset = (0 if found else None), 0
         self.offset = self.map.offset
 
     def block_at(self, pos: Pos) -> int | None:
@@ -425,15 +464,19 @@ class SongStrip(Widget):
     def on(self, event: Event, ui: Ui) -> bool:
         """Note where the mouse is and what is held, take a press, carry a block on to its release, and use the wheel.
 
-        A press is used when it is the strip's, as `_press` says. The wheel moves the view, and is used only by
-        a song that does not fit the strip. A key goes to `key`.
+        A press is used when it is the strip's, as `_press` says. The wheel goes along the song, alone and with
+        shift, and is used only by a song that does not fit the strip: with ctrl it is not the strip's. A key
+        goes to `key`.
         """
         if event.kind == "key":
             return self.key(event)
         self._mouse, self._mods = event.pos, event.mods
         seen = self.map
         if event.kind == "wheel":
-            self.offset = seen.scrolled(-event.wheel * WHEEL_PX).offset
+            way, steps = wheel(event)
+            if way == ZOOM:
+                return False
+            self.offset = seen.scrolled(-steps * WHEEL_PX).offset
             return seen.most > 0
         if event.kind == "down":
             # A press while another button is held begins nothing.
@@ -448,8 +491,8 @@ class SongStrip(Widget):
         """Take a press of a button, and say whether it was the strip's.
 
         The right button is the strip's on a block and past the last block, and `asked` is told of it. The left
-        button is the strip's on a block. As the second press of a double press on a name it is told to `named`,
-        and does no more. Any other picks the block, tells `changed`, and begins what a drag makes into carrying.
+        button is the strip's on a block. A double press on a name is told to `named`, and does no more. Any
+        other picks the block, tells `changed`, and begins what a drag makes into carrying.
         """
         self._drag = None
         index, pos = seen.block_at(event.pos), event.pos
@@ -461,11 +504,7 @@ class SongStrip(Widget):
             return True
         if event.button != 1 or index is None:
             return False
-        before, now = self._last, self.clock()
-        self._last = (index, now) if pos[1] < seen.rect[1] + NAME_H else None
-        if self._last is not None and before is not None and before[0] == index and now - before[1] <= DOUBLE:
-            # A third press begins anew.
-            self._last = None
+        if event.double and pos[1] < seen.rect[1] + NAME_H:
             if self.named is not None:
                 self.named(index)
             return True
@@ -513,22 +552,19 @@ class SongStrip(Widget):
         self.offset = self.map.scrolled(way * EDGE_PX).offset
 
     def draw(self, canvas: Canvas) -> None:
-        """Draw the blocks in view, the line under the picked one, the bar while the song scrolls, and the playhead.
+        """Draw the blocks in view, the line under the picked one, and the playhead. The scroll bar draws itself.
 
         While a block is carried, it is drawn picked up, and a bright line stands in the gap its release would
         put it in. The line has a plus at its top while ctrl is held. Nothing is drawn outside the rectangle.
         """
+        self._sync()
         seen = self.map
-        x, y, w, _ = self.rect
+        _, y, _, _ = self.rect
         lifted, gap = self.lifted, self.gap
         with canvas.clip(self.rect):
             canvas.box(self.rect, theme.PANEL)
             for index in seen.in_view():
                 self._draw_block(canvas, seen, index, index == lifted)
-            thumb = seen.thumb()
-            if thumb is not None:
-                canvas.box((x, thumb[1], w, BAR_H), theme.BACKGROUND)
-                canvas.box(thumb, theme.LINE)
             if self._playhead is not None:
                 canvas.vline(seen.x(self._playhead), y, seen.block_h + theme.STRIP, theme.ACTIVE)
             if gap is not None:

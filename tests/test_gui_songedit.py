@@ -10,12 +10,13 @@ import numpy as np
 
 from rowsynth.errors import RowSynthError
 from rowsynth.gui import songview
-from rowsynth.gui.songedit import (added, allowed, channel_added, channel_dropped, channel_moved, channel_renamed,
-                                   copied, dropped, moved, renamed, repeated, resized, tempos, transposed,
-                                   with_tempo)
+from rowsynth.gui.songedit import (LETTERS, added, allowed, channel_added, channel_copied, channel_dropped,
+                                   channel_kind, channel_moved, channel_renamed, copied, dropped, drum_added,
+                                   drum_removed, drum_set, gridded, grids, moved, renamed, repeated, resized, tempos,
+                                   transposed, with_tempo)
 from rowsynth.layers import render_groups
 from rowsynth.project import Project
-from rowsynth.song import render_loop, render_stems, up
+from rowsynth.song import render_loop, render_song, render_stems, up
 
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 
@@ -314,6 +315,148 @@ class Channels(unittest.TestCase):
             with self.subTest(to=to):
                 self.assertEqual(refusal(self, channel_moved, song(), "low", to),
                                  f"{to!r} is no place among the channels, of which there are 3, counted from 0")
+
+
+class Kinds(unittest.TestCase):
+    def test_a_copied_channel_has_the_settings_and_the_texts_of_its_channel_and_stands_after_it(self) -> None:
+        given = song()
+        made = changed(self, channel_copied, given, "low")
+        self.assertEqual((list(made["channels"]), made["channels"]["low2"]),
+                         (["tune", "low", "low2", "beat"], {"inst": "bass", "pan": -0.3}))
+        self.assertEqual([list(texts) for texts in made["patterns"].values()],
+                         [["tune", "low", "low2", "beat"], ["tune", "low", "low2"]])
+        self.assertEqual((read(made, "b")["low2"], read(made, "a")["low2"]),
+                         (read(given, "b")["low"], read(given, "a")["low"]))
+        # The next copy has the next free name, a name can be given, and it is held to what a name can be.
+        again = channel_copied(made, "low")
+        self.assertEqual((list(again["channels"])[1:4], list(channel_copied(given, "beat", "hats")["channels"])[-1]),
+                         (["low", "low3", "low2"], "hats"))
+        self.assertEqual([refusal(self, channel_copied, given, *names) for names in (("low", "tune"), ("none",))],
+                         ["the song has a channel called 'tune' already", "the song has no channel called 'none'"])
+
+    def test_a_channel_with_no_notes_is_made_a_drum_channel_or_a_tuned_one_and_one_with_notes_is_refused(self) -> None:
+        given = channel_added(channel_added(song(), "spare", "thud"), "hits", "thud", True)
+        # Rests alone are read either way, so a channel that has only those changes its kind as well.
+        given["patterns"]["a"].update(spare="r1", hits="r1")
+        drums = changed(self, channel_kind, given, "spare", True)
+        self.assertEqual((drums["channels"]["spare"], drums["patterns"]),
+                         ({"inst": "thud", "drums": True}, given["patterns"]))
+        tuned = changed(self, channel_kind, given, "hits", False)
+        self.assertEqual((tuned["channels"]["hits"], channel_kind(given, "hits", True)), ({"inst": "thud"}, given))
+        noted = "has notes in pattern 'a': a channel is made a"
+        self.assertEqual([refusal(self, channel_kind, given, *asked)
+                          for asked in (("tune", True), ("beat", False), ("none", True))],
+                         [f"channel 'tune' {noted} drum channel while it has none",
+                          f"channel 'beat' {noted} tuned channel while it has none",
+                          "the song has no channel called 'none'"])
+
+
+class Drums(unittest.TestCase):
+    def test_an_added_drum_is_the_last_of_the_table_and_a_song_with_no_table_gets_one(self) -> None:
+        self.assertEqual(LETTERS, "kshHt")
+        given = song()
+        made = changed(self, drum_added, given, "H", "bass")
+        self.assertEqual((list(made["drums"]), made["drums"]["H"]), (["k", "t", "H"], {"inst": "bass", "note": "c4"}))
+        self.assertEqual(drum_added(given, "s", "thud", "a2")["drums"]["s"], {"inst": "thud", "note": "a2"})
+        bare = one({"tune": "o4 c1"})
+        del bare["drums"]
+        self.assertEqual(changed(self, drum_added, bare, "k", "thud")["drums"], {"k": {"inst": "thud", "note": "c4"}})
+        self.assertEqual([refusal(self, drum_added, given, *asked)
+                          for asked in (("x", "thud"), ("kk", "thud"), (None, "thud"), ("k", "thud"),
+                                        ("s", "thud", "no"))],
+                         ["a drum is called by one of the letters k s h H t, not 'x'",
+                          "a drum is called by one of the letters k s h H t, not 'kk'",
+                          "a drum is called by one of the letters k s h H t, not None",
+                          "the song has a drum 'k' already", "not a note: 'no'"])
+
+    def test_a_drum_has_its_instrument_its_note_its_rows_and_its_velocity_set_and_the_last_two_taken_away(
+            self) -> None:
+        given = song()
+        made = given
+        for key, value in (("inst", "bass"), ("note", "e2"), ("rows", 1), ("vel", 0.5)):
+            made = changed(self, drum_set, made, "k", key, value)
+        self.assertEqual((made["drums"], given["drums"]["k"]),
+                         ({"k": {"inst": "bass", "note": "e2", "rows": 1, "vel": 0.5}, "t": given["drums"]["t"]},
+                          {"inst": "thud", "note": "c2", "rows": 2}))
+        # A hit is held for the rows its drum has, and for those of its text where the drum has none of its own.
+        self.assertEqual([read(drum_set(given, "k", "rows", rows), "a")["beat"][0][0][1] for rows in (1, None)],
+                         [1.0, 4.0])
+        self.assertEqual(drum_set(drum_set(made, "k", "rows", None), "k", "vel", None)["drums"]["k"],
+                         {"inst": "bass", "note": "e2"})
+        self.assertEqual([refusal(self, drum_set, given, *asked)
+                          for asked in (("s", "rows", 1), ("k", "gain", 1), ("k", "inst", None), ("k", "note", None),
+                                        ("k", "note", "h9"), ("k", "inst", ""), ("k", "rows", 0), ("k", "rows", "2"),
+                                        ("k", "vel", 1.5), ("k", "vel", True))],
+                         ["the song has no drum 's'", "a drum has inst, note, rows, vel, and no 'gain'",
+                          "drum 'k' cannot do without its inst", "drum 'k' cannot do without its note",
+                          "not a note: 'h9'", "the instrument of a drum is a name, not ''",
+                          "the rows a drum is held for are a number above 0, not 0",
+                          "the rows a drum is held for are a number above 0, not '2'",
+                          "the velocity of a drum is a number from 0 to 1, not 1.5",
+                          "the velocity of a drum is a number from 0 to 1, not True"])
+
+    def test_a_drum_that_no_pattern_plays_is_removed_and_the_last_takes_the_table_with_it(self) -> None:
+        given = song()
+        made = changed(self, drum_removed, given, "t")
+        self.assertEqual(made["drums"], {"k": given["drums"]["k"]})
+        self.assertEqual([refusal(self, drum_removed, given, letter) for letter in ("k", "s")],
+                         ["drum 'k' is played in pattern 'a' by channel 'beat', and a drum that is played is not "
+                          "removed", "the song has no drum 's'"])
+        # With its hits rubbed out the last drum goes, and the song is one with no drum table.
+        quiet = dict(made, patterns={**made["patterns"], "a": {**made["patterns"]["a"], "beat": "r1"}})
+        self.assertNotIn("drums", changed(self, drum_removed, quiet, "k"))
+
+
+class Grids(unittest.TestCase):
+    #: A song of one pattern with an echo, a drum of rows of its own, a dotted note and triplets, at 4 rows a beat.
+    SONG = {"row_ticks": 6,
+            "drums": {"k": {"inst": "thud", "note": "c2", "rows": 2}, "t": {"inst": "thud", "note": "c5"}},
+            "channels": {"tune": {"inst": "lead", "echo": {"rows": 3, "gain": 0.3}}, "low": {"inst": "bass"},
+                         "beat": {"inst": "thud", "drums": True}},
+            "patterns": {"a": {"tune": "o4 l8 c. e16 g4 l12 c e g > c4", "low": "o2 c2 g2", "beat": "l4 k t8 k8 k t"}},
+            "order": ["a"], "chords": {"a": ["C"]}}
+
+    def test_a_song_at_another_grid_sounds_sample_for_sample_as_it_did(self) -> None:
+        given = self.SONG
+        # At this rate a tick is a whole number of samples, as it is at the rate the window plays at.
+        rate = 2400
+        before = render_song(project(given).song("s"), rate=rate)
+        self.assertEqual((grids(given), before["rows"], len(before["left"]) > rate),
+                         ([1, 2, 3, 4, 6, 8, 12], 16.0, True))
+        for rows in grids(given):
+            with self.subTest(rows=rows):
+                after = render_song(project(gridded(given, rows)).song("s"), rate=rate)
+                same(self, after, before)
+                self.assertAlmostEqual(after["seconds"], before["seconds"])
+                self.assertAlmostEqual(after["rows"], 4.0 * rows)
+
+    def test_the_ticks_of_a_row_the_echoes_and_the_rows_of_the_drums_go_with_the_grid_and_nothing_else_does(
+            self) -> None:
+        given = self.SONG
+        made = changed(self, gridded, given, 8)
+        self.assertEqual((made["rows_per_beat"], made["row_ticks"], made["channels"]["tune"]["echo"],
+                          made["drums"]["k"], made["drums"]["t"]),
+                         (8, 3, {"rows": 6, "gain": 0.3}, {"inst": "thud", "note": "c2", "rows": 4},
+                          given["drums"]["t"]))
+        self.assertEqual({key: value for key, value in made.items() if key in ("patterns", "order", "chords")},
+                         {key: given[key] for key in ("patterns", "order", "chords")})
+        # Rows that come out as no whole number are written as they are, and there and back is the song it was.
+        self.assertEqual((gridded(given, 2)["channels"]["tune"]["echo"]["rows"], gridded(gridded(given, 3), 4)),
+                         (1.5, {**given, "rows_per_beat": 4}))
+        # The grid the song has is among those it can be given, whatever its ticks.
+        odd = {**given, "row_ticks": 7, "rows_per_beat": 5}
+        self.assertEqual((grids(odd), grids({**given, "row_ticks": 1})), ([1, 5, 7], [1, 2, 4]))
+
+    def test_a_grid_at_which_a_row_would_last_no_whole_number_of_ticks_is_refused_and_so_is_one_that_is_none(
+            self) -> None:
+        cannot = "and a row lasts a whole number of them: the song cannot sound the same at that grid"
+        self.assertEqual([refusal(self, gridded, self.SONG, rows) for rows in (5, 16, 48, 0, 2.0, True)],
+                         [f"with 5 rows to a beat a row would last 4.8 ticks, {cannot}",
+                          f"with 16 rows to a beat a row would last 1.5 ticks, {cannot}",
+                          f"with 48 rows to a beat a row would last 0.5 ticks, {cannot}",
+                          "the rows of a beat are a whole number, 1 or more, not 0",
+                          "the rows of a beat are a whole number, 1 or more, not 2.0",
+                          "the rows of a beat are a whole number, 1 or more, not True"])
 
 
 class Layers(unittest.TestCase):

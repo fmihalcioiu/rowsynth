@@ -1,4 +1,4 @@
-"""Tests for a song changed as a whole in the song panel: its order, its patterns, its channels, its tempo and key."""
+"""Tests for a song changed as a whole in the song panel: its order, patterns, channels, drums, settings and chords."""
 from __future__ import annotations
 
 import json
@@ -12,14 +12,17 @@ from pathlib import Path
 
 import numpy as np
 
+from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, popups, songedit, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
+from rowsynth.gui.chordview import ChordBox, ChordList
 from rowsynth.gui.font import Font
 from rowsynth.gui.model import Model
 from rowsynth.gui.popups import Menu, TextBox
 from rowsynth.gui.session import POLL_EVERY, Session
-from rowsynth.gui.songpanel import (ELSEWHERE, MIXER, SongPanel, arrange, bars_text, free_name, in_name, shift_text,
-                                    step_to, tempo_steps, tempo_text)
+from rowsynth.gui.songpanel import (ELSEWHERE, MIXER, NO_LETTER, SongPanel, arrange, bars_text, free_name, in_name,
+                                    new_channel, shift_text, step_to, tempo_steps, tempo_text)
+from rowsynth.gui.steps import LANE_H, PLUS_GAP
 from rowsynth.gui.strips import EDGE_PX
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
@@ -65,10 +68,13 @@ PROJECT = {
     "songs": {"tune": TUNE},
 }
 
-#: What the menu of a block of one bar reads, and the menu of a channel: None is the line between two groups.
-BLOCK_MENU = ["Play it again after this", "Copy as a new pattern", "New empty pattern after this", "Rename...",
-              "Length (1 bar)...", None, "Remove from the song"]
-CHANNEL_MENU = ["Rename...", "Move up", "Move down", "New tuned channel", "New drum channel", None, "Remove"]
+#: What the menu of a block of one bar reads, the menu of a tuned channel, that of a drum of the steps and that of
+#: a chord: each begins with what the menu of any named thing does, and None is the line before its last item.
+BLOCK_MENU = ["Rename...", "Copy", "Play it again after this", "New empty pattern after this", "Length (1 bar)...",
+              None, "Remove"]
+CHANNEL_MENU = ["Rename...", "Copy", "Move up", "Move down", "Make it a drum channel", None, "Remove"]
+DRUM_MENU = ["Rename...", "Copy", "Instrument", "Note...", "Length...", "Velocity...", None, "Remove"]
+CHORD_MENU = ["Rename...", "Copy", "Change...", None, "Remove"]
 
 
 class Speaker:
@@ -140,9 +146,8 @@ class Opened(unittest.TestCase):
         self.now, self.stamp = 100.0, STAMP
         self.speaker = Speaker()
         self.session = Session(Model(self.path, RATE), self.speaker, lambda: self.now)
-        self.ui = Ui()
+        self.ui = Ui(clock=lambda: self.now)
         self.panel = SongPanel(self.session, self.ui)
-        self.panel.strip.clock = lambda: self.now
         self.panel.place(RECT)
         self.panel.update()
         self.strip = self.panel.strip
@@ -252,6 +257,25 @@ class Words(unittest.TestCase):
                           for name, to in (("bass", 0), ("lead", 2))],
                          [["bass", "lead", "kit", "hats"], ["kit", "bass", "lead", "hats"]])
 
+    def test_a_new_channel_is_named_after_the_last_of_its_kind_and_plays_the_instrument_of_the_picked_one(
+            self) -> None:
+        # The picked channel is of the kind: its instrument. It is of the other kind: that of the last of the kind.
+        self.assertEqual([new_channel(TUNE, drums, picked, ()) for drums, picked in
+                          ((False, "lead"), (False, "kit"), (True, "kit"), (True, "lead"), (False, None))],
+                         [("bass2", "tone"), ("bass2", "buzz"), ("kit2", "thud"), ("kit2", "thud"),
+                          ("bass2", "buzz")])
+        # With no channel of the kind yet it has a name of its own, and the instrument of the picked channel, or
+        # of the first there is, or the first the song can use.
+        tuned = {**TUNE, "channels": {"lead": {"inst": "tone"}, "drums": {"inst": "buzz"}}}
+        self.assertEqual([new_channel(tuned, True, picked, ()) for picked in ("drums", None)],
+                         [("drums2", "buzz"), ("drums2", "tone")])
+        bare = {**TUNE, "channels": {}}
+        self.assertEqual([new_channel(bare, drums, None, ("thud", "tone")) for drums in (False, True)],
+                         [("tuned", "thud"), ("drums", "thud")])
+        with self.assertRaises(RowSynthError) as refused:
+            new_channel(bare, False, None, ())
+        self.assertEqual(str(refused.exception), "there is no instrument for a new channel to play: make one first")
+
     def test_what_is_shown_of_bars_and_of_a_move_and_which_characters_a_name_can_hold(self) -> None:
         self.assertEqual([bars_text(bars) for bars in (1, 4, 0.5, 1.5)], ["1 bar", "4 bars", "0.5 bars", "1.5 bars"])
         self.assertEqual([shift_text(semis) for semis in (0, 2, -3, 12)], ["0", "+2", "-3", "+12"])
@@ -294,7 +318,7 @@ class Strip(Opened):
     def test_the_view_of_a_strip_that_scrolls_goes_along_under_a_block_that_is_carried_and_stays_when_it_is_moved(
             self) -> None:
         # In a panel this narrow the strip is 48 pixels wide, and the song of 64 rows does not fit it.
-        self.panel.place((124, 22, 56, 300))
+        self.panel.place((124, 22, 56 + theme.PLUS + 2, 300))
         x, y, w, _ = self.strip.rect
         # The panel gives the strip its frame: a block carried to the end of the strip has the view move that way.
         self.ui.handle(Event("down", self.block(0), button=1))
@@ -346,6 +370,15 @@ class Strip(Opened):
         x, y, w, _ = self.strip.rect
         self.click((x + w - 1, y + 40), button=3)
         self.assertIsNone(self.ui.modal)
+
+    def test_the_plus_after_the_last_block_puts_an_empty_pattern_at_the_end_of_the_order(self) -> None:
+        before = self.song()
+        self.click(middle(self.panel.more.rect))
+        made = self.song()
+        self.assertEqual((differing(before, made), made["order"]), (["patterns.c2", "order"], ["a", "b", "c", "c2"]))
+        # It is as long as the pattern it comes after, has no notes, and is the picked block.
+        self.assertEqual((self.read("c2").rows, self.strip.picked, self.session.shown, self.session.undo_label),
+                         (32.0, 3, "c2", "tune: new pattern c2 at the end"))
 
     def test_play_it_again_puts_the_pattern_once_more_after_its_block(self) -> None:
         before = self.song()
@@ -511,13 +544,15 @@ class Channels(Opened):
         enabled = {}
         for channel in ("lead", "bass", "kit"):
             self.key("escape")
-            enabled[channel] = [item.enabled for item in self.menu(self.row(channel)).items[1:3]]
+            enabled[channel] = [item.enabled for item in self.menu(self.row(channel)).items[2:4]]
         # The first tuned channel does not go up, the last not down, and the one drum channel neither way.
         self.assertEqual(enabled, {"lead": [False, True], "bass": [True, False], "kit": [False, False]})
         # A press on an item that is dim does nothing, and the right button picked no channel.
-        self.click(middle(self.ui.modal.rows[1]))
-        self.assertEqual((self.ui.modal.items[1].text, self.panel.channel, self.session.can_undo),
+        self.click(middle(self.ui.modal.rows[2]))
+        self.assertEqual((self.ui.modal.items[2].text, self.panel.channel, self.session.can_undo),
                          ("Move up", "lead", False))
+        # A drum channel can be made a tuned one.
+        self.assertEqual(self.ui.modal.items[4].text, "Make it a tuned channel")
 
     def test_move_up_and_move_down_change_the_place_of_a_channel_in_the_song_and_in_the_list(self) -> None:
         before = self.song()
@@ -525,27 +560,74 @@ class Channels(Opened):
         # Nothing that the song holds is another: it is the order of its channels alone.
         self.assertEqual((list(self.song()["channels"]), differing(before, self.song())),
                          (["bass", "lead", "kit"], []))
-        self.assertEqual(([row.key for row in self.panel.list.rows if not row.head], self.panel.channel),
+        self.assertEqual(([row.key for row in self.panel.list.rows if isinstance(row.key, str)], self.panel.channel),
                          (["bass", "lead", "kit"], "lead"))
         self.assertEqual(self.session.undo_label, "tune: channel bass moved up")
         self.choose(self.row("bass"), "Move down")
         self.assertEqual((self.song(), self.session.undo_label), (before, "tune: channel bass moved down"))
 
-    def test_a_new_channel_plays_the_instrument_of_the_one_it_was_asked_on_has_a_free_name_and_is_picked(self) -> None:
+    def test_the_plus_after_the_last_channel_of_a_kind_makes_one_more_of_that_kind_which_is_picked(self) -> None:
         panel = self.panel
-        self.choose(self.row("bass"), "New tuned")
+        tuned, drums = panel.list.parts
+        # Each plus stands in the row after the last channel of its kind, where the squares of the channels do.
+        x, y, _, _ = panel.list.rect
+        self.assertEqual((panel.channel, tuned.rect, drums.rect, tuned.visible, drums.visible),
+                         ("lead", (x + theme.LIST_PAD, self.row("bass")[1] + theme.LIST_ROW_H, theme.PLUS, theme.PLUS),
+                          (x + theme.LIST_PAD, self.row("kit")[1] + theme.LIST_ROW_H, theme.PLUS, theme.PLUS),
+                          True, True))
+        # The new channel is named after the last of its kind, and plays the instrument of the picked one of its kind.
+        self.click(middle(tuned.rect))
         self.assertEqual((self.song()["channels"]["bass2"], list(self.song()["channels"])),
-                         ({"inst": "buzz"}, ["lead", "bass", "kit", "bass2"]))
+                         ({"inst": "tone"}, ["lead", "bass", "kit", "bass2"]))
         self.assertEqual((panel.channel, panel.list.picked, panel.roll.channel, panel.roll.notes),
                          ("bass2", "bass2", "bass2", ()))
         self.assertEqual(self.session.undo_label, "tune: new tuned channel bass2")
-        # The next one asked on the same channel has the next free name.
-        self.choose(self.row("bass"), "New tuned")
+        # The plus has gone down a row with the list, and the next channel has the next free name.
+        self.click(middle(tuned.rect))
         self.assertEqual((list(self.song()["channels"])[-1], panel.channel), ("bass3", "bass3"))
-        self.choose(self.row("kit"), "New drum")
+        # With a tuned channel picked, a new drum channel plays the instrument of the last drum channel.
+        self.click(middle(drums.rect))
         self.assertEqual((self.song()["channels"]["kit2"], panel.channel, panel.steps.visible, panel.steps.picked),
                          ({"inst": "thud", "drums": True}, "kit2", True, "kit2"))
         self.assertEqual(self.session.undo_label, "tune: new drum channel kit2")
+        # The row of a plus takes no press beside its button and is never picked: the keys that move the pick
+        # pass it.
+        self.click((tuned.rect[0] + 40, tuned.rect[1] + 3))
+        self.assertEqual((panel.channel, self.ui.focus), ("kit2", None))
+        self.click(self.row("bass3"))
+        self.ui.handle(Event("key", key="down"))
+        self.assertEqual((panel.channel, panel.list.picked), ("kit", "kit"))
+        # Folded away with the channels of its kind, a plus is not seen.
+        self.click(self.row(("TUNED",)))
+        self.assertEqual((tuned.visible, drums.visible), (False, True))
+
+    def test_copy_makes_a_channel_with_the_same_notes_and_one_with_no_notes_is_made_a_drum_channel_and_back(
+            self) -> None:
+        panel, before = self.panel, self.song()
+        self.choose(self.row("bass"), "Copy")
+        made = self.song()
+        self.assertEqual((list(made["channels"]), made["channels"]["bass2"], made["patterns"]["a"]["bass2"],
+                          list(made["patterns"]["b"])),
+                         (["lead", "bass", "bass2", "kit"], {"inst": "buzz"}, before["patterns"]["a"]["bass"],
+                          ["lead", "kit"]))
+        self.assertEqual((panel.channel, self.session.undo_label), ("bass2", "tune: channel bass copied as bass2"))
+        # A channel with notes is not made a drum channel: it is refused, and said.
+        saved = self.path.read_text(encoding="utf-8")
+        self.choose(self.row("bass2"), "Make it a drum")
+        self.assertEqual((self.session.message, self.path.read_text(encoding="utf-8")),
+                         ("channel 'bass2' has notes in pattern 'a': a channel is made a drum channel while it has "
+                          "none", saved))
+        # A new channel has none. Made a drum channel it stands among those, and is shown as steps.
+        self.click(middle(panel.list.parts[0].rect))
+        self.choose(self.row("bass3"), "Make it a drum")
+        self.assertEqual((self.song()["channels"]["bass3"], panel.channel, panel.steps.visible),
+                         ({"inst": "buzz", "drums": True}, "bass3", True))
+        self.assertEqual(self.session.undo_label, "tune: channel bass3 made a drum channel")
+        menu = self.menu(self.row("bass3"))
+        self.assertEqual(menu.items[4].text, "Make it a tuned channel")
+        self.click(middle(menu.rows[4]))
+        self.assertEqual((self.song()["channels"]["bass3"], panel.steps.visible, panel.roll.visible),
+                         ({"inst": "buzz"}, False, True))
 
     def test_rename_opens_a_box_over_the_row_and_the_channel_has_its_new_name_everywhere_and_stays_picked(
             self) -> None:
@@ -590,6 +672,198 @@ class Channels(Opened):
                          (before, "tune: channel bass removed"))
 
 
+class Kit(Opened):
+    def setUp(self) -> None:
+        self.opened(Project.from_dict(PROJECT).save)
+        self.click(self.row("kit"))
+        self.steps = self.panel.steps
+
+    def label(self, place: int) -> tuple[int, int]:
+        """A pixel on the label of the lane at a place in the steps."""
+        x, y, _, _ = self.steps.grid.label(place)
+        return x + 3, y + 3
+
+    def test_the_plus_under_the_last_lane_asks_for_a_letter_and_adds_a_drum_that_the_picked_channel_can_play(
+            self) -> None:
+        steps = self.steps
+        self.assertEqual(([lane.letter for lane in steps.lanes], steps.plus.visible, steps.plus.enabled,
+                          steps.plus.rect[:2]),
+                         (["k", "h"], True, True, (steps.rect[0], steps.grid.y(1) + LANE_H + PLUS_GAP)))
+        self.click(middle(steps.plus.rect))
+        box = self.box()
+        self.assertEqual((box.text, box.most, self.ui.help),
+                         ("", 1, "the letter of the new drum, one of s H t: enter adds it, escape leaves it"))
+        # A letter the song has a drum for does not go in, and neither does a character that no drum is called by.
+        self.type("kx", enter=False)
+        self.assertEqual(box.text, "")
+        self.type("s")
+        self.assertEqual((self.song()["drums"]["s"], list(self.song()["drums"]), self.session.undo_label),
+                         ({"inst": "thud", "note": "c4"}, ["k", "h", "s"], "tune: new drum s"))
+        # No channel plays it yet, so it has a lane in the picked drum channel, where a hit of it can be put.
+        self.assertEqual([(lane.channel, lane.letter, lane.inst) for lane in steps.lanes],
+                         [("kit", "k", "thud"), ("kit", "h", "thud"), ("kit", "s", "thud")])
+        x, y, _, _ = steps.grid.square(2, 2)
+        self.click((x + 2, y + 9))
+        kit = next(held for held in self.read("a").channels if held.name == "kit")
+        self.assertEqual(([(note.drum, note.row) for note in kit.notes], self.session.undo_label),
+                         ([("k", 0.0), ("s", 2.0), ("h", 4.0), ("k", 8.0), ("h", 12.0)],
+                          "kit of pattern a: hit placed"))
+        # With a drum for every letter there is, the plus is dim and says why.
+        for letter in "Ht":
+            self.click(middle(steps.plus.rect))
+            self.type(letter)
+        self.assertEqual((list(self.song()["drums"]), steps.plus.enabled, steps.plus.help),
+                         (["k", "h", "s", "H", "t"], False, NO_LETTER))
+
+    def test_a_song_with_no_drum_table_gets_one_with_its_first_drum(self) -> None:
+        self.outside(lambda song: (song.pop("drums"), song["patterns"]["a"].pop("kit"), song["patterns"].pop("b"),
+                                   song["chords"].pop("b"), song.update(order=["a", "c"])))
+        self.panel.update()
+        self.assertEqual((self.steps.visible, self.steps.lanes, self.steps.plus.visible), (True, (), True))
+        self.click(middle(self.steps.plus.rect))
+        self.type("t")
+        self.assertEqual((self.song()["drums"], [lane.letter for lane in self.steps.lanes]),
+                         ({"t": {"inst": "thud", "note": "c4"}}, ["t"]))
+
+    def test_the_menu_of_a_lane_sets_what_its_drum_plays_and_a_drum_that_is_played_is_not_removed(self) -> None:
+        menu = self.menu(self.label(1))
+        self.assertEqual(([item and item.text for item in menu.items], [item.enabled for item in menu.items if item]),
+                         (DRUM_MENU, [False, False, True, True, True, True, True]))
+        # The instrument is picked from a second menu, of those the song can use, the one the drum plays dim.
+        self.click(middle(menu.rows[2]))
+        second = self.ui.modal
+        self.assertEqual([(item.text, item.enabled) for item in second.items],
+                         [("tone", True), ("buzz", True), ("thud", False)])
+        self.click(middle(second.rows[1]))
+        self.assertEqual((self.song()["drums"]["h"], self.steps.lanes[1].inst, self.session.undo_label),
+                         ({"inst": "buzz", "note": "c6"}, "buzz", "tune: drum h: instrument buzz"))
+        # Its note, the rows it is held for and its velocity are typed into a box over its label.
+        for item, typed, key, value, label in (("Note", "d#3", "note", "d#3", "tune: drum h: note d#3"),
+                                               ("Length", "2", "rows", 2, "tune: drum h: length 2"),
+                                               ("Velocity", "0.5", "vel", 0.5, "tune: drum h: velocity 0.5")):
+            self.choose(self.label(1), item)
+            self.assertEqual(self.box().rect, popups.over(self.steps.name_rect(1), self.ui.size))
+            self.type(typed)
+            self.assertEqual((self.song()["drums"]["h"][key], self.session.undo_label), (value, label))
+        # The box holds what the drum has. Left empty, it takes the length the drum has of its own away.
+        self.choose(self.label(1), "Length")
+        self.assertEqual(self.box().text, "2")
+        self.key("backspace")
+        self.key("return")
+        self.assertEqual((self.song()["drums"]["h"], self.session.undo_label),
+                         ({"inst": "buzz", "note": "d#3", "vel": 0.5}, "tune: drum h: length as its text says"))
+        # A note that is none is refused and said, and the box stays open to be mended.
+        self.choose(self.label(1), "Note")
+        self.type("x9")
+        self.assertEqual((self.box().text, self.session.message), ("x9", "not a note: 'x9'"))
+        self.key("escape")
+        # A drum that a pattern plays is not removed, and one that none plays is.
+        self.choose(self.label(1), "Remove")
+        self.assertEqual((self.session.message, list(self.song()["drums"])),
+                         ("drum 'h' is played in pattern 'a' by channel 'kit', and a drum that is played is not "
+                          "removed", ["k", "h"]))
+        self.click(middle(self.steps.plus.rect))
+        self.type("s")
+        self.choose(self.label(2), "Remove")
+        self.assertEqual((list(self.song()["drums"]), self.session.undo_label), (["k", "h"], "tune: drum s removed"))
+
+
+class Chords(Opened):
+    def setUp(self) -> None:
+        self.opened(Project.from_dict(PROJECT).save)
+
+    def table(self) -> dict:
+        """The chords of the project as the file holds them now."""
+        return json.loads(self.path.read_text(encoding="utf-8"))["chords"]
+
+    def listed(self) -> ChordList:
+        """Press the button CHORDS, and give the list of the chords that this opened."""
+        self.click(middle(self.panel.chords.rect))
+        self.assertIsInstance(self.ui.modal, ChordList)
+        return self.ui.modal
+
+    def pick(self, name: str, text: str) -> None:
+        """Open the list of the chords, press on a chord, and click the item of its menu whose text starts so."""
+        listed = self.listed()
+        self.click(middle(listed.rows[[item.text for item in listed.items].index(name)]))
+        menu = self.ui.modal
+        self.click(middle(menu.rows[next(index for index, item in enumerate(menu.items)
+                                         if item is not None and item.text.startswith(text))]))
+
+    def test_the_button_opens_the_list_of_the_chords_under_it_with_a_plus_that_makes_a_new_one(self) -> None:
+        x, y, _, h = self.panel.chords.rect
+        listed = self.listed()
+        self.assertEqual(([item.text for item in listed.items], listed.rect[:2]), (["C", ""], (x, y + h)))
+        # The right button on a chord opens its menu as the left one does: the menu of a named thing.
+        self.click(middle(listed.rows[0]), button=3)
+        menu = self.ui.modal
+        self.assertEqual(([item and item.text for item in menu.items], [item.enabled for item in menu.items if item]),
+                         (CHORD_MENU, [True, False, True, True]))
+        self.key("escape")
+        # The plus opens the box a chord is made in, and OK adds the chord to the table as one step.
+        self.click(middle(self.listed().rows[-1]))
+        box = self.ui.modal
+        self.assertIsInstance(box, ChordBox)
+        box.choose(7, "major")
+        self.key("return")
+        self.assertEqual((self.table(), self.session.undo_label, self.ui.modal),
+                         ({**PROJECT["chords"], "G": {"root": 7, "tones": [7, 11, 2]}}, "new chord G", None))
+        # A name the table has is refused and said, and the box stays open.
+        self.click(middle(self.listed().rows[-1]))
+        self.key("return")
+        self.assertEqual((self.session.message, type(self.ui.modal)),
+                         ("the project has a chord called 'C' already", ChordBox))
+
+    def test_a_chord_is_renamed_in_every_bar_that_names_it_and_changed_in_the_box_it_was_made_in_each_as_one_step(
+            self) -> None:
+        before = self.path.read_text(encoding="utf-8")
+        self.pick("C", "Rename")
+        self.assertEqual((self.box().text, self.box().rect), ("C", popups.over(self.panel.chords.rect, self.ui.size)))
+        self.type("home")
+        self.assertEqual((self.table(), self.song()["chords"], self.session.undo_label),
+                         ({"home": PROJECT["chords"]["C"]}, {"a": ["home"], "b": ["home"], "c": ["home", "home"]},
+                          "chord C renamed to home"))
+        self.back()
+        self.assertEqual((self.path.read_text(encoding="utf-8"), self.session.can_undo), (before, False))
+        # The box opens on the chord: its root, its kind and its name. Left as it was, nothing is saved.
+        self.pick("C", "Change")
+        box = self.ui.modal
+        self.assertEqual((box.heading, box.root, box.kind, box.name.text), ("CHORD", 0, "major", "C"))
+        self.key("return")
+        self.assertEqual((self.ui.modal, self.session.can_undo), (None, False))
+        # Under the name it has, the chord has other notes, and the bars name it as before.
+        self.pick("C", "Change")
+        self.ui.modal.choose(0, "sus4")
+        self.ui.modal.name.text = "C"
+        self.key("return")
+        self.assertEqual((self.table(), self.song()["chords"], self.session.undo_label),
+                         ({"C": {"root": 0, "tones": [0, 5, 7]}}, TUNE["chords"], "chord C changed"))
+        # Given another name in the box, it is renamed in every bar as well, and the two are one step.
+        self.pick("C", "Change")
+        self.ui.modal.choose(0, "minor")
+        self.assertEqual(self.ui.modal.name.text, "C")
+        self.ui.modal.name.text = "Cm"
+        self.key("return")
+        self.assertEqual((self.table(), self.song()["chords"]["c"], self.session.undo_label),
+                         ({"Cm": {"root": 0, "tones": [0, 3, 7]}}, ["Cm", "Cm"], "chord C changed to Cm"))
+        self.back()
+        self.assertEqual((self.table(), self.song()["chords"]),
+                         ({"C": {"root": 0, "tones": [0, 5, 7]}}, TUNE["chords"]))
+
+    def test_a_chord_that_a_bar_names_is_not_removed_and_one_that_none_names_is(self) -> None:
+        before = self.path.read_text(encoding="utf-8")
+        self.pick("C", "Remove")
+        self.assertEqual((self.session.message, self.path.read_text(encoding="utf-8")),
+                         ("bar 1 of pattern 'a' of song 'tune' is in chord 'C', and a chord that a bar names is not "
+                          "removed", before))
+        self.click(middle(self.listed().rows[-1]))
+        self.ui.modal.choose(9, "minor")
+        self.key("return")
+        self.assertEqual(list(self.table()), ["C", "Am"])
+        self.pick("Am", "Remove")
+        self.assertEqual((self.table(), self.session.undo_label), (PROJECT["chords"], "chord Am removed"))
+
+
 class Settings(Opened):
     def setUp(self) -> None:
         self.opened(Project.from_dict(PROJECT).save)
@@ -620,6 +894,22 @@ class Settings(Opened):
         self.outside(lambda song: song.update(row_ticks=2))
         self.panel.update()
         self.assertEqual((self.shown()[0], self.panel.tempo.picked, len(self.panel.tempo.options)), ("450", 20, 21))
+
+    def test_the_grid_steps_the_rows_of_a_beat_through_those_at_which_the_song_sounds_the_same(self) -> None:
+        panel, before = self.panel, self.song()
+        self.assertEqual((panel.grid.options, panel.grid.picked), (("1", "2", "3", "4", "6", "8", "12"), 3))
+        x, y, w, _ = panel.grid.rect
+        self.click((x + w - 3, y + 3))
+        made = self.song()
+        self.assertEqual((made["rows_per_beat"], made["row_ticks"], differing(before, made)),
+                         (6, 4, ["row_ticks", "rows_per_beat"]))
+        # The tempo is the one it was, and a bar has half as many rows again: the notes are where they were in it.
+        self.assertEqual((self.shown()[0], panel.grid.picked, self.read("a").rows, self.session.undo_label),
+                         ("150", 4, 24.0, "tune: 6 rows to a beat"))
+        self.assertEqual((panel.roll.bar_rows, [note.row for note in panel.roll.notes]), (24, [0.0, 6.0, 12.0, 18.0]))
+        self.click((x + 3, y + 3))
+        self.assertEqual((self.song(), self.session.undo_label),
+                         ({**before, "rows_per_beat": 4}, "tune: 4 rows to a beat"))
 
     def test_the_buttons_of_the_key_move_every_tuned_note_a_semitone_and_the_moves_are_counted(self) -> None:
         before = self.song()
@@ -674,9 +964,12 @@ class Settings(Opened):
             "taken out": lambda: self.choose(self.block(1), "Remove"),
             "channel renamed": lambda: (self.choose(self.row("lead"), "Rename"), self.type("top")),
             "channel moved": lambda: self.choose(self.row("lead"), "Move down"),
-            "new channel": lambda: self.choose(self.row("lead"), "New tuned"),
-            "new drum channel": lambda: self.choose(self.row("lead"), "New drum"),
+            "channel copied": lambda: self.choose(self.row("lead"), "Copy"),
+            "new pattern at the end": lambda: self.click(middle(self.panel.more.rect)),
+            "new channel": lambda: self.click(middle(self.panel.list.parts[0].rect)),
+            "new drum channel": lambda: self.click(middle(self.panel.list.parts[1].rect)),
             "channel removed": lambda: self.choose(self.row("bass"), "Remove"),
+            "grid": lambda: self.click((self.panel.grid.rect[0] + 3, self.panel.grid.rect[1] + 3)),
             "tempo": lambda: self.step(-1),
             "key": lambda: self.click(middle(self.panel.higher.rect)),
         }
@@ -730,6 +1023,23 @@ class Drawn(Opened):
         self.ui.draw(self.canvas)
         x, y, w, h = rect
         return sum(self.surface.get_at((x + column, y + row))[:3] == colour for column in range(w) for row in range(h))
+
+    def test_the_buttons_that_add_and_the_list_of_the_chords_with_its_plus_are_drawn(self) -> None:
+        panel = self.panel
+        # Each plus is two strokes that cross, in the colour of text, on a small button.
+        strokes = 2 * theme.PLUS_STROKE - 1
+        self.assertEqual([self.ink(plus.rect, theme.TEXT) for plus in (panel.more, *panel.list.parts)], [strokes] * 3)
+        # The name of the grid is dim, on the line over its stepper, and the button of the chords has its arrow.
+        x, _, w, _ = panel.grid.rect
+        self.assertGreater(self.ink((x, arrange(RECT)["bar"][1] + theme.BAR_TOP, w, Font.LINE), theme.DIM), 0)
+        self.assertGreater(self.ink(panel.chords.rect, theme.DIM), 0)
+        # The list of the chords is drawn under its button, its outline whole, with the plus in its last row.
+        self.click(middle(panel.chords.rect))
+        listed = self.ui.modal
+        x, y, w, h = listed.rect
+        self.assertEqual((self.ink((x, y, w, 1), theme.LINE), self.ink((x, y, 1, h), theme.LINE)), (w, h))
+        self.assertEqual((self.ink(listed.rows[-1], theme.TEXT), self.ink(listed.rows[0], theme.TEXT) > 0),
+                         (strokes, True))
 
     def test_the_settings_of_the_song_the_menu_of_a_block_and_the_box_over_a_name_are_drawn(self) -> None:
         # The names of the tempo and of the key are dim, on the line over them in the settings bar, and the count

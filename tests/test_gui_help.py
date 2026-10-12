@@ -22,6 +22,7 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import browser, exports, files, fmview, inspector, instpanel, layerview, layout, mixer, songpanel
 from rowsynth.gui import model as gui_model
 from rowsynth.gui import soundpanel, start, theme, topbar
+from rowsynth.gui import steps as drumsteps
 from rowsynth.gui.font import Font
 from rowsynth.gui.kit import VELOCITY_HELP
 from rowsynth.gui.lists import List, Row
@@ -58,8 +59,10 @@ KINDS: dict[str, tuple[str, ...]] = {
     "the left list, a row that adds": ("press: a new song   right press: ",
                                        "press: a new instrument, empty or one of the ready ones"),
     "the left list, under its rows": (browser.LIST_HELP,),
-    "the strip, a block": ("drag to move a, ",),
+    "the strip, a block": ("press: show a, a drag moves it, ",),
     "the strip, off its blocks": ("the patterns in the order they play",),
+    "the song, its buttons": (songpanel.BLOCK_HELP, songpanel.TUNED_HELP, songpanel.DRUMS_HELP,
+                              songpanel.CHORDS_HELP),
     "the channels, a heading": ("press: fold these channels away",),
     "the channels, a channel": ("press: show channel lead, twice to rename it   right press: its menu   wheel: ",),
     "the channels, under the rows": (songpanel.LIST_HELP,),
@@ -70,8 +73,10 @@ KINDS: dict[str, tuple[str, ...]] = {
     "the roll, the chord of a bar": ("press: pick the chord of bar ",),
     "the roll, its scroll bars": (ALONG_HELP, ACROSS_HELP),
     "the roll, the velocity lane": (VELOCITY_HELP,),
-    "the steps, the squares": ("take the hit away: ", "put a hit: "),
-    "the steps, the names of the drums": (songpanel.STEPS_HELP,),
+    "the steps, the squares": ("press: pick ", "press: put "),
+    "the steps, the names of the drums": ("press: show the velocity of k   right press: its menu   wheel: ",),
+    "the steps, off its squares": (songpanel.STEPS_HELP,),
+    "the steps, its parts": (drumsteps.ALONG_HELP, drumsteps.ACROSS_HELP, VELOCITY_HELP, drumsteps.PLUS_HELP),
     "the mixer, the name of a channel": ("channel lead, lead   press: show its notes",),
     "the mixer, a fader and its toggles": ("press: drag up or down for the volume of the channel, slower with shift   "
                                            "right press: back to 1   wheel: steps it",
@@ -320,6 +325,8 @@ class Walked(unittest.TestCase):
         cls.at("the channels, a heading", app, [spot(song.list, (songpanel.TUNED,))])
         cls.at("the channels, a channel", app, [spot(song.list, "lead")])
         cls.at("the channels, under the rows", app, [under(song.list)])
+        cls.at("the song, its buttons", app, [middle(song.more.rect), *(middle(plus.rect) for plus in song.list.parts),
+                                              middle(song.chords.rect)])
         cls.roll(app, song.roll)
         cls.press(app, spot(song.list, "kit"))
         cls.walk(app, "the song, its drums")
@@ -327,6 +334,9 @@ class Walked(unittest.TestCase):
         squares = [middle(grid.square(drum, row)) for drum in grid.drums_in_view() for row in grid.rows_in_view()]
         cls.at("the steps, the squares", app, [pos for pos in squares if inside(grid.area, pos)])
         cls.at("the steps, the names of the drums", app, [(song.steps.rect[0] + 2, grid.y(0) + 2)])
+        cls.at("the steps, off its squares", app, [(grid.x(4) - 1, grid.y(0) + 2), (grid.x(0), song.steps.rect[1] + 2)])
+        cls.at("the steps, its parts", app, [middle(grid.along), middle(grid.across), *along(song.steps.lane.rect),
+                                             middle(song.steps.plus.rect)])
         song.choice.pick(1)
         cls.walk(app, "the song, its mixer")
         strip = song.mixer.strips[0]

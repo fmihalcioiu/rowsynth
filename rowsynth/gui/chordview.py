@@ -1,8 +1,8 @@
-"""The chords of a pattern as the chord check reads them, a bar's chord changed, and the box a new chord is made in."""
+"""The chords of a pattern as the chord check reads them, the chord table changed, and the box a chord is made in."""
 from __future__ import annotations
 
 import math
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Iterator, Sequence
 from dataclasses import dataclass, replace
 from typing import TYPE_CHECKING
 
@@ -12,8 +12,9 @@ from ..edit import NOTHING
 from ..errors import RowSynthError
 from . import theme
 from .font import Font
+from .kit import Plus, told
 from .layout import Rect
-from .popups import ENTER, TextBox
+from .popups import ENTER, Item, Menu, TextBox
 from .songview import Channel, Note, Pattern, bar_rows
 from .ui import Button, Choice, Event, Pos, Ui, Widget, inside
 
@@ -52,13 +53,18 @@ BUTTON_H = 13
 BESIDE = 10
 OK_W = 28
 CANCEL_W = 46
-#: What the box is headed, what stands before the name, and what the two buttons read.
+#: What the box is headed when it makes a new chord and when it is opened on one there is, what stands before the
+#: name, and what the two buttons read.
 HEADING = "NEW CHORD"
+CHANGING = "CHORD"
 NAME = "NAME"
 OK = "OK"
 CANCEL = "CANCEL"
 #: The one line of help the box has.
-BOX_HELP = "press a key for the root, pick the kind and type the name: enter adds the chord, escape leaves it"
+BOX_HELP = told("pick the root on the keys and the kind under them, and type the name: enter takes the chord, "
+                "escape leaves it")
+#: What the plus of the list of the chords stands for: no chord is called so, since a name has something in it.
+ADD = ""
 
 
 @dataclass(frozen=True)
@@ -242,6 +248,76 @@ def adding(table: dict | None, name: str, made: dict) -> tuple[str, object]:
     return ("chords", {name: made}) if table is None else (f"chords.{name}", made)
 
 
+def _known(table: dict, name: object) -> None:
+    """Refuse a chord that the table of a project does not have."""
+    if not isinstance(name, str) or name not in table:
+        raise RowSynthError(f"the project has no chord called {name!r}")
+
+
+def naming(songs: dict, name: str) -> Iterator[tuple[str, str, int]]:
+    """Each bar of the songs of a project that names a chord: its song, its pattern, and the bar, counted from 0.
+
+    `songs` is the songs as the project holds them. A bar names the chords that share it a space apart.
+    """
+    for song, held in songs.items():
+        for pattern, bars in held.get("chords", {}).items():
+            for bar, text in enumerate(bars):
+                if name in text.split():
+                    yield song, pattern, bar
+
+
+def chord_renamed(table: dict, songs: dict, old: str, new: str) -> list[tuple[str, object]]:
+    """What is saved to give a chord of a project another name, as `Session.change_many` takes it.
+
+    `table` is the chords of the project and `songs` its songs, as it holds them. The table is saved whole,
+    the chord under its new name at the place it had. After it come the strings of every pattern of every
+    song with a bar that names the chord, the new name in its place there: a bar that does not name it keeps
+    its string as it is. Saved as one, the bars never name a chord the table does not have. The new name is
+    held to what `named` allows, and a chord the table does not have is refused.
+    """
+    _known(table, old)
+    named(table, new)
+    changes: list[tuple[str, object]] = [("chords", {new if name == old else name: made
+                                                      for name, made in table.items()})]
+    for song, pattern in dict.fromkeys(found[:2] for found in naming(songs, old)):
+        bars = songs[song]["chords"][pattern]
+        changes.append((f"songs.{song}.chords.{pattern}",
+                        [" ".join(new if name == old else name for name in text.split())
+                         if old in text.split() else text for text in bars]))
+    return changes
+
+
+def chord_changed(table: dict, name: str, made: dict) -> list[tuple[str, object]]:
+    """What is saved to make a chord of a project another chord under its name, as `Session.change_many` takes it.
+
+    `made` is the chord as the table holds one, as `chord` gives it. The bars that name the chord name it as
+    before, and are held to its new notes. A chord the table does not have is refused.
+    """
+    _known(table, name)
+    return [(f"chords.{name}", made)]
+
+
+def chord_removed(table: dict, songs: dict, name: str) -> list[tuple[str, object]]:
+    """What is saved to take a chord out of the table of a project, as `Session.change_many` takes it.
+
+    It is refused while a bar of any song names the chord, and the refusal says the first that does. A chord
+    the table does not have is refused.
+    """
+    _known(table, name)
+    found = next(naming(songs, name), None)
+    if found is not None:
+        song, pattern, bar = found
+        raise RowSynthError(f"bar {bar + 1} of pattern {pattern!r} of song {song!r} is in chord {name!r}, and a "
+                            "chord that a bar names is not removed")
+    return [(f"chords.{name}", NOTHING)]
+
+
+def kind_of(made: dict) -> str:
+    """The kind of `KINDS` that a chord is on its root, by its notes. One that is of none of them is "major"."""
+    tones = set(made["tones"])
+    return next((kind for kind in KINDS if set(chord(made["root"], kind)["tones"]) == tones), "major")
+
+
 def keys(rect: Rect) -> list[Rect]:
     """The twelve keys of a keyboard of one octave in a rectangle, by their pitch classes: from c up.
 
@@ -299,14 +375,45 @@ def box_parts(at: Pos, size: tuple[int, int] | None = None) -> dict[str, Rect]:
     }
 
 
+class ChordList(Menu):
+    """The list that CHORDS opens: the chords of the project by name, and after the last a plus for a new one.
+
+    It is a menu, opened as the modal widget at a place. A press of either button on a chord closes it and
+    calls `chosen` with the name of the chord, for its owner to open the menu of that chord. A press on the
+    plus calls `chosen` with `ADD`, for the box a new chord is made in.
+    """
+
+    def __init__(self, table: dict, at: Pos, chosen: Callable[[object], object] | None = None,
+                 closed: Callable[[], object] | None = None) -> None:
+        super().__init__([*(Item(name, name) for name in table), Item("", ADD)], at, chosen, closed)
+        self.plus = Plus((0, 0, 0, 0))
+
+    def on(self, event: Event, ui: Ui) -> bool:
+        """Take a press of the right button on a row as one of the left, and leave the rest to the menu."""
+        if event.kind == "down" and event.button == 3 and self.row_at(event.pos) is not None:
+            event = replace(event, button=1)
+        return super().on(event, ui)
+
+    def draw(self, canvas: Canvas) -> None:
+        """Draw the menu, and the plus in its last row, lit while that row is."""
+        super().draw(canvas)
+        x, y, _, h = self.rows[-1]
+        self.plus.rect = (x + theme.MENU_PAD - 1, y + (h - theme.PLUS) // 2, theme.PLUS, theme.PLUS)
+        self.plus.hot, self.plus.held = self.lit == len(self.items) - 1, False
+        self.plus.draw(canvas)
+
+
 class ChordBox(Widget):
-    """The box a new chord is made in, opened as the modal widget: `ui.open(ChordBox(at, done))`.
+    """The box a chord is made in, opened as the modal widget: `ui.open(ChordBox(at, done))`.
 
     It shows the keyboard of one octave. A press on a key makes it the root: `root` is its pitch class. `kinds`
     is the choice of the kind, and `chord` the chord the two make. Its notes are lit on the keyboard, the root
     in a colour of its own. `name` is the box the name is typed in, which has the keys and what is typed: only
     what `in_name` says yes to goes in. It holds the name `chord_name` gives for as long as that is what stands
     in it: a name that was typed stays.
+
+    Made with a name and a chord, as the table of a project holds one, the box is opened on that chord, to
+    change it: it shows its root, its name, and its kind where it is one of `KINDS`, and is headed `CHANGING`.
 
     OK and enter call `done` with the name and the chord, and close the box unless `done` answers false: then
     the box stays open, so that the name can be mended. CANCEL, escape and a press off the box close it with
@@ -315,14 +422,17 @@ class ChordBox(Widget):
 
     takes_text = True
 
-    def __init__(self, at: Pos, done: Callable[[str, dict], object] | None = None) -> None:
+    def __init__(self, at: Pos, done: Callable[[str, dict], object] | None = None, name: str | None = None,
+                 made: dict | None = None) -> None:
         super().__init__(box_parts(at)["box"], BOX_HELP)
         self.at = at
         self.done = done
-        self.root = 0
+        self.heading = HEADING if made is None else CHANGING
+        self.root = 0 if made is None else chord(made["root"], "major")["root"]
         nowhere = (0, 0, 0, 0)
-        self.kinds = Choice(nowhere, [kind.upper() for kind in KINDS])
-        self.name = TextBox(nowhere, chord_name(self.root, self.kind), allowed=in_name)
+        self.kinds = Choice(nowhere, [kind.upper() for kind in KINDS],
+                            0 if made is None else list(KINDS).index(kind_of(made)))
+        self.name = TextBox(nowhere, chord_name(self.root, self.kind) if name is None else name, allowed=in_name)
         self.ok = Button(nowhere, OK)
         self.cancel = Button(nowhere, CANCEL)
         self._parts: dict[str, Rect] = {}
@@ -411,7 +521,7 @@ class ChordBox(Widget):
         with canvas.clip(self.rect):
             canvas.box(self.rect, theme.PANEL)
             canvas.frame(self.rect, theme.LINE)
-            canvas.text_in(HEADING, parts["heading"], theme.DIM)
+            canvas.text_in(self.heading, parts["heading"], theme.DIM)
             canvas.text_in(NAME, parts["word"], theme.DIM)
             tones, found = self.chord["tones"], keys(parts["keys"])
             # The black keys lie over the white ones, so they are drawn after them.

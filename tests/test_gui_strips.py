@@ -11,8 +11,8 @@ from rowsynth.gui import layout, songedit, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
 from rowsynth.gui.songview import Block, Note
-from rowsynth.gui.strips import (BAR_H, DOUBLE, EDGE_PX, EDGE_W, NAME_H, ROW_W_MIN, SLACK, WHEEL_PX, Map, SongStrip,
-                                 places, small)
+from rowsynth.gui.strips import (BAR_H, BAR_HELP, EDGE_PX, EDGE_W, NAME_H, ROW_W_MIN, SLACK, WHEEL_PX, Map,
+                                 SongStrip, places, small)
 from rowsynth.gui.ui import Event, Ui, share
 from rowsynth.project import Project
 
@@ -39,8 +39,10 @@ NARROW = (10, 20, 200, 60)
 SIZE = (340, 100)
 OUTSIDE = theme.GOOD
 #: What the help line says on a block, after the name of its pattern.
-PRESS = "ctrl to copy; right button for more"
+PRESS = ("a drag moves it, ctrl copies it, twice on its name renames it   right press: its menu   "
+         "wheel: along the song")
 CTRL = frozenset({"ctrl"})
+SHIFT = frozenset({"shift"})
 
 INSTRUMENTS = {"lead": {"vol": 12}, "bass": {"wave": "tri"}, "thud": {"wave": "noise"}}
 DRUMS = {"k": {"inst": "thud", "note": "c2"}, "h": {"inst": "thud", "note": "c6"}}
@@ -184,14 +186,11 @@ class Sums(unittest.TestCase):
         self.assertEqual((seen.scrolled(126).in_view()[0], seen.scrolled(127).in_view()[0]), (3, 4))
         self.assertEqual([seen.scrolled(100).sees(row) for row in (99, 100, 419, 420)], [False, True, True, False])
 
-    def test_the_thumb_of_the_bar_is_to_the_strip_what_the_view_is_to_the_song(self) -> None:
+    def test_the_scroll_bar_lies_along_the_foot_of_the_strip_under_the_line_of_the_picked_block(self) -> None:
         seen = Map(RECT, LONG, 1280.0)
-        self.assertEqual([seen.scrolled(by).thumb() for by in (0, 100, 960)],
-                         [(10, 77, 80, 3), (35, 77, 80, 3), (250, 77, 80, 3)])
-        self.assertIsNone(Map(RECT, BLOCKS, 80.0).thumb())
-        # It is never shorter than the thumb of a list.
-        self.assertEqual(Map(RECT, (Block("a", 0.0, 32000.0),), 32000.0).scrolled(16000).thumb(),
-                         (168, 77, theme.LIST_THUMB_MIN, BAR_H))
+        self.assertEqual((seen.bar, seen.block_h + theme.STRIP), ((10, 77, 320, BAR_H), 56))
+        # In a strip lower than the bar, the bar is all there is.
+        self.assertEqual(Map((10, 20, 320, 2), LONG, 1280.0).bar, (10, 20, 320, 2))
 
     def test_a_name_is_whole_where_it_fits_cut_where_it_does_not_and_left_out_where_no_letter_would_show(self) -> None:
         blocks = (Block("chorus", 0.0, 45.0), Block("chorus", 45.0, 33.0), Block("chorus", 78.0, 27.0),
@@ -270,9 +269,9 @@ class Strip(unittest.TestCase):
         self.ui.handle(Event("up", pos, button=button))
         return used
 
-    def wheel(self, steps: int, pos: tuple[int, int] = (150, 40)) -> bool:
-        """Turn the wheel with the mouse at a position. Whether it was used."""
-        return self.ui.handle(Event("wheel", pos, wheel=steps))
+    def wheel(self, steps: int, pos: tuple[int, int] = (150, 40), mods: frozenset[str] = frozenset()) -> bool:
+        """Turn the wheel with the mouse at a position, and some keys held. Whether it was used."""
+        return self.ui.handle(Event("wheel", pos, wheel=steps, mods=mods))
 
     def state(self) -> tuple[int | None, int]:
         """The pick of the strip and its view."""
@@ -310,6 +309,27 @@ class Strip(unittest.TestCase):
         self.assertEqual(self.strip.offset, 0)
         # Off the strip it is not.
         self.assertEqual((self.wheel(-1, pos=(150, 10)), self.strip.offset), (False, 0))
+        # A strip only goes one way: with shift the wheel goes that way as well, and with ctrl it is not the strip's.
+        self.assertEqual((self.wheel(-1, mods=SHIFT), self.strip.offset), (True, WHEEL_PX))
+        self.assertEqual((self.wheel(-1, mods=CTRL), self.strip.offset), (False, WHEEL_PX))
+
+    def test_the_scroll_bar_under_the_blocks_shows_the_view_and_a_drag_of_its_thumb_moves_the_view(self) -> None:
+        bar, = self.strip.parts
+        self.ui.add(bar)
+        # A song that fits has no bar: its room is empty, and takes no press.
+        self.assertEqual((bar.rect[2:], bar.thumb(), bar.help), ((0, 0), None, BAR_HELP))
+        self.strip.show(song(*["a"] * 40))
+        self.assertEqual((bar.rect, bar.thumb()), ((10, 77, 320, BAR_H), (10, 77, 80, BAR_H)))
+        self.wheel(-1)
+        self.assertEqual(bar.thumb(), (10 + WHEEL_PX // 4, 77, 80, BAR_H))
+        # The thumb is to the bar what the view is to the song: dragged 60 pixels, the view goes 240.
+        self.ui.handle(Event("down", (30, 78), button=1))
+        self.ui.handle(Event("move", (90, 78)))
+        self.ui.handle(Event("up", (90, 78), button=1))
+        self.assertEqual((self.strip.offset, bar.thumb()), (WHEEL_PX + 240, (86, 77, 80, BAR_H)))
+        # A press beside the thumb goes on by what is in view, and the bar tells the strip, not the other blocks.
+        self.press((300, 78))
+        self.assertEqual((self.strip.offset, self.picks), (WHEEL_PX + 560, []))
 
     def test_the_view_goes_after_a_playhead_that_leaves_it_and_stays_where_the_wheel_put_it(self) -> None:
         self.strip.show(song(*["a"] * 40))
@@ -355,8 +375,9 @@ class Strip(unittest.TestCase):
 
     def test_the_help_line_says_what_a_press_on_the_block_under_the_mouse_would_do(self) -> None:
         self.assertEqual((self.strip.help, self.ui.help), ("the song", ""))
-        for pos, line in (((20, 30), f"drag to move a, {PRESS}"), ((150, 40), f"drag to move b, {PRESS}"),
-                          ((300, 73), "drag to move a, ctrl to copy; right button for more"),
+        for pos, line in (((20, 30), f"press: show a, {PRESS}"), ((150, 40), f"press: show b, {PRESS}"),
+                          ((300, 73), "press: show a, a drag moves it, ctrl copies it, twice on its name renames it"
+                                      "   right press: its menu   wheel: along the song"),
                           ((137, 40), "the song"), ((150, 75), "the song")):
             self.ui.handle(Event("move", pos))
             self.assertEqual(self.ui.help, line)
@@ -364,7 +385,7 @@ class Strip(unittest.TestCase):
         self.ui.handle(Event("down", (150, 40), button=1))
         for pos in ((300, 40), (137, 40)):
             self.ui.handle(Event("move", pos))
-            self.assertEqual(self.ui.help, f"drag to move b, {PRESS}")
+            self.assertEqual(self.ui.help, f"press: show b, {PRESS}")
         self.ui.handle(Event("up", (137, 40), button=1))
         self.assertEqual(self.ui.help, "the song")
         self.strip.help = "another line"
@@ -402,10 +423,9 @@ class Hand(unittest.TestCase):
     def setUp(self) -> None:
         self.told: list[tuple] = []
         self.now = 0.0
-        self.ui = Ui()
+        self.ui = Ui(clock=lambda: self.now)
         self.strip = self.ui.add(SongStrip(RECT, self.tell("changed"), "the song", self.tell("moved"),
-                                           self.tell("copied"), self.tell("asked"), self.tell("named"),
-                                           lambda: self.now))
+                                           self.tell("copied"), self.tell("asked"), self.tell("named")))
         self.strip.show(FOUR)
 
     def tell(self, what: str) -> Callable[..., None]:
@@ -566,40 +586,34 @@ class Hand(unittest.TestCase):
         self.assertEqual([quiet.on(Event("down", pos, button=3), self.ui) for pos in ((250, 50), (329, 30), (137, 40))],
                          [True, True, False])
 
-    def test_two_presses_on_the_name_of_a_block_within_the_time_are_a_double_press_and_named_is_told(self) -> None:
-        self.assertEqual((NAME_H, DOUBLE), (11, 0.4))
-        self.click((250, 20))
-        self.now = DOUBLE
-        self.down((252, 30))
+    def test_a_double_press_on_the_name_of_a_block_as_the_ui_tells_one_is_told_to_named(self) -> None:
+        double = theme.DOUBLE_PRESS
+        self.assertEqual((NAME_H, double), (11, 0.4))
+        self.click((250, 22))
+        self.now = double
+        self.down((252, 24))
         # The second press tells of no pick, and begins nothing that a drag would carry.
         self.assertEqual((self.told, self.strip.busy), ([("changed", 2), ("named", 2)], False))
-        self.up((252, 30))
+        self.up((252, 24))
         # A third press begins anew, and a fourth is a double press again.
         self.click((250, 25))
         self.click((250, 25))
         self.assertEqual(self.told[2:], [("changed", 2), ("named", 2)])
-        # Later than the time, on the names of two blocks, and with either press under the name, it is two presses.
-        for first, second, wait, places_told in (((250, 25), (250, 25), DOUBLE + 0.01, (2, 2)),
+        # Later than the time, on the names of two blocks, and with the second press under the name, it is two
+        # presses.
+        for first, second, wait, places_told in (((250, 25), (250, 25), double + 0.01, (2, 2)),
                                                  ((170, 25), (250, 25), 0.0, (1, 2)),
-                                                 ((250, 31), (250, 25), 0.0, (2, 2)),
-                                                 ((250, 25), (250, 31), 0.0, (2, 2))):
+                                                 ((250, 29), (250, 31), 0.0, (2, 2))):
             self.told.clear()
             self.now += 100
             self.click(first)
             self.now += wait
             self.click(second)
             self.assertEqual(self.told, [("changed", place) for place in places_told])
-        # A press in the song that was shown before is no first press in another song, which has c there as well.
-        self.told.clear()
-        self.now += 100
-        self.click((250, 25))
-        self.strip.show(song("b", "a", "c", "d", d={"lead": "o4 l4 c c"}))
-        self.click((250, 25))
-        self.assertEqual(self.told, [("changed", 2), ("changed", 2)])
         # A strip that tells nobody takes the second press for its own all the same, and picks nothing with it.
-        quiet = SongStrip(RECT, clock=lambda: self.now)
+        quiet = SongStrip(RECT)
         quiet.show(FOUR)
-        used = [quiet.on(Event("down", pos, button=1), self.ui) for pos in ((250, 25), (250, 25))]
+        used = [quiet.on(Event("down", (250, 25), button=1, double=double), self.ui) for double in (False, True)]
         self.assertEqual((used, quiet.picked, quiet.busy), ([True, True], 2, False))
 
     def test_name_rect_is_where_the_name_of_a_block_is_drawn_in_the_view_and_no_place_is_refused(self) -> None:
@@ -725,6 +739,8 @@ class Drawn(unittest.TestCase):
     def setUp(self) -> None:
         self.ui = Ui()
         self.strip = self.ui.add(SongStrip(RECT))
+        for part in self.strip.parts:
+            self.ui.add(part)
         self.song = song("a", "b", "a")
         self.strip.show(self.song)
         self.start(SIZE)
@@ -888,7 +904,7 @@ class Drawn(unittest.TestCase):
         self.assertEqual([self.at(10, 30), self.at(327, 33), self.at(329, 73)],
                          [theme.ACTIVE, theme.RAISED, theme.LINE])
         # The bar is a dark track with the thumb on it, a pixel under the line of the picked block.
-        self.assertEqual((seen.thumb(), self.colours((10, 76, 320, 1))), ((35, 77, 80, 3), {theme.PANEL}))
+        self.assertEqual((self.strip.bar.thumb(), self.colours((10, 76, 320, 1))), ((35, 77, 80, 3), {theme.PANEL}))
         self.assertEqual(self.colours((10, 77, 320, 3)), {theme.BACKGROUND, theme.LINE})
         self.assertEqual(self.where(theme.LINE, (10, 77, 320, 3)),
                          {(x, y) for x in range(35, 115) for y in range(77, 80)})
@@ -919,7 +935,7 @@ class Drawn(unittest.TestCase):
         # Its fourth block is tune.
         self.ui.handle(Event("move", (200, 40)))
         self.assertEqual((self.strip.block_at((200, 40)), self.ui.help),
-                         (3, "drag to move tune, ctrl to copy; right button for more"))
+                         (3, f"press: show tune, {PRESS}"))
         self.strip.playhead = 20.5
         self.draw()
         self.assertEqual(self.where(theme.ACTIVE, (0, 0, 680, 74)), {(36, y) for y in range(20, 74)})

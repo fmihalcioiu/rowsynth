@@ -1,4 +1,4 @@
-"""Tests for rowsynth.gui.chordview: chords read as the check reads them, wrong notes, a bar's chord, new chords."""
+"""Tests for rowsynth.gui.chordview: chords read as the check reads them, a bar's chord, the chord table, the box."""
 from __future__ import annotations
 
 import copy
@@ -9,8 +9,9 @@ from rowsynth import checks
 from rowsynth.checks import chords as rule
 from rowsynth.edit import NOTHING, delete_in, set_in
 from rowsynth.errors import RowSynthError
-from rowsynth.gui import chordview, songview
-from rowsynth.gui.chordview import KINDS, Bar, ChordBox, Span, box_parts, key_at, keys
+from rowsynth.gui import chordview, songview, theme
+from rowsynth.gui.chordview import (ADD, KINDS, Bar, ChordBox, ChordList, Span, box_parts, chord_changed,
+                                    chord_removed, chord_renamed, key_at, keys, kind_of)
 from rowsynth.gui.ui import Event, Ui, inside
 from rowsynth.project import Project
 
@@ -177,11 +178,95 @@ class Changed(unittest.TestCase):
             self.assertEqual(str(error.exception), said)
 
 
+class Table(unittest.TestCase):
+    #: The songs of a project in which one song names a chord in two patterns and another names it in none.
+    SONGS = {"tune": {**SONG, "patterns": {**SONG["patterns"], "b": {"top": "o4 c1"}},
+                      "chords": {"a": ["Am", "F  C"], "b": ["C"]}},
+             "other": {**SONG, "chords": {"a": ["Am"]}}}
+
+    def saved(self, changes: list[tuple[str, object]]) -> Project:
+        """The project with some changes made to it as one, as `Session.change_many` makes them: it loads."""
+        data = copy.deepcopy({**PROJECT, "songs": self.SONGS})
+        for where, value in changes:
+            if value is NOTHING:
+                delete_in(data, where)
+            else:
+                set_in(data, where, value)
+        return Project.from_dict(data)
+
+    def test_a_renamed_chord_keeps_its_place_in_the_table_and_has_its_new_name_in_every_bar_that_names_it(
+            self) -> None:
+        changes = chord_renamed(PROJECT["chords"], self.SONGS, "C", "home")
+        # The table whole, and after it the strings of the two patterns of the one song that name the chord.
+        self.assertEqual(changes, [("chords", {"Am": AM, "F": F, "home": C}),
+                                   ("songs.tune.chords.a", ["Am", "F home"]), ("songs.tune.chords.b", ["home"])])
+        made = self.saved(changes)
+        self.assertEqual((list(made.chords), made.songs["other"]["chords"]), (["Am", "F", "home"], {"a": ["Am"]}))
+        # A chord that no bar names is renamed in the table alone. No song is changed, and neither is the table.
+        self.assertEqual((chord_renamed({**PROJECT["chords"], "G": C}, self.SONGS, "G", "top")[1:],
+                          list(PROJECT["chords"])), ([], ["Am", "F", "C"]))
+        for names, said in ((("G", "top"), "the project has no chord called 'G'"),
+                            (("C", "F"), "the project has a chord called 'F' already"),
+                            (("C", "a b"), "a chord cannot be called 'a b': a name cannot hold ' '")):
+            with self.assertRaises(RowSynthError) as error:
+                chord_renamed(PROJECT["chords"], self.SONGS, *names)
+            self.assertEqual(str(error.exception), said)
+
+    def test_a_changed_chord_has_other_notes_under_its_name_and_one_that_a_bar_names_is_not_removed(self) -> None:
+        sus = chordview.chord(0, "sus4")
+        self.assertEqual(chord_changed(PROJECT["chords"], "C", sus), [("chords.C", sus)])
+        self.assertEqual(self.saved(chord_changed(PROJECT["chords"], "C", sus)).chords["C"], sus)
+        # The kind of a chord is told by its notes, in whatever order they stand, and one of no kind is major.
+        self.assertEqual([kind_of(made) for made in (AM, C, sus, {"root": 2, "tones": [9, 2, 5, 0]},
+                                                     {"root": 0, "tones": [0, 1]})],
+                         ["minor", "major", "sus4", "min7", "major"])
+        with self.assertRaises(RowSynthError) as error:
+            chord_removed(PROJECT["chords"], self.SONGS, "F")
+        self.assertEqual(str(error.exception), "bar 2 of pattern 'a' of song 'tune' is in chord 'F', and a chord "
+                                               "that a bar names is not removed")
+        self.assertEqual(list(chordview.naming(self.SONGS, "Am")), [("tune", "a", 0), ("other", "a", 0)])
+        # With no bar that names it, the chord is taken out of the table.
+        spare = {**PROJECT["chords"], "G": C}
+        self.assertEqual(chord_removed(spare, self.SONGS, "G"), [("chords.G", NOTHING)])
+        for call in (lambda: chord_removed(PROJECT["chords"], self.SONGS, "G"),
+                     lambda: chord_changed(PROJECT["chords"], "G", sus)):
+            with self.assertRaises(RowSynthError) as error:
+                call()
+            self.assertEqual(str(error.exception), "the project has no chord called 'G'")
+
+
 class Box(unittest.TestCase):
     def setUp(self) -> None:
         self.ui = Ui()
         self.done: list[tuple[str, dict]] = []
         self.taken = True
+
+    def test_the_list_of_the_chords_tells_of_the_chord_that_either_button_is_pressed_on_and_of_its_plus(self) -> None:
+        chosen: list[object] = []
+        for button in (1, 3):
+            listed = self.ui.open(ChordList(PROJECT["chords"], (40, 30), chosen.append))
+            self.assertEqual(([item.text for item in listed.items], listed.items[-1].value),
+                             (["Am", "F", "C", ""], ADD))
+            row = listed.rows[1]
+            self.ui.handle(Event("down", (row[0] + 2, row[1] + 2), button=button))
+            self.ui.handle(Event("up", (row[0] + 2, row[1] + 2), button=button))
+            self.assertEqual((self.ui.modal, chosen[-1]), (None, "F"))
+        # The plus stands in the row after the last chord, and a press on that row tells of it.
+        listed = self.ui.open(ChordList({}, (40, 30), chosen.append))
+        x, y, _, h = listed.rows[-1]
+        self.ui.handle(Event("down", (x + 2, y + 2), button=1))
+        self.assertEqual((len(listed.rows), h >= theme.PLUS, chosen[2:]), (1, True, [ADD]))
+
+    def test_opened_on_a_chord_the_box_shows_its_root_its_kind_and_its_name_and_is_headed_as_one_that_is_changed(
+            self) -> None:
+        box = self.ui.open(ChordBox((40, 30), lambda name, chord: self.done.append((name, chord)), "home", AM))
+        self.assertEqual((box.heading, box.root, box.kind, box.name.text, box.chord),
+                         (chordview.CHANGING, 9, "minor", "home", AM))
+        # A name that is not the one its notes give stays when the kind is another.
+        box.choose(9, "major")
+        self.ui.handle(Event("key", key="return"))
+        self.assertEqual((self.done, self.ui.modal), ([("home", {"root": 9, "tones": [9, 1, 4]})], None))
+        self.assertEqual((ChordBox((40, 30)).heading, chordview.HEADING), ("NEW CHORD", "NEW CHORD"))
 
     def opened(self) -> ChordBox:
         """Open the box at a place it has room at, with an owner that keeps what it is told and answers `taken`."""

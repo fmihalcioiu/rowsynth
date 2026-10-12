@@ -10,11 +10,13 @@ from rowsynth.errors import RowSynthError
 from rowsynth.gui import layout, noteedit, songview, sprites, theme
 from rowsynth.gui.canvas import Canvas
 from rowsynth.gui.font import Font
+from rowsynth.gui.kit import VELOCITY_HELP, velocity_bar
 from rowsynth.gui.songview import Channel, DrumRow, Note, Pattern
-from rowsynth.gui.steps import (BAR_GAP, BARS_H, BEAT_GAP, CHANNEL_GAP, DOT, DOT_H, DOT_W, EDGE, EMPTY_FILL,
-                                EMPTY_LINE, FAINTEST, GAP, GLOW, LABEL_EDGE, LABEL_GAP, LABEL_PAD, LABELS_W, LANE_GAP,
-                                LANE_H, MARK_W, OFF_GRID, SQUARE_W, WHEEL_WAIT, Gesture, Grid, Lane, Steps, begun, dot,
-                                hit_colour, lanes, mix, paint)
+from rowsynth.gui.steps import (ACROSS_HELP, ALONG_HELP, BAR, BAR_GAP, BARS_H, BEAT_GAP, CHANNEL_GAP, DOT, DOT_H,
+                                DOT_W, EDGE, EMPTY_FILL, EMPTY_LINE, FAINTEST, GAP, GLOW, LABEL_EDGE, LABEL_GAP,
+                                LABEL_PAD, LABELS_W, LANE_GAP, LANE_H, MARK_W, OFF_GRID, PLUS_GAP, PLUS_HELP,
+                                SQUARE_W, SQUARE_W_MAX, SQUARE_W_MIN, TAIL, WHEEL_HELP, Gesture, Grid, Lane, Steps,
+                                begun, dot, hit_colour, lanes, mix, paint)
 from rowsynth.gui.ui import Event, Ui
 from rowsynth.project import Project
 
@@ -30,13 +32,17 @@ except ImportError:
 EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
 NEEDS = "pygame is not installed"
 SHIFT = frozenset({"shift"})
+CTRL = frozenset({"ctrl"})
 
-# A rectangle that cuts the third lane and the twenty-fifth row, and one high enough for three whole lanes.
-RECT = (10, 20, 296, 100)
-TALL = (10, 20, 296, 130)
-# Where the squares start in both, how wide their room is, and where the rectangles end.
-LEFT, TOP, AREA_W = RECT[0] + LABELS_W, RECT[1] + BARS_H, RECT[2] - LABELS_W
-RIGHT, BOTTOM = RECT[0] + RECT[2], RECT[1] + RECT[3]
+# A rectangle whose squares' room cuts the third lane and the twenty-fifth row, and one with room for three whole
+# lanes and the plus under them. Each has the room of the two scroll bars as well.
+RECT = (10, 20, 296 + BAR, 100 + BAR)
+TALL = (10, 20, 296 + BAR, 130 + BAR + TAIL)
+# Where the squares start in both, how wide their room is and how high in the first, and where that room ends.
+LEFT, TOP, AREA_W, AREA_H = RECT[0] + LABELS_W, RECT[1] + BARS_H, RECT[2] - LABELS_W - BAR, RECT[3] - BARS_H - BAR
+RIGHT, BOTTOM = LEFT + AREA_W, TOP + AREA_H
+# What the help line says of the wheel, after what the presses do.
+WHEEL = f"   wheel: {WHEEL_HELP}"
 PITCH = SQUARE_W + GAP
 LANE = LANE_H + LANE_GAP
 # The height of each of the two lines of a label.
@@ -117,7 +123,11 @@ def block(rect: layout.Rect) -> set[tuple[int, int]]:
 class Sums(unittest.TestCase):
     def test_the_x_of_a_row_has_the_gaps_between_beats_and_between_bars_in_it(self) -> None:
         grid = Grid(RECT, 32, 3, 16, 4)
-        self.assertEqual(grid.area, (LEFT, TOP, AREA_W, RECT[3] - BARS_H))
+        self.assertEqual(grid.area, (LEFT, TOP, AREA_W, AREA_H))
+        # The two scroll bars have the room at the right of the squares and under them, a pixel away.
+        self.assertEqual((grid.along, grid.across),
+                         ((RIGHT + theme.SCROLL_GAP, TOP, theme.SCROLL_W, AREA_H),
+                          (LEFT, BOTTOM + theme.SCROLL_GAP, AREA_W, theme.SCROLL_W)))
         self.assertEqual([grid.x(row) - LEFT for row in (0, 1, 3, 4, 8, 15, 16, 20)],
                          [0, PITCH, 3 * PITCH, 4 * PITCH + BEAT_GAP - GAP, 8 * PITCH + 2 * (BEAT_GAP - GAP),
                           BAR_W - BAR_GAP - SQUARE_W, BAR_W, BAR_W + 4 * PITCH + BEAT_GAP - GAP])
@@ -138,7 +148,7 @@ class Sums(unittest.TestCase):
                 # What lies between two squares is the gap of its kind.
                 gaps = {grid.x(row + 1) - grid.x(row) - SQUARE_W for row in range(first, 39)}
                 self.assertEqual(gaps, {GAP, BAR_GAP} | ({BEAT_GAP} if beat_rows < bar_rows else set()))
-        # Left of the squares there is no row, nor right of the rectangle, where the last square in view is cut.
+        # Left of the squares there is no row, nor right of their room, where the last square in view is cut.
         grid = Grid(RECT, 32, 3, 16, 4)
         self.assertEqual([grid.row_at(x) for x in (LEFT - 1, LEFT, RIGHT - 1, RIGHT)], [None, 0, 24, None])
 
@@ -147,7 +157,7 @@ class Sums(unittest.TestCase):
         self.assertEqual([grid.y(drum) for drum in range(3)], [TOP, TOP + LANE, TOP + 2 * LANE])
         self.assertEqual([grid.drum_at(y) for y in (TOP - 1, TOP, TOP + LANE_H - 1, TOP + LANE_H, TOP + LANE)],
                          [None, 0, 0, None, 1])
-        # The third lane is cut by the rectangle, and under the rectangle there is none.
+        # The third lane is cut by the room of the squares, and under that room there is none.
         self.assertEqual([grid.drum_at(y) for y in (grid.y(2), BOTTOM - 1, BOTTOM)], [2, 2, None])
         self.assertEqual(grid.square(0, 0), (LEFT, TOP, SQUARE_W, LANE_H))
         self.assertEqual(grid.square(2, 17), (LEFT + BAR_W + PITCH, TOP + 2 * LANE, SQUARE_W, LANE_H))
@@ -163,7 +173,7 @@ class Sums(unittest.TestCase):
         self.assertGreater(grid.x(24) + SQUARE_W, RIGHT)
         moved = dataclasses.replace(grid, first_row=20, first_drum=2)
         self.assertEqual((moved.rows_in_view(), moved.drums_in_view()), (range(20, 32), range(2, 3)))
-        short = Grid((0, 0, 400, BARS_H + LANE_H), 5, 2, 16, 4)
+        short = Grid((0, 0, 400, BARS_H + LANE_H + BAR), 5, 2, 16, 4)
         self.assertEqual((short.rows_in_view(), short.drums_in_view()), (range(0, 5), range(0, 1)))
         # A rectangle with no room for a square shows none.
         none = Grid((0, 0, LABELS_W, BARS_H), 32, 3, 16, 4)
@@ -185,12 +195,43 @@ class Sums(unittest.TestCase):
         moved = grid.scrolled(rows=4, drums=1)
         self.assertEqual((moved.first_row, moved.first_drum), (4, 1))
         self.assertEqual(moved.scrolled(rows=-9, drums=-9), grid)
-        # The furthest: where the last row, and the last drum, is whole in view and one row less would not be.
+        # The furthest: where the last row is whole in view and one row less would not be, and the last drum is
+        # with the room of the plus under it.
         end = grid.scrolled(rows=99, drums=99)
         self.assertEqual((end.first_row, end.first_drum), (8, 1))
         self.assertLessEqual(end.x(31) + SQUARE_W, RIGHT)
         self.assertGreater(dataclasses.replace(end, first_row=7).x(31) + SQUARE_W, RIGHT)
-        self.assertLessEqual(end.y(2) + LANE_H, BOTTOM)
+        self.assertLessEqual(end.y(2) + LANE_H + TAIL, BOTTOM)
+        self.assertEqual((grid.plus[2:], end.plus),
+                         ((0, 0), (RECT[0], end.y(2) + LANE_H + PLUS_GAP, theme.PLUS, theme.PLUS)))
+        # With no lane the plus stands where the label of the first would.
+        self.assertEqual(Grid(RECT, 32, 0, 16, 4).plus, (RECT[0], TOP, theme.PLUS, theme.PLUS))
+
+    def test_the_scroll_bars_show_the_view_in_pixels_and_a_bar_that_is_moved_takes_it_to_a_whole_lane_and_row(
+            self) -> None:
+        grid = Grid(RECT, 32, 3, 16, 4)
+        lanes_h, rows_w = 2 * LANE + LANE_H + TAIL, BAR_W + 15 * PITCH + 3 * (BEAT_GAP - GAP) + SQUARE_W
+        self.assertEqual(grid.spans(), ((lanes_h, AREA_H, 0), (rows_w, AREA_W, 0)))
+        moved = grid.scrolled(rows=5, drums=1)
+        self.assertEqual(moved.spans(), ((lanes_h, AREA_H, LANE), (rows_w, AREA_W, 5 * PITCH + BEAT_GAP - GAP)))
+        # A bar that was moved takes the view to the lane and to the row that begin nearest to there.
+        self.assertEqual([(to.first_drum, to.first_row) for to in (grid.at(lanes=LANE // 2 + 1), grid.at(rows=20),
+                                                                   grid.at(lanes=5, rows=3), grid.at(rows=9999))],
+                         [(1, 0), (0, 2), (0, 0), (0, 8)])
+
+    def test_the_zoom_makes_the_squares_wider_or_narrower_between_its_limits_round_the_row_under_the_mouse(
+            self) -> None:
+        grid = Grid(RECT, 32, 3, 16, 4, first_row=4)
+        at = grid.x(12) + 2
+        for wide in (SQUARE_W + 4, SQUARE_W - 1):
+            zoomed = grid.zoomed(wide, at)
+            self.assertEqual((zoomed.square_w, zoomed.pitch, zoomed.square(0, 12)[2]), (wide, wide + GAP, wide))
+            # Row 12 is still under the mouse, or as near to it as a view that starts at a whole row lets it be.
+            self.assertLess(abs(zoomed.x(12) - at), zoomed.pitch)
+            self.assertEqual(zoomed.row_at(zoomed.x(12) + wide - 1), 12)
+        self.assertEqual([grid.zoomed(wide, at).square_w for wide in (0, 99)], [SQUARE_W_MIN, SQUARE_W_MAX])
+        # Zoomed out so far that all the rows fit, the view starts at the first row.
+        self.assertEqual(dataclasses.replace(grid, first_row=8).zoomed(SQUARE_W_MIN, at).first_row, 0)
         # What fits whole does not move, and neither does a pattern with nothing in it.
         fits = Grid((0, 0, 400, 200), 32, 3, 16, 4)
         self.assertEqual(fits.scrolled(rows=5, drums=2), fits)
@@ -208,7 +249,7 @@ class Sums(unittest.TestCase):
         moved = dataclasses.replace(grid, first_drum=1)
         self.assertEqual([moved.y(drum) - TOP for drum in (1, 2, 3)], [0, LANE, 2 * LANE + CHANNEL_GAP])
         # The furthest the view goes counts the air: the last three lanes fit this room with it, and not one less.
-        room = BARS_H + 2 * LANE + CHANNEL_GAP + LANE_H
+        room = BARS_H + 2 * LANE + CHANNEL_GAP + LANE_H + TAIL + BAR
         for height, breaks, first in ((room, (1, 3), 1), (room - 1, (1, 3), 2), (room - 1, (), 1)):
             short = Grid((10, 20, 296, height), 32, 4, 16, 4, breaks=breaks)
             self.assertEqual(short.scrolled(drums=99).first_drum, first)
@@ -261,6 +302,12 @@ class Lanes(unittest.TestCase):
     def test_a_drum_channel_that_plays_nothing_anywhere_has_a_lane_for_every_letter(self) -> None:
         found = lanes([band(kick=(hit("k", 0),), spare=()), band(kick=(), spare=())], DRUMS)
         self.assertEqual(found, [Lane("kick", "k", "kick"), *(Lane("spare", drum.letter, drum.inst) for drum in DRUMS)])
+        # A letter that no channel plays anywhere has a lane in the picked drum channel, and in no other.
+        pair = [band(kick=(hit("k", 0),), tops=(hit("H", 2),))]
+        self.assertEqual(lanes(pair, DRUMS), [Lane("kick", "k", "kick"), Lane("tops", "H", "hat")])
+        self.assertEqual(lanes(pair, DRUMS, "tops"), [Lane("kick", "k", "kick"), Lane("tops", "s", "a very long snare"),
+                                                     Lane("tops", "H", "hat")])
+        self.assertEqual(lanes(pair, DRUMS, "lead"), lanes(pair, DRUMS))
         # A song with no drum channel has no lanes, and neither has one with no patterns or with no letters.
         tuned = Pattern("a", 16.0, (Channel("lead", "lead", False, (), 16.0, True),))
         self.assertEqual([lanes([tuned], DRUMS), lanes([], DRUMS), lanes([kit()], [])], [[], [], []])
@@ -331,50 +378,53 @@ class Pointing(unittest.TestCase):
                                                              (RECT[0] + 5, y + 5), (LEFT - 1, y))],
                          [None, None, None, None, None])
         # A hit a hair off a whole row is on that row, and after a scroll the same place is another step.
-        self.steps.show(kit(hit("s", 4.9999999, 7)), LANES, 16, 4)
+        self.steps.show(kit(hit("s", 4.9999999, 7)), LANES, 16, 4, TABLE)
         self.ui.handle(Event("move", (x, y)))
         self.assertEqual((self.steps.step_at((x, y)), self.ui.help),
-                         (("kit", "s", 5), "s, bar 1, step 6: hit, level 7"))
+                         (("kit", "s", 5), f"press: pick s at bar 1, step 6, a drag moves it   right press: rub it "
+                                           f"out{WHEEL}"))
         self.wheel(-1)
         self.wheel(-1, SHIFT)
         self.assertEqual(self.steps.step_at((LEFT, TOP)), ("kit", "s", 4))
 
-    def test_the_help_line_says_what_is_at_the_square_under_the_mouse(self) -> None:
+    def test_steps_that_are_only_shown_say_their_own_line_on_every_square_and_a_label_says_what_a_press_does(
+            self) -> None:
         self.assertEqual(self.ui.help, "")
-        for drum, row, said in ((0, 20, "k, bar 2, step 5: hit, level 12"), (1, 20, "s, bar 2, step 5: empty"),
-                                (0, 0, "k, bar 1, step 1: hit, level 15"), (2, 15, "H, bar 1, step 16: empty"),
-                                (2, 5, "H, bar 1, step 6: hit off the grid, level 9")):
-            x, y, _, _ = self.grid.square(drum, row)
-            self.ui.handle(Event("move", (x + 2, y + 9)))
-            self.assertEqual(self.ui.help, said)
-        # In a gap and on a label it is the widget's own line, which can be set, and a key leaves it be.
-        for pos in ((self.grid.x(4) - 1, TOP + 3), (RECT[0] + 5, TOP + 3)):
+        # No drum table was given, so no press changes a hit: on a hit, on an empty square and in a gap.
+        for pos in (self.grid.square(0, 20)[:2], self.grid.square(1, 20)[:2], (self.grid.x(4) - 1, TOP + 3)):
             self.ui.handle(Event("move", pos))
             self.assertEqual(self.ui.help, "the drum steps")
+        # The line can be set, and a key leaves it be.
         self.steps.help = "drums"
         self.assertFalse(self.ui.handle(Event("key", key="space")))
         self.assertEqual(self.ui.help, "drums")
-        # After a scroll the mouse is on another step.
-        self.ui.handle(Event("move", (LEFT + 2, TOP + 3)))
-        self.wheel(-1, SHIFT, pos=(LEFT + 2, TOP + 3))
-        self.assertEqual(self.ui.help, "k, bar 1, step 5: empty")
+        # A label says what a press on it does, and of its menu only where there is an owner to open one.
+        self.ui.handle(Event("move", (RECT[0] + 5, TOP + 3)))
+        self.assertEqual(self.ui.help, f"press: show the velocity of k{WHEEL}")
+        self.steps.asked = lambda place, pos: None
+        self.assertEqual(self.ui.help, f"press: show the velocity of k   right press: its menu{WHEEL}")
+        # What is left of the labels' strip beside the bar numbers is no label.
+        self.ui.handle(Event("move", (RECT[0] + 5, RECT[1] + 3)))
+        self.assertEqual(self.ui.help, "drums")
 
-    def test_with_two_drum_channels_step_at_and_the_help_line_say_which_channel_a_square_is_of(self) -> None:
-        steps = self.ui.add(paired((0, 200, 296, 130)))
+    def test_with_two_drum_channels_step_at_and_the_help_line_say_which_channel_a_lane_is_of(self) -> None:
+        steps = self.ui.add(paired((0, 200, *TALL[2:])))
         grid = steps.grid
-        self.assertEqual((grid.drums, grid.breaks), (3, (1,)))
-        for drum, row, step, said in ((0, 0, ("kick", "k", 0), "k in kick, bar 1, step 1: hit, level 15"),
-                                      (1, 0, ("tops", "k", 0), "k in tops, bar 1, step 1: empty"),
-                                      (1, 4, ("tops", "k", 4), "k in tops, bar 1, step 5: hit, level 9"),
-                                      (0, 9, ("kick", "k", 9), "k in kick, bar 1, step 10: hit off the grid, level 15"),
-                                      (1, 9, ("tops", "k", 9), "k in tops, bar 1, step 10: empty"),
-                                      (2, 18, ("tops", "H", 18), "H in tops, bar 2, step 3: empty")):
+        self.assertEqual((grid.drums, grid.breaks, steps.lanes), (3, (1,), tuple(PAIR)))
+        for drum, row, step in ((0, 0, ("kick", "k", 0)), (1, 0, ("tops", "k", 0)), (1, 4, ("tops", "k", 4)),
+                                (0, 9, ("kick", "k", 9)), (2, 18, ("tops", "H", 18))):
             x, y, _, _ = grid.square(drum, row)
-            self.ui.handle(Event("move", (x + 2, y + 9)))
-            self.assertEqual((steps.step_at((x + 2, y + 9)), self.ui.help), (step, said))
+            self.assertEqual(steps.step_at((x + 2, y + 9)), step)
         # In the air between the two channels there is no step, and the line is the widget's own.
         self.ui.handle(Event("move", (grid.x(0), grid.y(1) - 1)))
         self.assertEqual((steps.step_at((grid.x(0), grid.y(1) - 1)), self.ui.help), (None, "the drum steps"))
+        # A label names the channel of its lane as well, and the box for a name is where its letter is written.
+        self.ui.handle(Event("move", (2, grid.y(1) + 2)))
+        self.assertEqual(self.ui.help, f"press: show the velocity of k in tops{WHEEL}")
+        self.assertEqual((grid.label(1), grid.label_at((2, grid.y(1) + 2)), grid.label_at((2, grid.y(1) - 1))),
+                         ((0, grid.y(1), LABELS_W - LABEL_GAP, LANE_H), 1, None))
+        self.assertEqual(steps.name_rect(1), (LABEL_PAD, grid.y(1) + LABEL_EDGE, LABELS_W - LABEL_GAP - 2 * LABEL_PAD,
+                                              LINE_H))
 
     def test_a_lane_of_a_channel_the_pattern_does_not_have_or_of_one_that_is_no_drum_channel_is_refused(self) -> None:
         for channel, said in (("bass", "pattern 'a' has no channel called 'bass'"),
@@ -385,20 +435,20 @@ class Pointing(unittest.TestCase):
         with self.assertRaises(RowSynthError):
             self.steps.show(kit(), LANES, 16, 0)
         # What it showed before is still there.
-        self.ui.handle(Event("move", (LEFT, TOP)))
-        self.assertEqual(self.ui.help, "k, bar 1, step 1: hit, level 15")
+        self.assertEqual((self.steps.step_at((LEFT, TOP)), self.steps.lanes), (("kit", "k", 0), tuple(LANES)))
 
 
 class Gestures(unittest.TestCase):
     GRID = Grid(TALL, 32, 3, 16, 4)
 
-    def test_a_press_begins_a_put_on_an_empty_square_and_a_take_on_a_hit_or_with_the_right_button(self) -> None:
+    def test_a_press_begins_a_put_on_an_empty_square_a_move_on_a_hit_and_a_take_with_the_right_button(self) -> None:
         grid, hits = self.GRID, {(0, 0), (1, 4)}
         x = grid.x(4) + 1
-        for drum, button, kind in ((0, 1, "put"), (1, 1, "take"), (0, 3, "take"), (1, 3, "take")):
+        for drum, button, kind, rows in ((0, 1, "put", []), (1, 1, "move", [4]), (0, 3, "take", []),
+                                         (1, 3, "take", [])):
             with self.subTest(drum=drum, button=button):
                 self.assertEqual(begun(grid, hits, (x, grid.y(drum) + 3), button, 9),
-                                 Gesture(kind, drum, 9, [], button, x))
+                                 Gesture(kind, drum, 9, rows, button, x))
         # A hit is put at the top level where no other is told.
         self.assertEqual(begun(grid, hits, (x, grid.y(2)), 1).level, 15)
         # No press begins one in a gap, on a label or among the bar numbers, and the middle button begins none.
@@ -433,12 +483,21 @@ class Gestures(unittest.TestCase):
         self.assertEqual([(note.drum, note.row, note.rows, note.level) for note in drag.gives(base, "k", TABLE, 32.0)],
                          [("k", 2.0, 1.0, 12), ("k", 3.0, 1.0, 12), ("k", 4.0, 1.0, 3), ("k", 5.0, 1.0, 12),
                           ("s", 6.0, 2.0, 15)])
-        # A take empties the squares that have a hit of its letter, and the wheel sets the level of its one hit.
+        # A take empties the squares that have a hit of its letter.
         drag.kind = "take"
         self.assertEqual(drag.gives(base, "k", TABLE, 32.0), noteedit.unhit(base, 4, "k", TABLE, 32.0))
         self.assertEqual(drag.gives(base, "H", TABLE, 32.0), base)
-        self.assertEqual(Gesture("level", 1, 2, [6]).gives(base, "s", TABLE, 32.0),
-                         noteedit.with_level(base, [1], 2)[0])
+        # A move passes no square: its hit is at the square the mouse is on, or was on last, at the level it has.
+        move = Gesture("move", 0, 15, [4], 1, grid.x(4))
+        self.assertEqual((move.along(grid, grid.x(4) + 2), move.rows, move.gives(base, "k", TABLE, 32.0)),
+                         ([], [4, 4], base))
+        self.assertEqual((move.along(grid, grid.x(9)), move.along(grid, grid.x(10) - 1), move.rows), ([], [], [4, 9]))
+        self.assertEqual([(note.drum, note.row, note.level) for note in move.gives(base, "k", TABLE, 32.0)],
+                         [("s", 6.0, 15), ("k", 9.0, 3)])
+        # Taken to the row of the snare, it takes its place.
+        move.along(grid, grid.x(6))
+        self.assertEqual([(note.drum, note.row, note.level) for note in move.gives(base, "k", TABLE, 32.0)],
+                         [("k", 6.0, 3)])
         # A hit a hair off its row is taken away, and gives way, at the place it has.
         off = (Note(4.9999999, 1.0, 48, 15, "kick", "k"),)
         self.assertEqual(Gesture("take", 0, 15, [5]).gives(off, "k", TABLE, 32.0), ())
@@ -446,8 +505,8 @@ class Gestures(unittest.TestCase):
                          [("s", 4.9999999)])
         # What a put or a take is called in the undo list goes by how many hits it was.
         self.assertEqual([Gesture(kind, 0, 15).label(count) for kind, count
-                          in (("put", 1), ("put", 3), ("take", 1), ("take", 2), ("level", 0))],
-                         ["hit placed", "3 hits placed", "hit removed", "2 hits removed", "level changed"])
+                          in (("put", 1), ("put", 3), ("take", 1), ("take", 2), ("move", 0))],
+                         ["hit placed", "3 hits placed", "hit removed", "2 hits removed", "hit moved"])
 
     def test_a_put_takes_the_place_of_what_the_channel_plays_only_in_the_square_that_was_pressed(self) -> None:
         def left(notes: tuple[Note, ...], *rows: int) -> list[tuple[str, float]]:
@@ -468,12 +527,17 @@ class Gestures(unittest.TestCase):
 
 class Editing(unittest.TestCase):
     def setUp(self) -> None:
-        self.now = 10.0
         self.told: list[tuple[str, tuple[Note, ...], str]] = []
         self.heard: list[tuple[str, str]] = []
+        self.added: list[str] = []
         self.ui = Ui()
         self.steps = self.ui.add(Steps(TALL, "the drum steps", edited=lambda *said: self.told.append(said),
-                                       sounded=lambda *said: self.heard.append(said), clock=lambda: self.now))
+                                       sounded=lambda *said: self.heard.append(said),
+                                       added=lambda: self.added.append("drum")))
+        for part in self.steps.parts:
+            self.ui.add(part)
+        # The velocity lane stands under the steps, as wide as they are.
+        self.steps.lane.rect = (TALL[0], TALL[1] + TALL[3] + 10, TALL[2], 40)
         self.steps.show(kit(*KIT), LANES, 16, 4, TABLE)
 
     def at(self, drum: int, row: int) -> tuple[int, int]:
@@ -513,9 +577,11 @@ class Editing(unittest.TestCase):
         # Nothing is saved here: the steps go on showing what they were given.
         self.assertEqual(self.steps.notes("kit"), KIT)
 
-    def test_a_click_on_a_hit_takes_it_away(self) -> None:
+    def test_a_click_on_a_hit_lets_it_be_heard_and_changes_nothing_and_the_right_button_rubs_it_out(self) -> None:
         self.click(0, 8)
-        self.assertEqual(self.told, [("kit", (KIT[0], KIT[1], KIT[3]), "hit removed")])
+        self.assertEqual((self.told, self.heard), ([], [("kit", "k")]))
+        self.click(0, 8, 3)
+        self.assertEqual((self.told, self.heard), ([("kit", (KIT[0], KIT[1], KIT[3]), "hit removed")], [("kit", "k")]))
         self.assertEqual(self.steps.notes("kit"), KIT)
 
     def test_a_drag_puts_a_hit_in_every_free_square_it_passes_however_far_the_mouse_went_at_once(self) -> None:
@@ -563,11 +629,27 @@ class Editing(unittest.TestCase):
         self.assertEqual([(note.drum, note.row) for note in notes],
                          [("k", 0.0), ("k", 1.0), ("H", 2.0), ("k", 3.0), ("k", 4.0)])
 
-    def test_a_drag_that_began_on_a_hit_takes_away_the_hits_it_passes_and_puts_none(self) -> None:
+    def test_a_hit_that_is_dragged_is_moved_along_its_lane_at_its_level_and_takes_the_place_of_what_it_lands_on(
+            self) -> None:
+        self.mouse("down", 0, 8, 1)
+        self.mouse("move", 0, 12)
+        seen = self.steps.notes("kit")
+        self.assertEqual([(note.drum, note.row, note.level) for note in seen],
+                         [("k", 0.0, 15), ("s", 4.0, 9), ("H", 10.0, 12), ("k", 12.0, 7)])
+        self.assertEqual(self.told, [])
+        self.mouse("up", 0, 12, 1)
+        self.assertEqual((self.told, self.heard), ([("kit", seen, "hit moved")], [("kit", "k")]))
+        # Brought back to the square it came from, the hit is where it was, and nothing is told.
+        self.mouse("down", 2, 10, 1)
+        self.mouse("move", 2, 14)
+        self.mouse("move", 2, 10)
+        self.mouse("up", 2, 10, 1)
+        self.assertEqual(len(self.told), 1)
+        # Taken to the row of the snare, it takes its place.
         self.mouse("down", 0, 0, 1)
-        self.mouse("move", 0, 9)
-        self.mouse("up", 0, 9, 1)
-        self.assertEqual(self.told, [("kit", (KIT[1], KIT[3]), "2 hits removed")])
+        self.mouse("move", 0, 4)
+        self.mouse("up", 0, 4, 1)
+        self.assertEqual([(note.drum, note.row) for note in self.told[1][1]], [("k", 4.0), ("k", 8.0), ("H", 10.0)])
 
     def test_a_drag_stays_in_the_lane_it_began_in(self) -> None:
         self.mouse("down", 0, 1, 1)
@@ -592,85 +674,97 @@ class Editing(unittest.TestCase):
         self.assertEqual(self.told[1:], [("kit", (KIT[1], KIT[3]), "2 hits removed")])
         self.assertEqual(self.heard, [])
 
-    def test_the_wheel_on_a_hit_changes_its_level_by_one_a_step_between_1_and_15(self) -> None:
-        for steps, level in ((1, 10), (9, 15), (1, 15), (-20, 1), (-1, 1), (3, 4)):
-            self.assertTrue(self.wheel(1, 4, steps))
-            self.assertEqual((self.levels()["s", 4.0], self.steps.level), (level, level))
-        # The other hits are as they were, the view has not moved, and nothing is told while the wheel turns.
-        self.assertEqual(self.steps.notes("kit"), (KIT[0], dataclasses.replace(KIT[1], level=4), *KIT[2:]))
-        self.assertEqual((self.view(), self.told), ((0, 0), []))
-        # A hit that was written at no level is not brought up to 1 by a step down.
-        self.steps.show(kit(*beat(("k", 0, 0))), LANES, 16, 4, TABLE)
-        for steps, level in ((-1, 0), (2, 2)):
-            self.wheel(0, 0, steps)
-            self.assertEqual(self.levels()["k", 0.0], level)
-
-    def test_a_run_of_steps_of_the_wheel_is_one_edit_half_a_second_after_the_last_of_them(self) -> None:
-        self.assertEqual(WHEEL_WAIT, 0.5)
-        for _ in range(3):
-            self.wheel(1, 4, 1)
-        self.now += WHEEL_WAIT / 2
-        self.steps.update()
-        self.wheel(1, 4, -1)
-        # Half a second after the first three steps, and not yet after the fourth.
-        self.now += WHEEL_WAIT / 2
-        self.steps.update()
-        self.assertEqual((self.told, self.levels()["s", 4.0]), ([], 11))
-        self.now += WHEEL_WAIT / 2
-        self.steps.update()
-        self.steps.update()
-        self.assertEqual(self.told, [("kit", noteedit.with_level(KIT, [1], 11)[0], "level changed")])
+    def test_the_velocity_lane_has_a_bar_for_each_hit_of_the_lane_pressed_in_last_and_a_drag_in_it_is_one_edit(
+            self) -> None:
+        lane, grid = self.steps.lane, self.steps.grid
+        # Before any press it is the first lane: its two kicks, each under its square and as high as its level.
+        self.assertEqual((self.steps.chosen, lane.span, lane.help, lane.items),
+                         (0, (LEFT, grid.area[2]), VELOCITY_HELP,
+                          ((grid.x(0), SQUARE_W, 1.0, False), (grid.x(8), SQUARE_W, 7 / 15, False))))
+        # A press on the label of the snare makes its lane the one, and so does a press on a square of the hat's.
+        label = (TALL[0] + 5, grid.y(1) + 5)
+        self.assertTrue(self.ui.handle(Event("down", label, button=1)))
+        self.ui.handle(Event("up", label, button=1))
+        self.assertEqual((self.steps.chosen, lane.items), (1, ((grid.x(4), SQUARE_W, 9 / 15, False),)))
+        self.click(2, 10)
+        self.assertEqual((self.steps.chosen, [bar[0] for bar in lane.items], self.told), (2, [grid.x(10)], []))
+        # A press in the velocity lane sets the hat to the height of the mouse: it is shown at once, and told
+        # at the release, as one edit.
+        at = (grid.x(10) + 1, velocity_bar(lane.rect, 0, 1, 5 / 15)[1])
+        self.ui.handle(Event("down", at, button=1))
+        self.assertEqual((self.levels()["H", 10.0], self.steps.busy, self.told), (5, True, []))
+        self.ui.handle(Event("up", at, button=1))
+        self.assertEqual((self.told, self.steps.busy, self.steps.level),
+                         ([("kit", noteedit.with_level(KIT, [3], 5)[0], "velocity changed")], False, 5))
         # The steps show what they were given again, and the next hit is put at the level that was set last.
-        self.assertEqual(self.levels()["s", 4.0], 9)
+        self.assertEqual(self.levels()["H", 10.0], 12)
         self.click(0, 5)
-        self.assertEqual(self.told[1], ("kit", noteedit.hit(KIT, 5, "k", 11, TABLE, 32.0), "hit placed"))
+        self.assertEqual(self.told[1], ("kit", noteedit.hit(KIT, 5, "k", 5, TABLE, 32.0), "hit placed"))
+        # The right button on a bar is for the usual velocity, which is the top level.
+        self.click(1, 4)
+        at = (grid.x(4) + 1, lane.rect[1] + 20)
+        self.ui.handle(Event("down", at, button=3))
+        self.ui.handle(Event("up", at, button=3))
+        self.assertEqual(self.told[2:], [("kit", noteedit.with_level(KIT, [1], 15)[0], "velocity changed")])
 
-    def test_a_run_of_the_wheel_ends_when_the_mouse_leaves_its_square(self) -> None:
-        self.wheel(1, 4, 2)
-        self.mouse("move", 1, 4)
-        self.assertEqual(self.told, [])
-        self.mouse("move", 1, 5)
-        self.assertEqual(self.told, [("kit", noteedit.with_level(KIT, [1], 11)[0], "level changed")])
-        # A run that comes back to the level it began at has changed nothing.
-        self.wheel(2, 10, 1)
-        self.wheel(2, 10, -1)
-        self.mouse("move", 2, 11)
-        self.assertEqual(len(self.told), 1)
-        # A run whose time is up ends before the next thing the mouse does, which here begins another run.
-        self.wheel(0, 8, 1)
-        self.now += WHEEL_WAIT
-        self.wheel(0, 8, 2)
-        self.assertEqual(self.told[1:], [("kit", noteedit.with_level(KIT, [2], 8)[0], "level changed")])
-        self.assertEqual(self.levels()["k", 8.0], 9)
-
-    def test_the_wheel_scrolls_as_before_over_an_empty_square_and_with_a_key_held_over_a_hit(self) -> None:
+    def test_the_wheel_goes_along_the_lanes_with_shift_along_the_rows_and_with_ctrl_zooms_and_sets_no_level(
+            self) -> None:
         # In this rectangle the third lane is cut, so the lanes scroll.
         self.steps.rect = RECT
-        self.assertTrue(self.wheel(1, 5, -1))
+        self.assertTrue(self.wheel(1, 4, -1))
         self.assertEqual(self.view(), (0, 1))
         self.assertTrue(self.wheel(1, 4, -1, SHIFT))
         self.assertEqual(self.view(), (4, 1))
-        self.assertTrue(self.wheel(1, 4, 1, frozenset({"ctrl"})))
-        self.assertEqual(self.view(), (4, 0))
-        self.assertEqual((self.steps.notes("kit"), self.told), (KIT, []))
-        # A run of the wheel ends when the view is scrolled away under the mouse.
-        self.wheel(1, 4, 1)
-        self.wheel(1, 4, -1, SHIFT)
-        self.assertEqual((self.view(), [label for _, _, label in self.told]), ((8, 0), ["level changed"]))
+        self.assertTrue(self.wheel(1, 4, 1, CTRL))
+        self.assertEqual((self.view(), self.steps.grid.square_w), ((4, 1), SQUARE_W + 1))
+        # It is so on a hit as on any square: no level is changed, nothing is told, and no gesture is under way.
+        self.assertEqual((self.steps.notes("kit"), self.told, self.steps.busy), (KIT, [], False))
+        # The zoom stays when another pattern is shown, and the bars of the velocity lane are as wide as a square.
+        self.steps.show(kit(*KIT), LANES, 16, 4, TABLE)
+        self.assertEqual((self.steps.grid.square_w, {bar[1] for bar in self.steps.lane.items}),
+                         (SQUARE_W + 1, {SQUARE_W + 1}))
+
+    def test_the_two_scroll_bars_move_the_view_and_the_plus_stands_under_the_last_lane_when_that_is_in_view(
+            self) -> None:
+        self.steps.rect = RECT
+        grid = self.steps.grid
+        along, across, _, plus = self.steps.parts
+        self.assertEqual((along.rect, across.rect, along.help, across.help, plus.help),
+                         (grid.along, grid.across, ALONG_HELP, ACROSS_HELP, PLUS_HELP))
+        self.assertEqual((along.upright, across.upright, plus.visible), (True, False, False))
+        # A press under the thumb of the bar along the lanes goes on by what is in view: here to the last lane.
+        self.ui.handle(Event("down", (grid.along[0] + 1, BOTTOM - 2), button=1))
+        self.ui.handle(Event("up", (grid.along[0] + 1, BOTTOM - 2), button=1))
+        self.assertEqual((self.view(), plus.visible, plus.rect), ((0, 1), True, self.steps.grid.plus))
+        # The thumb of the bar along the rows, dragged to its end, has the last row in view.
+        x, y, _, _ = across.thumb()
+        self.ui.handle(Event("down", (x + 2, y + 1), button=1))
+        self.ui.handle(Event("move", (x + 2 + AREA_W, y + 1)))
+        self.ui.handle(Event("up", (x + 2 + AREA_W, y + 1), button=1))
+        self.assertEqual((self.view(), self.told), ((8, 1), []))
+        # A press on the plus tells the owner, and taken off the window the steps take their parts with them.
+        at = (plus.rect[0] + 3, plus.rect[1] + 3)
+        self.ui.handle(Event("down", at, button=1))
+        self.ui.handle(Event("up", at, button=1))
+        self.assertEqual(self.added, ["drum"])
+        self.steps.seen(False)
+        self.assertEqual([part.visible for part in (self.steps, *self.steps.parts)], [False] * 5)
+        self.steps.seen(True)
+        self.assertEqual([part.visible for part in (self.steps, *self.steps.parts)], [True] * 5)
 
     def test_a_hit_put_by_a_press_where_another_letter_of_its_channel_has_one_takes_its_place_in_both_lanes_at_once(
             self) -> None:
+        pick = f"a drag moves it   right press: rub it out{WHEEL}"
         self.mouse("move", 1, 4)
-        self.assertEqual(self.ui.help, "take the hit away: s, bar 1, step 5 (level 9)")
+        self.assertEqual(self.ui.help, f"press: pick s at bar 1, step 5, {pick}")
         self.mouse("down", 0, 4, 1)
         seen = self.steps.notes("kit")
         self.assertEqual(seen, (KIT[0], Note(4.0, 4.0, 48, 15, "kick", "k"), KIT[2], KIT[3]))
         # With the button still down, the snare's square is empty and the kick's has the hit.
         self.mouse("move", 1, 4)
-        self.assertEqual(self.ui.help,
-                         "put a hit: s, bar 1, step 5 (takes the place of k: kit plays one drum at a time)")
+        self.assertEqual(self.ui.help, f"press: put s at bar 1, step 5, in place of k{WHEEL}")
         self.mouse("move", 0, 4)
-        self.assertEqual(self.ui.help, "take the hit away: k, bar 1, step 5 (level 15)")
+        self.assertEqual(self.ui.help, f"press: pick k at bar 1, step 5, {pick}")
         self.mouse("up", 0, 4, 1)
         self.assertEqual(self.told, [("kit", seen, "hit placed")])
 
@@ -697,17 +791,24 @@ class Editing(unittest.TestCase):
         self.assertEqual(self.told, [("kit", seen, "3 hits placed")])
         self.assertEqual((self.steps.notes("kit"), self.ui.held), (KIT, None))
 
-    def test_the_steps_are_busy_during_a_drag_and_during_a_run_of_the_wheel(self) -> None:
+    def test_the_steps_are_busy_during_a_drag_and_escape_drops_it_and_any_other_key_goes_on_to_the_owner(self) -> None:
         self.assertFalse(self.steps.busy)
         self.mouse("down", 0, 5, 1)
         self.assertTrue(self.steps.busy)
         self.mouse("up", 0, 5, 1)
         self.assertEqual((self.steps.busy, len(self.told)), (False, 1))
-        self.wheel(1, 4, 1)
-        self.assertTrue(self.steps.busy)
-        self.now += WHEEL_WAIT
-        self.steps.update()
-        self.assertEqual((self.steps.busy, len(self.told)), (False, 2))
+        # Escape drops a drag that is under way: the steps show what they were given, and its release tells nothing.
+        self.mouse("down", 0, 6, 1)
+        self.mouse("move", 0, 7)
+        self.assertTrue(self.ui.handle(Event("key", key="escape")))
+        self.assertEqual((self.steps.busy, self.steps.notes("kit")), (False, KIT))
+        self.mouse("up", 0, 7, 1)
+        self.assertEqual(len(self.told), 1)
+        # With no gesture under way escape is not the steps', and a key goes on to the owner, who may use it.
+        keys: list[str] = []
+        self.steps.typed = lambda event: keys.append(event.key) or event.key == "a"
+        self.assertEqual([self.ui.handle(Event("key", key=key)) for key in ("escape", "a")], [False, True])
+        self.assertEqual(keys, ["escape", "a"])
 
     def test_a_hit_is_heard_as_it_is_put_whatever_the_owner_answers_of_saving_it(self) -> None:
         self.steps.edited = lambda *said: self.told.append(said) or False
@@ -723,12 +824,20 @@ class Editing(unittest.TestCase):
         self.mouse("down", 1, 0, 3)
         self.mouse("move", 1, 3)
         self.mouse("up", 1, 3, 3)
-        # A press on a label, in a gap and with the middle button begins nothing, and is not used.
+        # A press in a gap and with the middle button begins nothing, and is not used. Neither is one of the right
+        # button on a label, while there is no owner to open the menu of its lane.
         gap = (self.steps.grid.x(4) - 1, self.at(0, 4)[1])
-        for pos, button in (((TALL[0] + 5, TOP + 5), 1), (gap, 1), (self.at(0, 4), 2)):
+        label = (TALL[0] + 5, self.steps.grid.y(2) + 5)
+        for pos, button in ((gap, 1), (self.at(0, 4), 2), (label, 3)):
             self.assertFalse(self.ui.handle(Event("down", pos, button=button)))
             self.assertIsNone(self.ui.held)
             self.ui.handle(Event("up", pos, button=button))
+        # With an owner the right button on a label asks for the menu of its lane, at the mouse, and picks nothing.
+        asked: list[tuple[int, tuple[int, int]]] = []
+        self.steps.asked = lambda place, pos: asked.append((place, pos))
+        self.assertTrue(self.ui.handle(Event("down", label, button=3)))
+        self.ui.handle(Event("up", label, button=3))
+        self.assertEqual((asked, self.steps.chosen), ([(2, label)], 1))
         # While a drag is under way another button and the wheel do nothing to it.
         self.mouse("down", 1, 0, 3)
         self.mouse("down", 0, 0, 1)
@@ -746,8 +855,7 @@ class Editing(unittest.TestCase):
         # Six squares more, of which one had its kick already, and one gets none as the snare has its row.
         self.mouse("move", 0, 9)
         self.mouse("up", 0, 9, 1)
-        self.click(0, 8)
-        self.wheel(1, 4, 1)
+        self.click(0, 8, 3)
         self.assertEqual(self.heard, [("kit", "k")] * 7)
 
     def test_a_pattern_off_the_grid_is_shown_and_not_changed_and_the_help_line_says_why(self) -> None:
@@ -755,13 +863,14 @@ class Editing(unittest.TestCase):
         for button in (1, 3):
             self.assertFalse(self.mouse("down", 0, 8, button))
             self.mouse("up", 0, 8, button)
-        # The wheel on a hit goes to the view, which in this rectangle has nowhere to go.
+        # The wheel goes to the view, which in this rectangle has nowhere to go.
         self.assertFalse(self.wheel(1, 4, 1))
         self.assertEqual((self.told, self.heard, self.levels()["s", 4.0]), ([], [], 9))
-        self.assertEqual(self.ui.help, "s, bar 1, step 5: hit, level 9" + OFF_GRID)
+        self.assertEqual(self.ui.help, OFF_GRID)
         self.mouse("move", 2, 20)
-        self.assertEqual(self.ui.help, "H, bar 2, step 5: hit off the grid, level 9; the pattern has notes off the "
-                                       "grid, so it is not changed here")
+        self.assertEqual(self.ui.help, "this pattern has lengths the grid does not hold: it is shown and not changed")
+        # The velocity lane takes nothing from the mouse either, and says why.
+        self.assertEqual((self.steps.lane.enabled, self.steps.lane.help), (False, OFF_GRID))
 
     def test_without_the_drum_table_nothing_is_changed_and_showing_again_drops_a_drag(self) -> None:
         self.mouse("down", 0, 5, 1)
@@ -774,7 +883,7 @@ class Editing(unittest.TestCase):
         self.steps.show(kit(*KIT), LANES, 16, 4)
         self.assertFalse(self.mouse("down", 0, 5, 1))
         self.assertFalse(self.wheel(0, 8, 1))
-        self.assertEqual((self.told, self.ui.help), ([], "k, bar 1, step 9: hit, level 7"))
+        self.assertEqual((self.told, self.ui.help, self.steps.lane.enabled), ([], "the drum steps", False))
         # A lane of a letter the table does not have is refused, and so are the notes of a channel with no lane.
         with self.assertRaises(RowSynthError) as refused:
             self.steps.show(kit(*KIT), LANES, 16, 4, {"k": TABLE["k"]})
@@ -815,50 +924,46 @@ class Editing(unittest.TestCase):
                          [("k", 0.0, 3.0), ("k", 3.0, 1.0), ("k", 4.0, 2.0), ("H", 6.0, 1.0), ("H", 8.0, 1.0)])
         self.assertEqual(songview.pattern(song, "a").channels[0].notes, self.steps.notes("kit"))
 
-    def test_the_help_line_names_what_a_press_on_the_square_under_the_mouse_would_do_and_the_level_of_a_hit(
-            self) -> None:
-        for drum, row, said in ((0, 20, "put a hit: k, bar 2, step 5"), (1, 1, "put a hit: s, bar 1, step 2"),
-                                (0, 8, "take the hit away: k, bar 1, step 9 (level 7)"),
-                                (2, 10, "take the hit away: H, bar 1, step 11 (level 12)")):
+    def test_the_help_line_names_what_the_presses_and_the_wheel_do_on_the_square_under_the_mouse(self) -> None:
+        pick = f"a drag moves it   right press: rub it out{WHEEL}"
+        for drum, row, said in ((0, 20, f"press: put k at bar 2, step 5{WHEEL}"),
+                                (1, 1, f"press: put s at bar 1, step 2{WHEEL}"),
+                                (0, 8, f"press: pick k at bar 1, step 9, {pick}"),
+                                (2, 10, f"press: pick H at bar 1, step 11, {pick}")):
             self.mouse("move", drum, row)
             self.assertEqual(self.ui.help, said)
-        # The level is the one the wheel has brought the hit to.
-        self.wheel(2, 10, -2)
-        self.assertEqual(self.ui.help, "take the hit away: H, bar 1, step 11 (level 10)")
         # In a gap it is the widget's own line.
         self.ui.handle(Event("move", (self.steps.grid.x(4) - 1, TOP + 3)))
         self.assertEqual(self.ui.help, "the drum steps")
-        # With two drum channels the channel of the square is named as well.
+        # With two drum channels the channel of a square that a hit would be put in is named as well.
         self.steps.show(band(kick=beat(("k", 0, 15)), tops=beat(("H", 2, 15))), PAIR, 16, 4, TABLE)
-        for drum, row, said in ((0, 0, "take the hit away: k in kick, bar 1, step 1 (level 15)"),
-                                (1, 0, "put a hit: k in tops, bar 1, step 1")):
+        for drum, row, said in ((0, 0, f"press: pick k at bar 1, step 1, {pick}"),
+                                (1, 0, f"press: put k in tops at bar 1, step 1{WHEEL}")):
             self.mouse("move", drum, row)
             self.assertEqual(self.ui.help, said)
 
     def test_the_help_line_says_which_drum_a_hit_would_take_the_place_of(self) -> None:
-        for drum, row, said in (
-                (2, 0, "put a hit: H, bar 1, step 1 (takes the place of k: kit plays one drum at a time)"),
-                (0, 4, "put a hit: k, bar 1, step 5 (takes the place of s: kit plays one drum at a time)"),
-                (1, 10, "put a hit: s, bar 1, step 11 (takes the place of H: kit plays one drum at a time)")):
+        for drum, row, said in ((2, 0, "press: put H at bar 1, step 1, in place of k"),
+                                (0, 4, "press: put k at bar 1, step 5, in place of s"),
+                                (1, 10, "press: put s at bar 1, step 11, in place of H")):
             self.mouse("move", drum, row)
-            self.assertEqual(self.ui.help, said)
+            self.assertEqual(self.ui.help, said + WHEEL)
         # A note of the channel that is no hit is in the way as well, though no lane shows it.
         self.steps.show(kit(*KIT, Note(20.0, 2.0, 60.0, 15, "kick")), LANES, 16, 4, TABLE)
         self.mouse("move", 0, 20)
-        self.assertEqual(self.ui.help,
-                         "put a hit: k, bar 2, step 5 (takes the place of a note: kit plays one drum at a time)")
+        self.assertEqual(self.ui.help, f"press: put k at bar 2, step 5, in place of a note{WHEEL}")
         # With two drum channels it is the square's own channel that plays one drum, and the other is not in the way.
         self.steps.show(band(kick=beat(("k", 2, 15)), tops=beat(("H", 2, 15))), PAIR, 16, 4, TABLE)
-        for drum, row, said in (
-                (1, 2, "put a hit: k in tops, bar 1, step 3 (takes the place of H: tops plays one drum at a time)"),
-                (0, 2, "take the hit away: k in kick, bar 1, step 3 (level 15)")):
+        for drum, row, said in ((1, 2, f"press: put k in tops at bar 1, step 3, in place of H{WHEEL}"),
+                                (0, 2, f"press: pick k at bar 1, step 3, a drag moves it   right press: rub it out"
+                                       f"{WHEEL}")):
             self.mouse("move", drum, row)
             self.assertEqual(self.ui.help, said)
 
 
 @unittest.skipUnless(pygame, NEEDS)
 class Drawn(unittest.TestCase):
-    SIZE = (320, 160)
+    SIZE = (330, 180)
 
     def setUp(self) -> None:
         self.surface = pygame.Surface(self.SIZE)
@@ -1002,14 +1107,41 @@ class Drawn(unittest.TestCase):
         grid = self.draw(one)
         self.assertEqual({self.at(TALL[0] + 1, grid.y(drum) + 1) for drum in range(3)}, {theme.LIT})
 
+    def test_the_label_of_the_chosen_lane_has_a_strip_along_its_foot_and_what_is_under_the_mouse_is_lit(self) -> None:
+        steps = Steps(TALL)
+        steps.show(kit(*KIT), LANES, 16, 4, TABLE)
+        steps.lane.colour = theme.SOUND
+        grid = self.draw(steps)
+
+        def strips() -> list[bool]:
+            """Whether the label of each lane has the strip of the chosen one: inside its outline, along its foot."""
+            rooms = [(x + 1, y + h - 1 - theme.STRIP, w - 2, theme.STRIP) for x, y, w, h in map(grid.label, range(3))]
+            return [self.inked(room, theme.SOUND) == block(room) for room in rooms]
+
+        self.assertEqual((steps.chosen, strips()), (0, [True, False, False]))
+        # A press on the label of another lane takes the strip there.
+        steps.on(Event("down", (TALL[0] + 3, grid.y(2) + 3), button=1), Ui())
+        self.draw(steps)
+        self.assertEqual((steps.chosen, strips()), (2, [False, False, True]))
+        # Under the mouse an empty square is lit as the playhead lights one, and a label has a lighter outline.
+        steps.hot = True
+        steps.on(Event("move", (grid.x(1) + 2, grid.y(1) + 5)), Ui())
+        self.draw(steps)
+        self.assertEqual((self.square(grid.square(1, 1)), self.square(grid.square(1, 2))),
+                         (paint(grid.colour(1), None, True), paint(grid.colour(2), None)))
+        steps.on(Event("move", (TALL[0] + 3, grid.y(1) + 3)), Ui())
+        self.draw(steps)
+        self.assertEqual((self.at(TALL[0], grid.y(1)), self.at(TALL[0], grid.y(0)), self.square(grid.square(1, 1))),
+                         (theme.DIM, theme.LINE, paint(grid.colour(1), None)))
+
     def test_a_faint_line_runs_between_the_lanes_of_one_channel_and_those_of_the_next_and_none_inside_one(
             self) -> None:
         steps = paired(RECT)
         grid = self.draw(steps)
         self.assertEqual((grid.y(1) - grid.y(0) - LANE_H, grid.y(2) - grid.y(1) - LANE_H),
                          (LANE_GAP + CHANNEL_GAP, LANE_GAP))
-        # In the middle of the air between the two channels, from side to side of the widget.
-        line = (RECT[0], grid.y(0) + LANE_H + (LANE_GAP + CHANNEL_GAP) // 2, RECT[2], 1)
+        # In the middle of the air between the two channels, from the side of the labels to the end of the squares.
+        line = (RECT[0], grid.y(0) + LANE_H + (LANE_GAP + CHANNEL_GAP) // 2, LABELS_W + AREA_W, 1)
         self.assertEqual(self.inked(RECT, theme.LIT), block(line))
         between = (RECT[0], grid.y(1) + LANE_H, RECT[2], LANE_GAP)
         self.assertEqual(self.inked(between, theme.PANEL), block(between))
@@ -1174,9 +1306,9 @@ class Drawn(unittest.TestCase):
         found = songview.pattern(song, "a")
         made = lanes([songview.pattern(song, name) for name in song["order"]], songview.drum_rows(song))
         self.assertEqual(made, [Lane("kit", "k", "kick"), Lane("kit", "s", "snare"), Lane("kit", "h", "hat")])
-        steps = Steps((0, 0, 660, 120))
+        steps = Steps((0, 0, 660 + BAR, 120 + BAR))
         steps.show(found, made, songview.bar_rows(song), song.get("rows_per_beat", 4))
-        self.surface = self.canvas.surface = pygame.Surface((660, 120))
+        self.surface = self.canvas.surface = pygame.Surface((660 + BAR, 120 + BAR))
         grid = self.draw(steps)
         self.assertEqual((grid.rows_in_view(), grid.drums_in_view()), (range(0, 64), range(0, 3)))
         hits = {(note.drum, int(note.row)) for channel in found.channels if channel.name == "kit"

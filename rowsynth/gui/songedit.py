@@ -1,4 +1,4 @@
-"""A song changed as a whole: its order, patterns, channels, key and tempo. A song in, a new song out. No window."""
+"""A song changed as a whole: its order, patterns, channels, drums, key, tempo and grid. A song in, a song out."""
 from __future__ import annotations
 
 import copy
@@ -8,6 +8,7 @@ from dataclasses import replace
 
 from ..errors import RowSynthError
 from ..note import TICK_HZ
+from ..notes import midi
 from ..project import _AT, _NOT_IN_FILE_NAMES
 from ..song import _within, up
 from . import songview
@@ -39,6 +40,17 @@ _LOWEST, _HIGHEST = 12, 131
 # The ticks in a minute, and the slowest and the fastest tempo that `tempos` lists, in beats a minute.
 _MINUTE = 60 * TICK_HZ
 _SLOWEST, _FASTEST = 40, 300
+
+#: The letters a drum can be called by: those the text of a drum channel can name, and a song has no other drums.
+LETTERS = "kshHt"
+#: The note a new drum plays until it is given another.
+DRUM_NOTE = "c4"
+#: The most rows to a beat that `grids` lists.
+GRID_MOST = 16
+
+# What a drum has, as a song holds it: the two it must have, and the two it can do without.
+_DRUM_NEEDS = ("inst", "note")
+_DRUM_MAY = ("rows", "vel")
 
 
 def allowed(song: dict, kind: str, name: object) -> str:
@@ -91,11 +103,14 @@ def _swapped(names: Iterable[str], old: str, new: str) -> list[str]:
     return [new if name == old else name for name in names]
 
 
-def _next(song: dict, name: str) -> str:
-    """The next free name after a pattern's: `a` gives `a2`, or `a3` where the song has an `a2`, and `tune2` `tune3`."""
+def _next(song: dict, name: str, kind: str = "pattern") -> str:
+    """The next free name after a pattern's: `a` gives `a2`, or `a3` where the song has an `a2`, and `tune2` `tune3`.
+
+    With "channel" for the kind it is the next free name after a channel's, among the channels.
+    """
     stem, count = _COUNTED.fullmatch(name).groups()
     number = int(count or 1) + 1
-    while f"{stem}{number}" in song["patterns"]:
+    while f"{stem}{number}" in song[f"{kind}s"]:
         number += 1
     return f"{stem}{number}"
 
@@ -279,6 +294,58 @@ def channel_added(song: dict, name: str, inst: str, drums: bool = False) -> dict
     return made
 
 
+def channel_copied(song: dict, name: str, new: str | None = None) -> dict:
+    """A song with a new channel that is a copy of one of its channels, the next after it among them.
+
+    The copy has the settings of the channel and its text in every pattern, so it plays what the channel plays.
+    Its name is `new`, held to what `allowed` allows. With none given it is the next free one: `lead` gives
+    `lead2`. In a song with layers the copy is in no group yet. A channel the song does not have is refused.
+    """
+    _known(song, "channel", name)
+    new = allowed(song, "channel", _next(song, name, "channel") if new is None else new)
+    made = copy.deepcopy(song)
+    channels, made["channels"] = made["channels"], {}
+    for held, settings in channels.items():
+        made["channels"][held] = settings
+        if held == name:
+            made["channels"][new] = copy.deepcopy(settings)
+    for pattern, texts in made["patterns"].items():
+        made["patterns"][pattern] = {key: text for held, text in texts.items()
+                                     for key in ((held, new) if held == name else (held,))}
+    return made
+
+
+def _noted(song: dict, channel: str) -> str | None:
+    """The first pattern of a song in which a channel has a note or a hit written, or None where it has none."""
+    readable = _readable(song)
+    for name in song["patterns"]:
+        if any(held.name == channel and held.notes for held in songview.pattern(readable, name).channels):
+            return name
+    return None
+
+
+def channel_kind(song: dict, name: str, drums: bool) -> dict:
+    """A song with one of its channels made a drum channel, or with `drums` false a tuned one.
+
+    The text of a tuned channel names notes and that of a drum channel names drums, and neither is read as the
+    other. So it is refused while the channel has a note written in any pattern: rests alone are read either
+    way. A channel that is of that kind already stays as it is. A channel the song does not have is refused.
+    """
+    _known(song, "channel", name)
+    made = copy.deepcopy(song)
+    if bool(song["channels"][name].get("drums")) == bool(drums):
+        return made
+    written = _noted(song, name)
+    if written is not None:
+        raise RowSynthError(f"channel {name!r} has notes in pattern {written!r}: a channel is made a "
+                            f"{'drum' if drums else 'tuned'} channel while it has none")
+    if drums:
+        made["channels"][name]["drums"] = True
+    else:
+        del made["channels"][name]["drums"]
+    return made
+
+
 def channel_dropped(song: dict, name: str) -> dict:
     """A song without one of its channels: its settings, its text in every pattern, and its place in the layers.
 
@@ -380,3 +447,135 @@ def with_tempo(song: dict, row_ticks: int) -> dict:
     made = copy.deepcopy(song)
     made["row_ticks"] = _whole(row_ticks, "the ticks of a row are", 1)
     return made
+
+
+def _drum(song: dict, letter: object) -> dict:
+    """What a song holds for one of its drums, by its letter. A letter the song has no drum for is refused."""
+    drums = song.get("drums", {})
+    if not isinstance(letter, str) or letter not in drums:
+        raise RowSynthError(f"the song has no drum {letter!r}")
+    return drums[letter]
+
+
+def drum_added(song: dict, letter: str, inst: str, note: str | float = DRUM_NOTE) -> dict:
+    """A song with one more drum: a letter of `LETTERS` the song has no drum for, which plays a note of `inst`.
+
+    The drum is the last of the song's drum table, and a song with no table gets one. Whether the project has
+    the instrument cannot be seen from a song, and the project's check says so when the song is saved. Refused
+    are a letter that is none of `LETTERS`, one the song has a drum for already, and a note that is none.
+    """
+    if not isinstance(letter, str) or len(letter) != 1 or letter not in LETTERS:
+        raise RowSynthError(f"a drum is called by one of the letters {' '.join(LETTERS)}, not {letter!r}")
+    if letter in song.get("drums", {}):
+        raise RowSynthError(f"the song has a drum {letter!r} already")
+    midi(note)
+    made = copy.deepcopy(song)
+    made.setdefault("drums", {})[letter] = {"inst": inst, "note": note}
+    return made
+
+
+def drum_set(song: dict, letter: str, key: str, value: object) -> dict:
+    """A song with one thing of one of its drums changed: its "inst", its "note", its "rows" or its "vel".
+
+    The rows are how long a hit of the drum is held at the most, and the velocity is how hard it is struck, as
+    a share of what its text says. With None for either the drum has none of its own any more: a hit is then
+    held for as long as its text says, and struck as hard. Refused are a drum the song does not have, a thing
+    a drum does not have, a note that is none, rows that are no number above 0, a velocity that is no number
+    from 0 to 1, and None for the instrument or the note, which a drum cannot do without.
+    """
+    _drum(song, letter)
+    if key not in _DRUM_NEEDS + _DRUM_MAY:
+        raise RowSynthError(f"a drum has {', '.join(_DRUM_NEEDS + _DRUM_MAY)}, and no {key!r}")
+    number = isinstance(value, (int, float)) and not isinstance(value, bool)
+    if value is None and key in _DRUM_NEEDS:
+        raise RowSynthError(f"drum {letter!r} cannot do without its {key}")
+    if key == "note":
+        midi(value)
+    elif key == "inst" and (not isinstance(value, str) or not value):
+        raise RowSynthError(f"the instrument of a drum is a name, not {value!r}")
+    elif key == "rows" and value is not None and not (number and value > 0):
+        raise RowSynthError(f"the rows a drum is held for are a number above 0, not {value!r}")
+    elif key == "vel" and value is not None and not (number and 0 <= value <= 1):
+        raise RowSynthError(f"the velocity of a drum is a number from 0 to 1, not {value!r}")
+    made = copy.deepcopy(song)
+    if value is None:
+        made["drums"][letter].pop(key, None)
+    else:
+        made["drums"][letter][key] = value
+    return made
+
+
+def drum_removed(song: dict, letter: str) -> dict:
+    """A song without one of its drums. The last drum takes the drum table with it.
+
+    It is refused while a pattern of the song plays the drum, and the refusal says which and in which channel:
+    the text there could not be read without it. A drum the song does not have is refused.
+    """
+    _drum(song, letter)
+    readable = _readable(song)
+    for name in song["patterns"]:
+        for channel in songview.pattern(readable, name).channels:
+            if any(note.drum == letter for note in channel.notes):
+                raise RowSynthError(f"drum {letter!r} is played in pattern {name!r} by channel {channel.name!r}, "
+                                    "and a drum that is played is not removed")
+    made = copy.deepcopy(song)
+    del made["drums"][letter]
+    if not made["drums"]:
+        del made["drums"]
+    return made
+
+
+def _row_ticks(song: dict, rows_per_beat: int) -> float:
+    """The ticks a row of a song lasts when a beat has `rows_per_beat` rows and lasts as long as it does now."""
+    return song["row_ticks"] * song.get("rows_per_beat", 4) / rows_per_beat
+
+
+def _is_whole(value: float) -> bool:
+    """Whether a number is a whole one, but for what is lost in working it out."""
+    return abs(value - round(value)) < 1e-9
+
+
+def _scaled(value: float, new: float, old: float) -> int | float:
+    """A number of rows as it is where a beat has `new` rows in place of `old`, written whole where it is whole."""
+    scaled = value * new / old
+    return round(scaled) if _is_whole(scaled) else scaled
+
+
+def gridded(song: dict, rows_per_beat: int) -> dict:
+    """A song with another number of rows to a beat, which sounds as it did.
+
+    The text of a channel counts its lengths in shares of a whole note, so every note has as many more rows as
+    the beat has. What the engine counts in rows and the song holds as a number is changed to go with it: the
+    ticks of a row, so that a beat lasts as long as it did, the rows after which the echo of a channel comes,
+    and the rows a drum is held for at the most. The texts, the chords of the bars, the layers and the intro
+    count in none of these, and stay as they are.
+
+    A row lasts a whole number of ticks. Where the ticks of a beat do not share out so among the new rows, the
+    song cannot sound the same at that grid, and it is refused. Rows to a beat that are no whole number, or
+    fewer than 1, are refused as well.
+    """
+    new = _whole(rows_per_beat, "the rows of a beat are", 1)
+    old = song.get("rows_per_beat", 4)
+    ticks = _row_ticks(song, new)
+    if ticks < 1 or not _is_whole(ticks):
+        raise RowSynthError(f"with {new} rows to a beat a row would last {ticks:g} ticks, and a row lasts a whole "
+                            "number of them: the song cannot sound the same at that grid")
+    made = copy.deepcopy(song)
+    made["rows_per_beat"], made["row_ticks"] = new, round(ticks)
+    for held in (*made["channels"].values(), *made.get("drums", {}).values()):
+        if "echo" in held:
+            held["echo"]["rows"] = _scaled(held["echo"]["rows"], new, old)
+        if "rows" in held:
+            held["rows"] = _scaled(held["rows"], new, old)
+    return made
+
+
+def grids(song: dict) -> list[int]:
+    """The rows to a beat a song can be given and sound the same, the fewest first: those `gridded` makes.
+
+    They go up to `GRID_MOST`. The one the song has is among them at its place, whatever it is, so that it
+    can be shown.
+    """
+    found = {rows for rows in range(1, GRID_MOST + 1)
+             if _row_ticks(song, rows) >= 1 and _is_whole(_row_ticks(song, rows))}
+    return sorted(found | {song.get("rows_per_beat", 4)})
