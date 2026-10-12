@@ -19,7 +19,7 @@ python -m rowsynth -h
 
 If it does not, it is not installed. In a clone of the rowsynth repo, run `pip install .`, or work from the repo's root folder, where `python -m rowsynth` runs without an install as long as NumPy is there. A script of your own that imports `rowsynth` without an install needs the repo's root in the `PYTHONPATH` environment variable, since Python looks beside the script and not in the working folder.
 
-The person may have the standalone program in place of Python: a folder with `rowsynth.exe` in it, and this skill in its `skill` folder. Every command here is then the same with that program, named by its whole path, in place of `python -m rowsynth`, and the example is `examples/demo.json` in that folder. A script that imports `rowsynth` cannot be run there, so work through the commands.
+The person may have the standalone program in place of Python: a folder with `rowsynth.exe` in it, which is the window and is for the person, and this skill in its `skill` folder. The command line is `bin/rowsynth-cli.exe` in that folder. Every command here is then the same with that program, named by its whole path, in place of `python -m rowsynth`, and the example is `examples/demo.json` in that folder. A script that imports `rowsynth` cannot be run there, so work through the commands.
 
 The repo's `examples/demo.json` holds six sound effects and three songs: `tune` in layers, `korobeiniki`, and `piece`, a longer song on FM instruments of its own. It passes `check`.
 

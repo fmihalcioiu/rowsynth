@@ -1,4 +1,4 @@
-"""What the standalone program runs: the command line as it is, and the window with no console behind it."""
+"""What the standalone programs run: the window with no console behind it, and the command line as it is."""
 from __future__ import annotations
 
 import ctypes
@@ -9,28 +9,15 @@ from collections.abc import Sequence
 
 from .cli import main
 
-#: What the two programs of the standalone folder are called, without the ending the system gives them.
-COMMAND_LINE = "rowsynth"
-WINDOW = "rowsynth-window"
+#: What the two programs of the standalone folder are called, without the ending the system gives them. The
+#: window is the program of the folder, the one a person sees there and opens.
+WINDOW = "rowsynth"
+COMMAND_LINE = "rowsynth-cli"
+#: The folder of the standalone folder that holds what the two programs need to run, and the command line.
+HELD = "bin"
 #: What the box of the system is headed that says why the window did not open.
 HEADING = "rowsynth"
 _STOP_SIGN = 0x10
-
-
-def frozen() -> bool:
-    """Whether this is the standalone program, which has Python and the package inside it."""
-    return bool(getattr(sys, "frozen", False))
-
-
-def alone_in_console() -> bool:
-    """Whether the process has a console that no other process shares: a double click started it, and no shell."""
-    if sys.platform != "win32":
-        return False
-    try:
-        listed = (ctypes.c_uint * 2)()
-        return ctypes.windll.kernel32.GetConsoleProcessList(listed, 2) == 1
-    except (AttributeError, OSError):
-        return False
 
 
 def say(words: str) -> None:
@@ -47,18 +34,8 @@ def say(words: str) -> None:
 
 
 def command_line(argv: Sequence[str] | None = None) -> int:
-    """The command line of the standalone program: what `python -m rowsynth` runs, with the same words after it.
-
-    Started by a double click with nothing after its name, it has a console of its own and nobody to read it:
-    it lets go of the console and opens the window.
-    """
-    argv = list(sys.argv[1:] if argv is None else argv)
-    if not argv and frozen() and alone_in_console():
-        ctypes.windll.kernel32.FreeConsole()
-        # What the process printed on is gone with the console.
-        sys.stdout = sys.stderr = open(os.devnull, "w", encoding="utf-8")
-        return window([])
-    return main(argv)
+    """The command line of the standalone program: what `python -m rowsynth` runs, with the same words after it."""
+    return main(list(sys.argv[1:] if argv is None else argv))
 
 
 def window(argv: Sequence[str] | None = None) -> int:

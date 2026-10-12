@@ -34,16 +34,18 @@ MP3 and Opus files are made by ffmpeg, which has to be on the path. Nothing else
 
 ### Without Python
 
-The releases of this repo have a zip for Windows that needs no Python. Unpacked, it is one folder with two programs in it:
+The releases of this repo have a zip for Windows that needs no Python. Unpacked, it is one folder:
 
-| Program | What it is |
+| In the folder | What it is |
 |---|---|
-| `rowsynth-window.exe` | The window. A double click opens it on its first screen, and with a project file after its name it opens that file |
-| `rowsynth.exe` | The command line. It takes the same words as `python -m rowsynth`, as in `rowsynth.exe check examples\demo.json` |
+| `rowsynth.exe` | The window. A double click opens it on its first screen, and with a project file after its name it opens that file |
+| `bin\rowsynth-cli.exe` | The command line. It takes the same words as `python -m rowsynth`, as in `bin\rowsynth-cli.exe check examples\demo.json` |
+| `examples` | The example |
+| `skill` | The skill that teaches an assistant the command line |
 
-Beside them are the example in `examples`, this file, and in `skill` the skill that teaches an assistant the command line. Windows asks before it runs a program whose publisher it does not know, as it does here: `More info`, then `Run anyway`.
+`bin` also holds what the two programs need to run, so the folder is moved whole. Windows asks before it runs a program whose publisher it does not know, as it does here: `More info`, then `Run anyway`.
 
-Everything below is the same with the two programs, and a file can be open in the window while the command line changes it. The first run is slower than the ones after it, as with Python, and MP3 and Opus need ffmpeg on the path.
+Everything below is the same with the two programs, `bin\rowsynth-cli.exe` where it says `python -m rowsynth`, and a file can be open in the window while the command line changes it. The first run is slower than the ones after it, as with Python, and MP3 and Opus need ffmpeg on the path.
 
 The folder and the zip are made by `python standalone/build.py`, for the system it is run on. That needs PyInstaller and Pillow, which rowsynth itself does not: `pip install pyinstaller pillow`.
 

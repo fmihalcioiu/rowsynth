@@ -4,6 +4,9 @@
 
 It needs PyInstaller and Pillow, which are no part of rowsynth: `pip install pyinstaller pillow`. The folder is
 `dist/rowsynth`, and the zip beside it is what goes on a release. What is printed is what was written.
+
+In the folder the window is the one program to be seen, `rowsynth`. The command line, `rowsynth-cli`, is in `bin`
+with everything the two need to run.
 """
 from __future__ import annotations
 
@@ -20,7 +23,7 @@ sys.path.insert(0, str(ROOT))
 #: The sides of the pictures in the icon of the program, in pixels, each with the sprite of the set `app` it is
 #: made of: a whole number of times that sprite's side, so that no pixel of it is smoothed.
 SIDES = ((16, "small"), (32, "icon"), (48, "small"), (64, "icon"), (128, "icon"), (256, "icon"))
-#: What goes in the folder beside the two programs, each as (where it is in the repo, where it goes).
+#: What goes in the folder beside the window, each as (where it is in the repo, where it goes).
 BESIDE = (("examples", "examples"), ("skills/rowsynth", "skill"), ("LICENSE", "LICENSE.txt"), ("README.md", "README.md"),
           # The picture the README shows, where the README looks for it.
           ("docs/window.png", "docs/window.png"))
@@ -55,6 +58,20 @@ def icon(path: Path) -> Path:
     return path
 
 
+def settle(folder: Path) -> tuple[Path, Path]:
+    """Put the command line where it belongs in the folder PyInstaller made, and say where the two programs are.
+
+    PyInstaller leaves the two beside each other. The command line goes into the folder that holds what they
+    need, where it was built to look for it, and the window stays as the one program of the folder.
+    """
+    from rowsynth.program import COMMAND_LINE, HELD, WINDOW
+
+    ending = ".exe" if platform.system() == "Windows" else ""
+    line = folder / HELD / (COMMAND_LINE + ending)
+    shutil.move(folder / line.name, line)
+    return folder / (WINDOW + ending), line
+
+
 def build() -> dict:
     """Make the icon, the folder and the zip, and say where each is and how big the zip came out."""
     import PyInstaller.__main__
@@ -63,6 +80,7 @@ def build() -> dict:
     PyInstaller.__main__.run([str(ROOT / "standalone" / "rowsynth.spec"), "--noconfirm",
                               "--distpath", str(ROOT / "dist"), "--workpath", str(ROOT / "build")])
     folder = ROOT / "dist" / "rowsynth"
+    window, line = settle(folder)
     for source, name in BESIDE:
         here, there = ROOT / source, folder / name
         if here.is_dir():
@@ -73,8 +91,8 @@ def build() -> dict:
     system = SYSTEMS.get(platform.system(), platform.system().lower())
     packed = shutil.make_archive(str(ROOT / "dist" / f"rowsynth-{version()}-{system}"), "zip", folder.parent,
                                  folder.name)
-    return {"icon": str(made), "folder": str(folder), "zip": packed,
-            "megabytes": round(Path(packed).stat().st_size / 1e6, 1)}
+    return {"icon": str(made), "folder": str(folder), "window": str(window), "command_line": str(line),
+            "zip": packed, "megabytes": round(Path(packed).stat().st_size / 1e6, 1)}
 
 
 if __name__ == "__main__":

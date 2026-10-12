@@ -1,4 +1,4 @@
-"""Tests for what the standalone program runs: the command line as it is, and the window with no console."""
+"""Tests for what the standalone programs run: the window with no console, and the command line as it is."""
 from __future__ import annotations
 
 import importlib.util
@@ -34,43 +34,40 @@ class CommandLine(unittest.TestCase):
             self.assertEqual(program.command_line(["check", "audio.json"]), 7)
         ran.assert_called_once_with(["check", "audio.json"])
 
-    def test_with_no_words_it_is_the_command_line_still_unless_a_double_click_started_the_program(self) -> None:
+    def test_with_no_words_it_is_the_command_line_still_and_opens_no_window(self) -> None:
+        # A double click on it is no way to the window: that is the other program's.
         with mock.patch.object(program, "main", return_value=2) as ran, \
                 mock.patch.object(program, "window") as opened, \
-                mock.patch.object(program, "alone_in_console", return_value=True):
-            # Run by Python, a console of its own is nothing to go by: it is some shell's that has ended.
+                mock.patch.object(sys, "frozen", True, create=True):
             self.assertEqual(program.command_line([]), 2)
         ran.assert_called_once_with([])
         opened.assert_not_called()
-        # The standalone program in a shell, which shares its console.
-        with mock.patch.object(program, "main", return_value=2) as ran, \
-                mock.patch.object(program, "frozen", return_value=True), \
-                mock.patch.object(program, "alone_in_console", return_value=False):
-            self.assertEqual(program.command_line([]), 2)
-        ran.assert_called_once_with([])
 
-    def test_started_by_a_double_click_it_lets_go_of_its_console_and_opens_the_window(self) -> None:
-        streams = (sys.stdout, sys.stderr)
-        self.addCleanup(lambda: setattr(sys, "stdout", streams[0]))
-        self.addCleanup(lambda: setattr(sys, "stderr", streams[1]))
-        with mock.patch.object(program, "main") as ran, mock.patch.object(program, "window", return_value=0) as opened, \
-                mock.patch.object(program, "frozen", return_value=True), \
-                mock.patch.object(program, "alone_in_console", return_value=True), \
-                mock.patch.object(program, "ctypes") as system:
-            self.assertEqual(program.command_line([]), 0)
-            # What it printed on is gone with the console: it prints on nothing from then on.
-            self.assertTrue(sys.stdout is sys.stderr and sys.stdout is not streams[0])
-            sys.stdout.close()
-        system.windll.kernel32.FreeConsole.assert_called_once_with()
-        opened.assert_called_once_with([])
-        ran.assert_not_called()
+    def test_with_nothing_given_it_takes_the_words_after_the_name_of_the_program(self) -> None:
+        with mock.patch.object(program, "main", return_value=0) as ran, \
+                mock.patch.object(sys, "argv", ["rowsynth-cli.exe", "info", "audio.json"]):
+            self.assertEqual(program.command_line(), 0)
+        ran.assert_called_once_with(["info", "audio.json"])
 
-    def test_whether_it_is_the_standalone_program_goes_by_what_the_program_says_of_itself(self) -> None:
-        self.assertFalse(program.frozen())
-        with mock.patch.object(sys, "frozen", True, create=True):
-            self.assertTrue(program.frozen())
-        self.assertIsInstance(program.alone_in_console(), bool)
-        self.assertEqual((program.COMMAND_LINE, program.WINDOW), ("rowsynth", "rowsynth-window"))
+    def test_the_window_has_the_plain_name_and_the_command_line_is_in_the_folder_of_the_files(self) -> None:
+        self.assertEqual((program.WINDOW, program.COMMAND_LINE, program.HELD), ("rowsynth", "rowsynth-cli", "bin"))
+
+
+class Folder(unittest.TestCase):
+    def test_the_command_line_is_moved_into_the_folder_of_the_files_and_the_window_stays(self) -> None:
+        build = builder()
+        ending = ".exe" if sys.platform == "win32" else ""
+        with tempfile.TemporaryDirectory() as made:
+            folder = Path(made)
+            (folder / "bin").mkdir()
+            for name in ("rowsynth", "rowsynth-cli"):
+                (folder / (name + ending)).write_bytes(name.encode())
+            window, line = build.settle(folder)
+            self.assertEqual((window, line),
+                             (folder / ("rowsynth" + ending), folder / "bin" / ("rowsynth-cli" + ending)))
+            self.assertEqual((window.read_bytes(), line.read_bytes()), (b"rowsynth", b"rowsynth-cli"))
+            # The window is the one program to be seen in the folder.
+            self.assertEqual(sorted(path.name for path in folder.iterdir()), ["bin", "rowsynth" + ending])
 
 
 class Window(unittest.TestCase):

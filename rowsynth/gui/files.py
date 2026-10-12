@@ -243,10 +243,12 @@ def examples(root: str | Path | None = None) -> list[Path]:
 
     `root` is the folder the package is in, and with None it is found. Where that is no checkout, as when the
     package is installed, or has no such folder, there are none. The standalone program has its examples in
-    the `examples` folder beside the program itself.
+    the `examples` folder of the standalone folder: beside the folder that holds what the program needs to
+    run, whichever of the two programs it is.
     """
     if root is None and getattr(sys, "frozen", False):
-        folder = Path(sys.executable).resolve().parent / "examples"
+        held = Path(getattr(sys, "_MEIPASS", None) or Path(sys.executable).parent).resolve()
+        folder = held.parent / "examples"
         return [folder / name for name in holds(folder).files] if folder.is_dir() else []
     root = Path(__file__).resolve().parents[2] if root is None else Path(root)
     if not (root / "pyproject.toml").is_file():

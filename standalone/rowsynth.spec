@@ -1,11 +1,17 @@
-# What PyInstaller is told to make: one folder with two programs in it, which share everything else there.
-# `build.py` beside this file runs it, after it has made the icon this names.
+# What PyInstaller is told to make: one folder with the window in it, and a folder in that with everything the
+# window needs to run. `build.py` beside this file runs it, after it has made the icon this names, and then puts
+# the command line where it belongs.
+import sys
 from pathlib import Path
 
 from PyInstaller.utils.hooks import collect_data_files, collect_submodules
 
 HERE = Path(SPECPATH)
 ROOT = HERE.parent
+sys.path.insert(0, str(ROOT))
+
+from rowsynth.program import COMMAND_LINE, HELD, WINDOW
+
 ICON = str(ROOT / "build" / "rowsynth.ico")
 # The commands and the checks are found by name as the program runs, so none of them is seen by reading the code.
 HIDDEN = collect_submodules("rowsynth")
@@ -22,11 +28,15 @@ def read(script):
 
 
 programs, shared = [], []
-# The command line has a console. The window has none: a double click on it opens no black box behind it.
-for script, name, console in (("cli.py", "rowsynth", True), ("window.py", "rowsynth-window", False)):
+# The window comes first: the folder is laid out as it asks, with what it needs in a folder of its own. It has the
+# icon and no console, so a double click on it opens no black box behind it. The command line has a console and
+# the plain picture the system gives a program, and it looks for what it needs beside itself: `build.py` moves it
+# into the folder of the window's.
+for script, name, console, icon, held in (("window.py", WINDOW, False, ICON, HELD),
+                                          ("cli.py", COMMAND_LINE, True, "NONE", ".")):
     found = read(script)
     programs.append(EXE(PYZ(found.pure), found.scripts, [], exclude_binaries=True, name=name, console=console,
-                        icon=ICON, upx=False))
+                        icon=icon, contents_directory=held, upx=False))
     shared += [found.binaries, found.datas]
 
 COLLECT(*programs, *shared, name="rowsynth", upx=False)
