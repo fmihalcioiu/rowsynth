@@ -51,6 +51,60 @@ class Zones(unittest.TestCase):
         frame._told(5, 0x0024, 0, at)
         self.assertEqual((sizes.least.x, sizes.least.y), (1280, 900))
 
+    def held(self) -> tuple[Frame, list[str]]:
+        """A hold with no window behind it, and what its owner was called for: what the window was before stands
+        in for the system."""
+        frame, called = Frame.__new__(Frame), []
+        frame._user, frame._before, frame.least, frame._calling = mock.Mock(), 7, (0, 0), False
+        frame._user.CallWindowProcW.return_value = 11
+        frame.during = lambda: called.append("drawn")
+        return frame, called
+
+    def test_while_the_system_moves_or_sizes_the_window_a_timer_has_its_owner_draw_it(self) -> None:
+        frame, called = self.held()
+        user = frame._user
+        # As a move begins the timer is set, and the message goes on to the window as it was.
+        self.assertEqual(frame._told(5, 0x0231, 0, 0), 11)
+        user.SetTimer.assert_called_once_with(5, 0x7273, 10, None)
+        user.CallWindowProcW.assert_called_once_with(7, 5, 0x0231, 0, 0)
+        # Each time the timer is due the owner draws, and that is the end of the message.
+        self.assertEqual([frame._told(5, 0x0113, 0x7273, 0) for _ in range(3)], [0, 0, 0])
+        self.assertEqual((called, user.CallWindowProcW.call_count), (["drawn"] * 3, 1))
+        # A timer of the window's own is the window's, as it was.
+        self.assertEqual((frame._told(5, 0x0113, 99, 0), called), (11, ["drawn"] * 3))
+        # As the move ends the timer is stopped, and that message goes on as well.
+        self.assertEqual(frame._told(5, 0x0232, 0, 0), 11)
+        user.KillTimer.assert_called_once_with(5, 0x7273)
+        user.CallWindowProcW.assert_called_with(7, 5, 0x0232, 0, 0)
+
+    def test_an_owner_that_draws_nothing_gets_no_timer_and_one_that_raises_is_not_asked_again(self) -> None:
+        frame, called = self.held()
+        frame.during = None
+        frame._told(5, 0x0231, 0, 0)
+        frame._user.SetTimer.assert_not_called()
+        self.assertEqual(frame._told(5, 0x0113, 0x7273, 0), 0)
+
+        def raises() -> None:
+            called.append("raised")
+            raise ValueError("no picture")
+
+        frame.during = raises
+        self.assertEqual(([frame._told(5, 0x0113, 0x7273, 0) for _ in range(2)], called, frame.during),
+                         ([0, 0], ["raised"], None))
+
+    def test_a_timer_that_is_due_while_its_owner_still_draws_is_let_pass(self) -> None:
+        frame, called = self.held()
+
+        def slow() -> None:
+            called.append("began")
+            # The system hands the window the next one before this one has come back.
+            frame._told(5, 0x0113, 0x7273, 0)
+            called.append("ended")
+
+        frame.during = slow
+        frame._told(5, 0x0113, 0x7273, 0)
+        self.assertEqual(called, ["began", "ended"])
+
     @unittest.skipIf(sys.platform == "win32", "only where the system is not Windows")
     def test_anywhere_but_on_windows_there_is_no_such_hold_on_a_window(self) -> None:
         with self.assertRaises(OSError):

@@ -1279,6 +1279,25 @@ class InTheApp(unittest.TestCase):
         click(app.ui, middle(top.inspector.rect))
         self.assertEqual((app.wishes["right"], self.wide(app, 1920)["right"][2]), (None, 174))
 
+    def test_a_frame_the_system_calls_for_while_it_has_the_window_is_drawn_on_the_window_as_it_then_is(self) -> None:
+        self.held()
+        app = self.silent()
+        # It is what the screen is told to call while the system moves or sizes the window.
+        self.assertEqual(app.screen.during, app._live)
+        x, y, _, h = app.screen.stand()
+        app.screen.put((x, y, 1280, h))
+        updated = []
+        with mock.patch.object(app, "update", side_effect=updated.append):
+            app._live()
+            app._live()
+        # The panels are laid out for the window as it is now, and the picture is on the window.
+        window = pygame.display.get_surface()
+        self.assertEqual((app._size, window.get_size(), app.panels["left"].shown), ((640, 492), (1280, 984), False))
+        # The right end of the top bar, which is in the panel's colour, is where the narrower window ends.
+        self.assertEqual(window.get_at((1270, 40))[:3], theme.PANEL)
+        # The first frame of a move has no time behind it, and the next has what passed since the first.
+        self.assertEqual((updated[0], 0.0 <= updated[1] < 0.25), (0.0, True))
+
     def test_an_edge_of_the_window_is_not_dragged_further_in_than_the_least_size_at_its_scale(self) -> None:
         self.held()
         app = self.silent()

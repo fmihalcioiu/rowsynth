@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import time
 from collections.abc import Callable, Container
 from functools import partial
 from pathlib import Path
@@ -31,6 +32,8 @@ from .topbar import CLOSE, MINIMISE, Title, TopBar
 from .ui import NOWHERE, Event, Pos, Ui, inside, translate
 
 FPS = 60
+# Frames the system called for further apart than this many seconds are of two moves of the window, and not one.
+_LIVE_GAP = 0.25
 # The seconds a message that was just said has the status bar, whatever the mouse is on.
 MESSAGE_TIME = 3.0
 
@@ -160,6 +163,8 @@ class App:
         self._pulled: Pos | None = None
         # Whether the title row has a press of its own while something is open over the widgets.
         self._row_pressed = False
+        # When the last frame was drawn that the system called for while it had the window.
+        self._lived = 0.0
         self.ui = Ui()
         # What the app has to say while no session is open to say it, and how many times it had something.
         self._own = ""
@@ -182,6 +187,7 @@ class App:
         self.first = None
         self.title = self.ui.add(Title((0, 0, 0, 0), "", self.frame_do, self._grab)) if self.screen.frameless else None
         self.screen.asked = self._asked
+        self.screen.during = self._live
         self._own, self._owns = "", 0
         self._said, self._age = 0, MESSAGE_TIME
 
@@ -499,6 +505,20 @@ class App:
         if not inside(self.title.rect, at):
             return ""
         return "button" if self.title.at(at) is not None else "caption"
+
+    def _live(self) -> None:
+        """Draw a frame while the system has the window: it moves or sizes it, and the loop of `run` waits.
+
+        The system calls for it again and again for as long as that lasts. Nothing the mouse or the keys do
+        comes in meanwhile. The seconds since the frame before are counted here, and are none for the first
+        frame of a move.
+        """
+        now = time.perf_counter()
+        passed = now - self._lived
+        self._lived = now
+        self.update(passed if passed < _LIVE_GAP else 0.0)
+        self.draw(self.screen.begin())
+        self.screen.present()
 
     def _grip(self, pos: Pos) -> str:
         """The edge or corner of the window that a position of the window takes hold of, and "" for none.

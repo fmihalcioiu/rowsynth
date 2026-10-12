@@ -15,6 +15,11 @@ CLIENT, CAPTION = 1, 2
 EDGES = {"w": 10, "e": 11, "n": 12, "nw": 13, "ne": 14, "s": 15, "sw": 16, "se": 17}
 
 _CALC_SIZE, _HIT_TEST, _CLOSE, _SIZES = 0x0083, 0x0084, 0x0010, 0x0024
+# What the system says as it begins to move or size a window, as it ends, and each time a timer of the window's
+# is due. Between the first two it keeps the program waiting, and only what it sends the window gets through.
+_BEGIN, _END, _DUE = 0x0231, 0x0232, 0x0113
+# The timer that is set for as long as that lasts: what it is known by, and how many milliseconds it is due after.
+_TIMER, _EVERY = 0x7273, 10
 _WNDPROC = -4
 _SHOW_MAXIMISED, _SHOW_MINIMISED, _SHOW_RESTORED = 3, 6, 9
 _NO_SIZE, _NO_MOVE, _NO_Z_ORDER, _FRAME_CHANGED = 0x0001, 0x0002, 0x0004, 0x0020
@@ -79,6 +84,10 @@ class Frame:
     position of the window, what the window has there, in the words `zone` takes. `least` is the least size
     the system lets the window be dragged or snapped to, in window pixels.
 
+    While the system moves or sizes the window, the program waits in the system and draws nothing. `during`
+    is called again and again for as long as that lasts, about sixty times a second, for the owner to draw
+    the window: with None nothing is. One that raises is not called again.
+
     Only Windows has this. Anywhere else, and where the system refuses, making one raises OSError.
     """
 
@@ -88,6 +97,9 @@ class Frame:
         self.hwnd = hwnd
         self.asked = asked
         self.least = (0, 0)
+        self.during: Callable[[], object] | None = None
+        # Whether `during` is being called now: it is not called again before it has come back.
+        self._calling = False
         user = self._user = ctypes.WinDLL("user32", use_last_error=True)
         pointer, word, long = ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ssize_t
         self._kind = ctypes.WINFUNCTYPE(long, pointer, ctypes.c_uint, word, long)
@@ -102,6 +114,8 @@ class Frame:
         user.MonitorFromWindow.restype, user.MonitorFromWindow.argtypes = pointer, [pointer, ctypes.c_ulong]
         user.GetMonitorInfoW.argtypes = [pointer, ctypes.POINTER(_Display)]
         user.PostMessageW.argtypes = [pointer, ctypes.c_uint, word, long]
+        user.SetTimer.restype, user.SetTimer.argtypes = word, [pointer, word, ctypes.c_uint, pointer]
+        user.KillTimer.argtypes = [pointer, word]
         self._own = self._kind(self._told)
         _KEPT.append(self._own)
         self._before = user.SetWindowLongPtrW(hwnd, _WNDPROC, ctypes.cast(self._own, pointer))
@@ -112,12 +126,19 @@ class Frame:
         user.SetWindowPos(hwnd, None, 0, 0, 0, 0, _NO_MOVE | _NO_SIZE | _NO_Z_ORDER | _FRAME_CHANGED)
 
     def _told(self, hwnd: int, message: int, first: int, second: int) -> int:
-        """What the system is answered for one message to the window. Any but three goes on to the window as it
-        was.
+        """What the system is answered for one message to the window. Any but four goes on to the window as it
+        was, and so do the two that a move or a sizing begins and ends with, once the timer is set or stopped.
 
         Nothing may be raised here, where the system is the caller: whatever goes wrong, the message goes on.
         """
         try:
+            if message == _BEGIN and self.during is not None:
+                self._user.SetTimer(hwnd, _TIMER, _EVERY, None)
+            elif message == _END:
+                self._user.KillTimer(hwnd, _TIMER)
+            elif message == _DUE and first == _TIMER:
+                self._draw()
+                return 0
             if message == _SIZES:
                 # The window as it was answers first, and its least size is then made the one of here.
                 answer = self._user.CallWindowProcW(self._before, hwnd, message, first, second)
@@ -142,6 +163,18 @@ class Frame:
         except Exception:
             pass
         return self._user.CallWindowProcW(self._before, hwnd, message, first, second)
+
+    def _draw(self) -> None:
+        """Have the owner draw the window, unless it is drawing it now. One that raises is not asked again."""
+        if self.during is None or self._calling:
+            return
+        self._calling = True
+        try:
+            self.during()
+        except Exception:
+            self.during = None
+        finally:
+            self._calling = False
 
     def _work(self) -> tuple[int, int, int, int] | None:
         """The four sides of what the task bar leaves of the window's display, or None where it cannot be asked."""
@@ -170,5 +203,6 @@ class Frame:
     def release(self) -> None:
         """Give the window back the procedure it had. It is done before the window is closed."""
         if not self._released:
+            self._user.KillTimer(self.hwnd, _TIMER)
             self._user.SetWindowLongPtrW(self.hwnd, _WNDPROC, self._before)
             self._released = True

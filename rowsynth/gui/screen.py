@@ -122,6 +122,8 @@ class Screen:
     of its own. On Windows the system still moves, sizes and snaps such a window, as it does any other: `frame`
     is the hold on the window by which it is told where the title row and the edges are, and `asked` is what
     it asks for a position of the window ("caption", "button" or "", which the owner of the title row sets).
+    `during` is called again and again while the system moves or sizes the window, for its owner to draw it:
+    the loop that draws waits for as long as that lasts.
     Anywhere else `frame` is None, and the window is moved, sized, taken off the screen and made to fill the
     desktop from here. Where the running pygame cannot do that either, the window keeps the system's frame.
     `kept` is where a window that fills the desktop stood before, and None for one that does not fill it.
@@ -145,6 +147,7 @@ class Screen:
         self.frameless = False
         self.frame: winframe.Frame | None = None
         self.asked = lambda pos: ""
+        self.during = lambda: None
         self.kept: Rect | None = None
         self._shape = ""
         self.window = self._open(size)
@@ -191,6 +194,7 @@ class Screen:
         try:
             pygame.display.set_mode(size, pygame.RESIZABLE)
             self.frame = winframe.Frame(pygame.display.get_wm_info()["window"], lambda pos: self.asked(pos))
+            self.frame.during = lambda: self.during()
             self.frame.fit(size)
             pygame.event.pump()
         except Exception:
