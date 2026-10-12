@@ -135,16 +135,20 @@ class Sums(unittest.TestCase):
         self.assertEqual(Map(RECT, row_w=2).note(3, 0.25, 72), (57, 30, 1, 10))
 
     def test_the_scroll_bars_are_told_all_there_is_what_is_in_view_and_what_lies_before_it(self) -> None:
-        # 120 keys of 11 pixels, 192 of them in view, from the 59th key under the highest. The rows go from a bar
-        # before the pattern to a bar after its 32 rows: 64 rows of 9 pixels, 260 of them in view, from the 16th.
-        self.assertEqual(Map(RECT).spans(32.0, 16), ((1320, 192, 649), (576, 260, 144)))
-        moved = Map(RECT, row=-16.0, top=131.0, row_w=4)
-        self.assertEqual(moved.spans(32.0, 16), ((1320, 192, 0), (324, 260, 0)))
-        # At either end of each the view is as far as `within` lets it go.
+        # 120 keys of 11 pixels, 192 of them in view, from the 59th key under the highest. The rows are those
+        # of the pattern and no more: 32 rows of 9 pixels, 260 of them in view, from the first.
+        self.assertEqual(Map(RECT).spans(32.0, 16), ((1320, 192, 649), (288, 260, 0)))
+        moved = Map(RECT, row=8.0, top=131.0, row_w=24)
+        self.assertEqual(moved.spans(32.0, 16), ((1320, 192, 0), (768, 260, 192)))
+        # At either end of each the view is as far as `within` lets it go: the pattern starts at the left edge
+        # of the grid, or ends at the right one.
         for seen in (Map(RECT, row=1e9, top=0.0), Map(RECT, row=-1e9, top=1e9)):
             kept = seen.within(32.0, 16)
             (keys, shown, above), (rows, wide, before) = kept.spans(32.0, 16)
             self.assertIn((above, before), ((keys - shown, rows - wide), (0, 0)))
+        self.assertEqual([Map(RECT, row=row).within(32.0, 16).x(at) for row, at in ((-1e9, 0), (1e9, 32))], [50, 310])
+        # A pattern that is not as wide as the grid starts at its left edge, wherever the view is taken.
+        self.assertEqual([Map(RECT, row=row, row_w=2).within(32.0, 16).row for row in (-5.0, 5.0, 1e9)], [0.0] * 3)
 
     def test_the_parts_share_the_rectangle_and_in_view_is_what_has_a_pixel_on_the_grid(self) -> None:
         seen = Map(RECT)
@@ -254,13 +258,14 @@ class View(unittest.TestCase):
         self.assertEqual(self.view(), (0.0, 74.0, 9))
         self.wheel(-3)
         self.assertEqual(self.view(), (0.0, 68.0, 9))
+        # The 32 rows are 28 pixels wider than the grid: a step of the wheel would go on by 36, and stops there.
         self.assertTrue(self.wheel(-1, "shift"))
-        self.assertEqual(self.view(), (4.0, 68.0, 9))
+        self.assertEqual((round(self.roll.row, 3), self.roll.map.x(32), self.view()[1:]), (3.111, 310, (68.0, 9)))
         self.wheel(2, "shift")
-        self.assertEqual(self.view(), (-4.0, 68.0, 9))
+        self.assertEqual(self.view(), (0.0, 68.0, 9))
         # Off the roll the wheel is not its to use, and neither is a key.
         self.assertEqual((self.wheel(1, pos=(5, 5)), self.ui.handle(Event("key", key="space"))), (False, False))
-        self.assertEqual(self.view(), (-4.0, 68.0, 9))
+        self.assertEqual(self.view(), (0.0, 68.0, 9))
 
     def test_the_wheel_with_ctrl_zooms_the_rows_between_the_least_and_the_most(self) -> None:
         self.assertTrue(self.wheel(1, "ctrl"))
@@ -288,23 +293,31 @@ class View(unittest.TestCase):
         self.assertEqual(self.roll.row_w, 8)
         self.assertLess(abs(self.roll.map.row_at(50) - seen.row_at(50)), 0.5 / 8)
 
-    def test_the_view_leaves_the_pattern_by_no_more_than_a_bar_and_never_the_keys(self) -> None:
+    def test_the_view_never_leaves_the_pattern_nor_the_keys(self) -> None:
+        # Row 0 stands at the left edge of the grid, and nothing is before it.
         self.wheel(100, "shift")
-        self.assertEqual(self.roll.row, -16.0)
+        self.assertEqual((self.roll.row, self.roll.map.x(0)), (0.0, 50))
         self.wheel(-100, "shift")
-        # The bar after the 32 rows ends at the right edge of the grid.
-        self.assertEqual((round(self.roll.row, 3), self.roll.map.x(48)), (19.111, 310))
+        # The 32 rows end at the right edge of the grid, and nothing is after them.
+        self.assertEqual((round(self.roll.row, 3), self.roll.map.x(32)), (3.111, 310))
+        # Zoomed out until the pattern is not as wide as the grid, it starts at the left edge and stays there.
+        self.wheel(-100, "ctrl")
+        self.wheel(-100, "shift")
+        self.assertEqual((self.roll.row, self.roll.row_w, self.roll.across.thumb()), (0.0, ROW_W_MIN, None))
+        self.wheel(7, "ctrl", pos=(20, 100))
         self.wheel(100)
         self.assertEqual((self.roll.top, self.roll.map.pitches()[-1]), (131.0, HIGHEST))
         self.wheel(-100)
         self.assertEqual((self.roll.map.y(LOWEST) + KEY_H, self.roll.map.pitches()[0]), (222, LOWEST))
-        # The same pattern, come back shorter, is still shown within the limits. One that fits with room to spare
-        # can be moved back by a bar, and not forward.
-        self.roll.show(pattern(rows=16.0), "lead", 16, theme.SONG)
-        self.assertEqual(round(self.roll.row, 3), 3.111)
-        self.roll.show(pattern(rows=8.0), "lead", 16, theme.SONG)
+        # The same pattern, come back shorter, is still shown within the limits: one that is not as wide as the
+        # grid starts at its left edge, and goes neither way.
         self.wheel(-100, "shift")
+        self.assertEqual(round(self.roll.row, 3), 3.111)
+        self.roll.show(pattern(rows=16.0), "lead", 16, theme.SONG)
         self.assertEqual(self.roll.row, 0.0)
+        for steps in (-100, 100):
+            self.wheel(steps, "shift")
+            self.assertEqual((self.roll.row, self.roll.map.x(0)), (0.0, 50))
 
     def test_shown_again_the_same_channel_keeps_its_view_and_another_is_fitted_anew(self) -> None:
         self.wheel(3)
@@ -346,8 +359,9 @@ class View(unittest.TestCase):
         # On the line between two notes, on the line under a note, over it, in the keys and in the lane.
         self.assertEqual([self.roll.note_at(pos) for pos in ((86, 120), (60, 128), (60, 117), (20, 120), (60, 240))],
                          [None, None, None, None, None])
+        # As far on as the view goes, which is 28 pixels, the second note starts at x 59.
         self.wheel(-1, "shift")
-        self.assertEqual([self.roll.note_at((51, 118)), self.roll.note_at((67, 120)), self.roll.note_at((69, 120))],
+        self.assertEqual([self.roll.note_at((59, 118)), self.roll.note_at((75, 120)), self.roll.note_at((77, 120))],
                          [1, 1, None])
         self.assertIsNone(Roll(RECT).note_at((60, 120)))
 
@@ -374,10 +388,12 @@ class View(unittest.TestCase):
         self.ui.handle(Event("move", (260, 87)))
         self.assertEqual((int(self.roll.map.row_at(260)), self.ui.help),
                          (23, f"press: put a note at g4, bar 2, row 5{WHEEL}"))
-        # Before the pattern a press places nothing, and with the shift of the wheel still held it draws a box.
-        self.wheel(1, "shift", pos=(55, 87))
-        self.assertEqual((self.roll.row, self.ui.help), (-4.0, f"press: drag a box round the notes to pick{WHEEL}"))
-        self.ui.handle(Event("move", (55, 87)))
+        # After a pattern that is not as wide as the grid a press places nothing, and with shift held it draws
+        # a box.
+        self.wheel(-100, "ctrl", "shift", pos=(200, 87))
+        self.assertEqual((self.roll.row, self.roll.map.x(32), self.ui.help),
+                         (0.0, 114, f"press: drag a box round the notes to pick{WHEEL}"))
+        self.ui.handle(Event("move", (200, 87)))
         self.assertEqual(self.ui.help, f"wheel: {WHEEL_HELP}")
         # Off the grid the line is the one the roll was made with.
         self.ui.handle(Event("move", (60, 25)))
@@ -401,12 +417,12 @@ class View(unittest.TestCase):
         self.ui.handle(Event("up", (312, 200), button=1))
         self.assertAlmostEqual(self.roll.top, 72 + (69 - 192) / 11)
         # The bar under the grid goes along the rows: a press after its thumb goes on by what is in view, which
-        # here is to where the bar after the pattern ends at the right edge of the grid.
+        # here is to where the pattern ends at the right edge of the grid.
         x, y, w, _ = across.thumb()
-        self.assertEqual((x, w), (115, 117))
+        self.assertEqual((x, w), (50, 235))
         self.ui.handle(Event("down", (x + w + 3, y + 1), button=1))
         self.ui.handle(Event("up", (x + w + 3, y + 1), button=1))
-        self.assertEqual((round(self.roll.row, 3), self.roll.map.x(48), self.view()[2]), (19.111, 310, 9))
+        self.assertEqual((round(self.roll.row, 3), self.roll.map.x(32), self.view()[2]), (3.111, 310, 9))
         # The wheel on a bar is the roll's, and so is a key that the bar is handed.
         self.assertTrue(self.wheel(1, pos=(312, 100)))
         self.assertAlmostEqual(self.roll.top, 72 + (69 - 192) / 11 + 2)
@@ -762,7 +778,9 @@ class Edits(unittest.TestCase):
         self.key("escape")
         self.key("c", "ctrl")
         # The mouse is on the keys, off the grid, whose first row in view is row 4: f4 and g4 begin in what is pasted.
-        self.ui.handle(Event("wheel", (162, 100), wheel=-1, mods=frozenset({"shift"})))
+        # The rows are made twice as wide first, so that the view has that far to go: two steps of two rows.
+        self.ui.handle(Event("wheel", (20, 100), wheel=9, mods=frozenset({"ctrl"})))
+        self.ui.handle(Event("wheel", (162, 100), wheel=-2, mods=frozenset({"shift"})))
         self.mouse("move", (20, 100))
         self.key("v", "ctrl")
         self.assertEqual(self.roll.row, 4.0)
@@ -888,20 +906,20 @@ class Edits(unittest.TestCase):
         self.assertEqual(OFF_GRID, "this pattern has lengths the grid does not hold: it is shown and not changed")
 
     def test_the_wheel_is_used_while_no_gesture_is_under_way_and_not_during_one(self) -> None:
-        def wheel(*mods: str) -> None:
-            self.ui.handle(Event("wheel", (50, 100), wheel=1, mods=frozenset(mods)))
+        def wheel(steps: int, *mods: str) -> None:
+            self.ui.handle(Event("wheel", (50, 100), wheel=steps, mods=frozenset(mods)))
 
         self.drag(self.at(0, 64))
-        for mods in ((), ("ctrl",), ("shift",)):
-            wheel(*mods)
+        for steps, mods in ((1, ()), (1, ("ctrl",)), (-1, ("shift",))):
+            wheel(steps, *mods)
         view = (self.roll.row, self.roll.top, self.roll.row_w)
-        self.assertEqual((view, self.roll.picked), ((-3.6, 74.0, 10), {0}))
+        self.assertEqual((view, self.roll.picked), ((3.6, 74.0, 10), {0}))
         self.mouse("down", self.at(2, 64))
-        for mods in ((), ("ctrl",), ("shift",)):
-            wheel(*mods)
+        for steps, mods in ((1, ()), (1, ("ctrl",)), (1, ("shift",))):
+            wheel(steps, *mods)
         self.assertEqual((self.roll.row, self.roll.top, self.roll.row_w), view)
         self.mouse("up", self.at(2, 64))
-        wheel()
+        wheel(1)
         self.assertEqual((self.roll.top, self.edits), (76.0, []))
 
     def test_other_notes_shown_during_a_gesture_drop_it_and_the_same_notes_do_not(self) -> None:
@@ -1128,7 +1146,7 @@ class Drawn(unittest.TestCase):
     def test_each_scroll_bar_has_a_thumb_for_what_is_in_view_on_a_track_as_dark_as_what_lies_behind(self) -> None:
         seen = self.draw()
         along, across = self.roll.along.thumb(), self.roll.across.thumb()
-        self.assertEqual((along, across), ((311, 124, 4, 28), (115, 223, 117, 4)))
+        self.assertEqual((along, across), ((311, 124, 4, 28), (50, 223, 235, 4)))
         for bar, thumb in ((seen.along, along), (seen.across, across)):
             self.assertEqual((self.colours(bar), self.colours(thumb)), ({theme.BACKGROUND, theme.LINE}, {theme.LINE}))
             self.assertEqual(len(self.where(theme.LINE, bar)), thumb[2] * thumb[3])

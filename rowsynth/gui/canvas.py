@@ -33,8 +33,18 @@ class Canvas:
         self._icons = Stamps({name: sprite.rows for name, sprite in icons.sprites.items()} if icons else {})
 
     def box(self, rect: Rect, colour: Colour) -> None:
-        """Fill a rectangle."""
-        self.surface.fill(colour, rect)
+        """Fill a rectangle. What of it lies off the surface is left out.
+
+        One that starts before the left edge or over the upper one is cut there first: pygame would move it
+        onto the surface at its whole size, and so fill pixels after its end.
+        """
+        x, y, w, h = rect
+        if x < 0:
+            x, w = 0, w + x
+        if y < 0:
+            y, h = 0, h + y
+        if w > 0 and h > 0:
+            self.surface.fill(colour, (x, y, w, h))
 
     def frame(self, rect: Rect, colour: Colour) -> None:
         """Draw the outline of a rectangle, one pixel thick and just inside it."""

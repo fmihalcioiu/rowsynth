@@ -71,6 +71,20 @@ class Drawing(unittest.TestCase):
         self.canvas.box((3, 4, 5, 2), theme.ACTIVE)
         self.assertEqual(self.painted(), dict.fromkeys(block(3, 4, 5, 2), theme.ACTIVE))
 
+    def test_a_box_that_starts_off_the_surface_is_cut_there_and_ends_where_it_ends(self) -> None:
+        # Six pixels of it lie before the left edge and three over the upper one: what is left is 4 by 2.
+        self.canvas.box((-6, -3, 10, 5), theme.ACTIVE)
+        self.assertEqual(self.painted(), dict.fromkeys(block(0, 0, 4, 2), theme.ACTIVE))
+        # One that ends before the surface begins fills nothing, and neither does one with no width.
+        self.surface.fill(theme.BACKGROUND)
+        for rect in ((-9, 2, 9, 3), (2, -4, 3, 4), (-20, -20, 5, 5), (3, 3, 0, 4), (3, 3, 4, -1)):
+            self.canvas.box(rect, theme.ACTIVE)
+        self.assertEqual(self.painted(), {})
+        # Inside a clip it is the same: the box ends where it ends, and not at the end of the clip.
+        with self.canvas.clip((2, 0, SIZE[0] - 2, 4)):
+            self.canvas.box((-6, 1, 10, 2), theme.GOOD)
+        self.assertEqual(self.painted(), dict.fromkeys(block(2, 1, 2, 2), theme.GOOD))
+
     def test_a_frame_is_the_outline_just_inside_its_rectangle_and_lines_run_right_and_down(self) -> None:
         self.canvas.frame((3, 4, 6, 5), theme.LINE)
         # A rectangle of no size has no outline.

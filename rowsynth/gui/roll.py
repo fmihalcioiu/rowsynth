@@ -221,25 +221,24 @@ class Map:
     def within(self, rows: float, bar_rows: int) -> Map:
         """This map, moved no further than its limits let it, on a pattern of `rows` rows with `bar_rows` to the bar.
 
-        No more than a bar is shown before the pattern. No more than a bar is shown after it either, but by a grid
-        too wide for that, which starts no later than row 0. No key is shown under `LOWEST` or over `HIGHEST`.
+        The view starts no sooner than row 0, and ends no later than the pattern does: a pattern that is not
+        as wide as the grid starts at its left edge. No key is shown under `LOWEST` or over `HIGHEST`.
         """
         _, _, w, h = self.grid
-        last = max(0.0, rows + bar_rows - w / self.row_w)
+        last = max(0.0, rows - w / self.row_w)
         top = min(float(HIGHEST), max(self.top, LOWEST - 1 + h / KEY_H))
-        return replace(self, row=min(max(self.row, -float(bar_rows)), last), top=top)
+        return replace(self, row=min(max(self.row, 0.0), last), top=top)
 
     def spans(self, rows: float, bar_rows: int) -> tuple[tuple[int, int, int], tuple[int, int, int]]:
         """What the two scroll bars show, the one along the keys first, on a pattern as `within` is given it.
 
         Each is three lengths in pixels: all there is to go along, how much of it the grid has in view, and how
         much of it lies before the view. All there is are the keys from `HIGHEST` down to `LOWEST`, and the rows
-        from where `within` lets the view start to where it lets it end.
+        of the pattern.
         """
         _, _, w, h = self.grid
-        last = max(0.0, rows + bar_rows - w / self.row_w)
         return (((HIGHEST - LOWEST + 1) * KEY_H, h, _px((HIGHEST - self.top) * KEY_H)),
-                (_px((last + bar_rows) * self.row_w) + w, w, _px((self.row + bar_rows) * self.row_w)))
+                (_px(rows * self.row_w), w, _px(self.row * self.row_w)))
 
 
 def begins(seen: Map, notes: Sequence[Note], rows: float, pos: Pos, button: int = 1,
@@ -692,8 +691,8 @@ class Roll(Widget):
         self._see(replace(self.map, top=HIGHEST - offset / KEY_H))
 
     def _go_across(self, offset: int) -> None:
-        """Take the view to where the scroll bar along the rows was moved: so many pixels after its first row."""
-        self._see(replace(self.map, row=offset / self.row_w - self.bar_rows))
+        """Take the view to where the scroll bar along the rows was moved: so many pixels after row 0."""
+        self._see(replace(self.map, row=offset / self.row_w))
 
     def _weigh(self, index: int, value: float | None) -> None:
         """Take the velocity the lane gives a note, from 0 to 1: it is kept until the lane has settled.
