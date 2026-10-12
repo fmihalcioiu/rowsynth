@@ -855,6 +855,50 @@ class Saved(Opened):
         self.assertEqual((saved, len(self.heard()), self.kicks(), self.session.message),
                          ([False, True], 2, [0.0, 2.0, 8.0], ""))
 
+    def test_the_keys_reach_the_steps_and_the_picked_hits_of_two_channels_are_removed_as_one_step(self) -> None:
+        self.session.pick("song", "pair")
+        self.panel.update()
+        click(self.ui, spot(self.panel.list, "top"))
+        before = self.data()
+        # The lanes are the k of low, and the k and the h of top. A press picks a hit, and with ctrl one more.
+        click(self.ui, self.square(0, 4))
+        for kind in ("down", "up"):
+            self.ui.handle(Event(kind, self.square(2, 2), button=1, mods=frozenset({"ctrl"})))
+        self.assertEqual((self.ui.focus, self.steps.picks, self.session.can_undo),
+                         (self.steps, {("low", "k", 4), ("top", "h", 2)}, False))
+        # Notes that cannot be written as text are not saved, for either channel, and the session is told why.
+        with mock.patch.object(songview, "text", side_effect=RowSynthError("row 4: no")):
+            self.assertTrue(self.key("delete"))
+        self.assertEqual((self.data(), self.session.message, len(self.steps.picks), self.session.can_undo),
+                         (before, "low of pattern a: row 4: no", 2, False))
+        self.assertTrue(self.key("delete"))
+        self.assertEqual((self.text("a", "low", "pair"), self.text("a", "top", "pair"), self.session.undo_label),
+                         ("k2 k4 k4", "l8 r4. h r h r h", "pattern a: 2 hits removed"))
+        self.assertEqual(differing(before, self.data()), ["songs.pair.patterns.a.low", "songs.pair.patterns.a.top"])
+        self.assertEqual(([note.row for note in self.read("a", "low", "pair")], self.steps.notes("top"),
+                          self.steps.picks),
+                         ([0.0, 8.0, 12.0], self.read("a", "top", "pair"), frozenset()))
+        # The two texts were one step: taken back once, the file holds what it held.
+        self.assertTrue(self.session.undo())
+        self.assertEqual((self.data(), self.session.can_undo), (before, False))
+
+    def test_the_hits_a_key_leaves_picked_are_picked_in_what_its_save_shows_and_escape_drops_them(self) -> None:
+        click(self.ui, spot(self.panel.list, "kit"))
+        click(self.ui, self.square(0, 8))
+        # Two keys in one frame: the second moves what the first one saved.
+        self.assertEqual([self.key("right"), self.key("right")], [True, True])
+        self.assertEqual((self.kicks(), self.steps.picks, self.session.undo_label),
+                         ([0.0, 10.0], {("kit", "k", 10)}, "kit of pattern a: hit moved"))
+        # Down is the lane of the other drum of the channel. On from there the row of its next hit is taken.
+        self.assertEqual([self.key("down"), self.key("right")], [True, True])
+        text = self.text("a", "kit")
+        self.assertEqual((text, self.steps.picks), ("k4 h4. r16 h16 h4", {("kit", "h", 11)}))
+        self.assertTrue(self.key("right"))
+        self.assertEqual((self.text("a", "kit"), self.steps.picks, self.session.message),
+                         (text, {("kit", "h", 11)}, ""))
+        self.assertTrue(self.key("escape"))
+        self.assertEqual(self.steps.picks, frozenset())
+
     def test_a_placed_note_is_heard_with_the_instrument_of_its_channel_and_a_hit_with_what_its_letter_plays(
             self) -> None:
         click(self.ui, spot(self.panel.list, "low"))

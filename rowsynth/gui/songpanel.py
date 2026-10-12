@@ -4,7 +4,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from collections.abc import Callable, Collection, Sequence
+from collections.abc import Callable, Collection, Mapping, Sequence
 from typing import TYPE_CHECKING
 
 from ..errors import RowSynthError
@@ -443,7 +443,9 @@ class SongPanel(Panel):
     is refused leaves them as they were, and the session says why. While a gesture is under way in a view the
     song is not read, and the picked place does not go along with the playing: what changed meanwhile, here or
     outside, is shown when the gesture has ended. An edit that ends after its channel was changed outside is
-    saved, and the session is told so. A note that is placed and saved is heard, and so is a key of the roll's
+    saved, and the session is told so. What the keys or a drag make of the picked hits of several drum channels
+    is the texts of those channels saved together: one change still, and one step, called by the pattern and
+    what was done. A note that is placed and saved is heard, and so is a key of the roll's
     strip that is pressed. With the focus on the roll or on the steps the keys of the computer play the
     instrument of the picked channel as a piano: in the roll from the lowest c it has in view.
 
@@ -530,7 +532,7 @@ class SongPanel(Panel):
         for part in self.roll.parts:
             self.add(part)
         self.steps = self.add(Steps(nowhere, STEPS_HELP, edited=self._save, sounded=self._drum, typed=self._key,
-                                    asked=self._ask_drum, added=self._new_drum))
+                                    asked=self._ask_drum, added=self._new_drum, together=self._save_all))
         for part in self.steps.parts:
             self.add(part)
         self.fault = self.add(Label(nowhere, "", theme.FAULT, "centre"))
@@ -669,6 +671,33 @@ class SongPanel(Panel):
                                     f"{place}: {label}")
         if saved and held not in (shown, text):
             self.session.say(f"{place} {MEANWHILE}")
+        self._look()
+        return saved
+
+    def _save_all(self, notes: Mapping[str, Sequence[Note]], label: str) -> bool:
+        """Save the notes the steps gave for several drum channels of the pattern that is shown, as one step.
+
+        The notes of each channel are written as its text, as `_save` writes those of one, and the texts are
+        put in the file together: one change, and one step that is taken back in one. The answer is whether
+        they were saved. What is refused is said as `_save` says it, and none of the texts is saved then. So
+        is a channel that was changed outside meanwhile: the first of them is named.
+        """
+        pattern = self._patterns[self._blocks[self.strip.picked].name]
+        place = f"pattern {pattern.name}"
+        changes, late = [], []
+        for channel, made in notes.items():
+            try:
+                text = songview.text(made, pattern.rows, channel, self._song)
+            except RowSynthError as error:
+                self.session.say(f"{channel} of {place}: {error}")
+                return False
+            shown, held = (self._text(project, pattern.name, channel)
+                           for project in (self._project, self.session.model.project))
+            late += [channel] if held not in (shown, text) else []
+            changes.append((f"songs.{self._picked[1]}.patterns.{pattern.name}.{channel}", text))
+        saved = self.session.change_many(changes, f"{place}: {label}")
+        if saved and late:
+            self.session.say(f"{late[0]} of {place} {MEANWHILE}")
         self._look()
         return saved
 
