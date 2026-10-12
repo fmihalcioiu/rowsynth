@@ -8,7 +8,7 @@ import warnings
 import pygame
 
 from ..errors import RowSynthError
-from . import layout, theme, winframe
+from . import layout, sprites, theme, winframe
 from .layout import Rect
 
 #: What pygame's own handle of a window has to have for a window with no frame of the system's: the way to it,
@@ -81,6 +81,22 @@ def dpi_aware() -> None:
         pass
 
 
+def icon() -> pygame.Surface:
+    """The program's own icon, which the system shows for the window: 32 pixels a side.
+
+    It is the sprite `icon` of the set `app`, a pixel for each of its own, and what the sprite leaves empty is
+    seen through. The set has the same picture drawn anew at 16 pixels as `small`, for the icon of the
+    standalone program.
+    """
+    drawn = sprites.load("app").sprites["icon"]
+    made = pygame.Surface((len(drawn.rows[0]), len(drawn.rows)), pygame.SRCALPHA)
+    for y, row in enumerate(drawn.rows):
+        for x, ink in enumerate(row):
+            if ink != sprites.EMPTY:
+                made.set_at((x, y), (*drawn.palette[ink], 255))
+    return made
+
+
 def own_frame() -> type | None:
     """pygame's own handle of a window, where the running pygame has all that a window with no frame needs.
 
@@ -144,6 +160,11 @@ class Screen:
         if size is None:
             size = opening(pygame.display.get_desktop_sizes()[0], scale)
         pygame.display.set_caption("rowsynth")
+        # The icon is given before the window is made: pygame gives a window that has none its own.
+        try:
+            pygame.display.set_icon(icon())
+        except (pygame.error, RowSynthError):
+            pass
         self.frameless = False
         self.frame: winframe.Frame | None = None
         self.asked = lambda pos: ""

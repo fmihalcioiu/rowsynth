@@ -242,8 +242,12 @@ def examples(root: str | Path | None = None) -> list[Path]:
     """The example projects the package can find: the files of the `examples` folder beside it, in a checkout.
 
     `root` is the folder the package is in, and with None it is found. Where that is no checkout, as when the
-    package is installed, or has no such folder, there are none.
+    package is installed, or has no such folder, there are none. The standalone program has its examples in
+    the `examples` folder beside the program itself.
     """
+    if root is None and getattr(sys, "frozen", False):
+        folder = Path(sys.executable).resolve().parent / "examples"
+        return [folder / name for name in holds(folder).files] if folder.is_dir() else []
     root = Path(__file__).resolve().parents[2] if root is None else Path(root)
     if not (root / "pyproject.toml").is_file():
         return []

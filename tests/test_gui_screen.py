@@ -215,6 +215,21 @@ class Window(unittest.TestCase):
         for pos in ((9, 14), (12, 14), (10, 13), (10, 16)):
             self.assertEqual(window.get_at(pos)[:3], theme.BACKGROUND, pos)
 
+    def test_the_window_is_given_the_program_s_own_icon_before_it_is_made(self) -> None:
+        told = []
+        with mock.patch("pygame.display.set_icon", side_effect=lambda made: told.append(("icon", made))), \
+                mock.patch("pygame.display.set_mode", side_effect=lambda *given, **named: told.append("window")
+                           or pygame.Surface(given[0])):
+            self.opened((960, 540))
+        self.assertEqual([step if isinstance(step, str) else step[0] for step in told][:2], ["icon", "window"])
+        made = told[0][1]
+        # It is the picture of the set `app`, a pixel for each of its own: its corners are seen through.
+        self.assertEqual((made.get_size(), made.get_at((0, 0))[3], made.get_at((16, 16))[3]), ((32, 32), 0, 255))
+        self.assertEqual(made.get_at((4, 16))[:3], theme.ACTIVE)
+        # A window is opened all the same where the system takes no icon.
+        with mock.patch("pygame.display.set_icon", side_effect=pygame.error("no icon here")):
+            self.assertEqual(self.opened((960, 540)).window.get_size(), (960, 540))
+
     def test_the_least_size_of_the_window_is_the_least_art_size_at_the_scale_it_opened_with(self) -> None:
         self.assertEqual(theme.LEAST_ART, (640, 400))
         self.assertEqual((self.opened((1920, 1080)).least, self.opened((960, 540)).least, self.opened(scale=3).least),

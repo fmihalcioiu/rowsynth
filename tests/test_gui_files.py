@@ -5,6 +5,7 @@ import contextlib
 import io
 import json
 import os
+import sys
 import tempfile
 import threading
 import unittest
@@ -126,6 +127,16 @@ class Folders(InAFolder):
         self.assertEqual(files.examples(self.folder), [])
         (self.folder / "pyproject.toml").write_text("", encoding="utf-8")
         self.assertEqual(files.examples(self.folder), [self.folder / "examples" / "tune.json"])
+
+    def test_the_standalone_program_has_its_examples_in_the_folder_beside_the_program_itself(self) -> None:
+        program = self.folder / "rowsynth-window.exe"
+        with mock.patch.object(sys, "frozen", True, create=True), mock.patch.object(sys, "executable", str(program)):
+            # With no such folder there are none, and nothing is looked for where the package is.
+            self.assertEqual(files.examples(), [])
+            (self.folder / "examples").mkdir()
+            (self.folder / "examples" / "demo.json").write_text("{}\n", encoding="utf-8")
+            (self.folder / "examples" / "notes.txt").write_text("no project\n", encoding="utf-8")
+            self.assertEqual(files.examples(), [self.folder.resolve() / "examples" / "demo.json"])
 
     def test_with_another_ending_a_folder_holds_and_a_chooser_lists_and_takes_the_files_that_end_so(self) -> None:
         for name in ("hit.wav", "Loop.WAV"):

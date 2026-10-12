@@ -39,9 +39,10 @@ def kernel(function: _Function) -> _Function:
     plain Python gives. Of this package's own functions, a kernel can call only other kernels.
 
     The compiled code is kept on disk, in the folder NUMBA_CACHE_DIR names or else in __pycache__ beside the
-    source, so that only the first run has to wait for the compiler. Numba goes by a kernel's own file to tell
-    whether what it kept is still good. After a change to a kernel that a kernel of another module calls, empty
-    that folder, or the calling kernel goes on running the old code.
+    source, so that only the first run has to wait for the compiler. The standalone program has no source on
+    disk, and Numba keeps the code in its own cache folder of the user's. Numba goes by a kernel's own file
+    to tell whether what it kept is still good. After a change to a kernel that a kernel of another module
+    calls, empty that folder, or the calling kernel goes on running the old code.
     """
     if _NJIT is None:
         return function

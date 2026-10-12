@@ -32,6 +32,21 @@ The first run is slower than the ones after it, because Numba compiles the loops
 
 MP3 and Opus files are made by ffmpeg, which has to be on the path. Nothing else needs it.
 
+### Without Python
+
+The releases of this repo have a zip for Windows that needs no Python. Unpacked, it is one folder with two programs in it:
+
+| Program | What it is |
+|---|---|
+| `rowsynth-window.exe` | The window. A double click opens it on its first screen, and with a project file after its name it opens that file |
+| `rowsynth.exe` | The command line. It takes the same words as `python -m rowsynth`, as in `rowsynth.exe check examples\demo.json` |
+
+Beside them are the example in `examples`, this file, and in `skill` the skill that teaches an assistant the command line. Windows asks before it runs a program whose publisher it does not know, as it does here: `More info`, then `Run anyway`.
+
+Everything below is the same with the two programs, and a file can be open in the window while the command line changes it. The first run is slower than the ones after it, as with Python, and MP3 and Opus need ffmpeg on the path.
+
+The folder and the zip are made by `python standalone/build.py`, for the system it is run on. That needs PyInstaller and Pillow, which rowsynth itself does not: `pip install pyinstaller pillow`.
+
 The window, `rowsynth gui`, needs pygame, and nothing else does. In the clone, `pip install ".[gui]"` installs the package with it, and `pip install pygame` adds it to an install that is there. Without it the command stops with `error: the GUI needs pygame, which is not installed: pip install rowsynth[gui]`.
 
 ## A first sound
