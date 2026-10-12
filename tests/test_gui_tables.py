@@ -24,7 +24,7 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 SHIFT = frozenset({"shift"})
 

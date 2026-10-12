@@ -11,7 +11,7 @@ from rowsynth.gui import layeredit
 from rowsynth.layers import mix_version, render_groups, render_intro
 from rowsynth.project import Project
 
-ARCADE = json.loads((Path(__file__).resolve().parents[1] / "examples" / "arcade.json").read_text(encoding="utf-8"))
+ARCADE = json.loads((Path(__file__).resolve().parent / "data" / "arcade.json").read_text(encoding="utf-8"))
 #: The layered tune of the example: four groups of a channel each, four versions, and the keys 0 and 2.
 TUNE = ARCADE["songs"]["tune"]
 #: The rate the tune is rendered at: a low one, to be quick.

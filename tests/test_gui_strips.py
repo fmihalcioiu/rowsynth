@@ -25,7 +25,7 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 
 #: A rectangle for small notes: 64 pixels across and 9 high, so 2 pixels to a row of a pattern of two bars.

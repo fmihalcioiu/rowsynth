@@ -13,7 +13,7 @@ from unittest import mock
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 INSTRUMENTS = {
     "reed": {

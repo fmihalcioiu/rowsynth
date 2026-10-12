@@ -11,7 +11,7 @@ from rowsynth.gui.songview import Block, DrumRow, Note, bar_rows, blocks, drum_r
 from rowsynth.project import Project
 from rowsynth.song import lay
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 INSTRUMENTS = {"lead": {"vol": 12}, "bass": {"wave": "tri"}, "thud": {"wave": "noise"},
                "tick": {"wave": "noise", "short": True}}

@@ -7,7 +7,7 @@ from pathlib import Path
 
 from rowsynth.layout import WIDTH, dumps
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 # A song with every table a song has, each of them short enough for one line.
 SONG = {

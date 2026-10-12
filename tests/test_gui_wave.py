@@ -37,7 +37,7 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 
 #: A view whose grid is (58, 30, 400, 204), under a ruler from y 20, beside a keyboard from x 18, with a scroll

@@ -18,7 +18,7 @@ from rowsynth.gui.projectedit import (STARTERS, Change, added, allowed, free, fr
 from rowsynth.project import Project
 from rowsynth.song import render_loop
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 # A low rate, so that a thing is quick to render.
 RATE = 2000

@@ -22,7 +22,7 @@ from rowsynth.notes import midi
 from rowsynth.project import Project
 from rowsynth.sound import render_sound
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "arcade.json"
+EXAMPLE = Path(__file__).resolve().parent / "data" / "arcade.json"
 
 # A tick is a hundred samples at 6000 Hz, so a length in whole ticks is a whole number of samples. The random runs
 # are rendered at a lower rate still.

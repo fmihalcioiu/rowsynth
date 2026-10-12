@@ -18,7 +18,7 @@ from rowsynth.layers import render_groups
 from rowsynth.project import Project
 from rowsynth.song import render_loop, render_song, render_stems, up
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 # Each example with its song, and a channel that the song can do without. Every channel of the tune is all that
 # its group has, so there is none.

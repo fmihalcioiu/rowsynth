@@ -25,7 +25,7 @@ else:
     from rowsynth.gui import screen as gui_screen
     from rowsynth.gui.screen import Screen, dpi_aware, fit, opening, work_area
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 
 

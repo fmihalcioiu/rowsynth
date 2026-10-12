@@ -37,7 +37,7 @@ except ImportError:
 if TYPE_CHECKING:
     from rowsynth.gui.app import App
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 Pos = tuple[int, int]
 #: How far apart the places are at which the mouse is rested all over the window.

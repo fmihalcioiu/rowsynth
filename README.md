@@ -16,7 +16,7 @@ It is made so that a program, or a person who cannot listen while writing, can s
 
 It also has a window, `rowsynth gui`: the same files as a piano roll, drum steps, knobs and a mixer, with every change written to the file as it is made.
 
-The two examples can be heard in a browser: [six sound effects and a layered tune](https://fmihalcioiu.github.io/rowsynth/), and [a longer piece](https://fmihalcioiu.github.io/rowsynth/piece/).
+Some of the example can be heard in a browser: [its six sound effects and its layered tune](https://fmihalcioiu.github.io/rowsynth/), and [its longest song](https://fmihalcioiu.github.io/rowsynth/piece/).
 
 ## Running it
 
@@ -138,7 +138,7 @@ Spaces only keep things apart. Every pattern starts its channels again at octave
 
 ## The project file
 
-A project file is JSON with up to four tables: `instruments`, `chords`, `sounds` and `songs`. Each is a set of named entries, and any of them can be left out. `examples/arcade.json` has six sound effects and a short layered tune with chords, and `examples/piece.json` is a longer piece for eighteen channels.
+A project file is JSON with up to four tables: `instruments`, `chords`, `sounds` and `songs`. Each is a set of named entries, and any of them can be left out. `examples/demo.json` has six sound effects and three songs: `tune`, a short layered tune with chords, `korobeiniki`, a folk tune for six channels, and `piece`, a longer piece for eighteen channels that plays instruments of its own.
 
 Loading refuses a key it does not know and a value of the wrong kind. It also refuses a name that points at nothing, such as a channel whose instrument is not in the file. The message gives the place. With `vol` misspelt as `volume` in `ping.json`, a command on the file prints this to standard error and exits with code 2:
 
@@ -200,7 +200,7 @@ An operator has four keys:
 | `level` | Its amplitude when it is heard, and radians of bend when it is not | 1 |
 | `env` | Its envelope, `{"a", "d", "s", "sd", "r"}`: seconds of attack, seconds of decay down to the level `s` from 0 to 1, decibels a second lost while the note is held, and seconds of release to 60 dB down | `a` 0, `d` 0.3, `s` 1, `sd` 0, `r` 0.2 |
 
-Operators left out of `ops` are silent. The other keys of the instrument, `vol` and `lp` among them, work on an FM voice as on any wave. This is the bass of `examples/piece.json`:
+Operators left out of `ops` are silent. The other keys of the instrument, `vol` and `lp` among them, work on an FM voice as on any wave. This is the bass of the song `piece` in `examples/demo.json`:
 
 ```json
 "fmdrive": {
@@ -251,7 +251,7 @@ An entry of `sounds` holds one of four keys, and only one:
 | `parts` | Sounds on a timeline, `[[seconds, entry], ...]`, added up into one. Each part is an entry with a `def` |
 | `held` | A sound that goes on for as long as it is held: a start, a loop and an end |
 
-In `examples/arcade.json`, `coin` is one sound, `blip` is three variants and `explosion` is two parts. An entry can also hold these:
+In `examples/demo.json`, `coin` is one sound, `blip` is three variants and `explosion` is two parts. An entry can also hold these:
 
 | Key | What it does | Default |
 |---|---|---|
@@ -264,7 +264,7 @@ In `examples/arcade.json`, `coin` is one sound, `blip` is three variants and `ex
 
 The commands level every sound the same way. It is rendered at a gain of 0.12, which is meant to keep it under the level where the output stage bends a sound. Its loudest sample is then brought to 3 dB under full scale and moved by its `db`. A sound may have a `gain` beside its `voices`, 0.5 when left out, and only `render_sound` in Python goes by it.
 
-A held sound, added to the sounds of `examples/arcade.json`:
+A held sound, added to the sounds of `examples/demo.json`:
 
 ```json
 "hum": {
@@ -343,10 +343,10 @@ A chord in the project's `chords` table is the pitch class of its root and the p
 ## The window
 
 ```
-python -m rowsynth gui examples/piece.json
+python -m rowsynth gui examples/demo.json
 ```
 
-![The window with the example piece open](docs/window.png)
+![The window with the example open](docs/window.png)
 
 The window shows a project file as something to click on. Notes are placed with the mouse and heard as they are placed, and every change is written to the file as it is made. It works on the same files as the commands, and the two can work on one file at the same time.
 
@@ -453,7 +453,7 @@ The menu of the ruler also has `Expect a note here...`. It puts a flag on the ru
 
 There is no Save, because nothing is ever left unsaved.
 
-The first screen is also what `python -m rowsynth gui` shows with no file. It has `NEW PROJECT`, `OPEN...`, the files opened last, and in a clone of this repo the two examples. An example is opened as a copy in a file you name, so the example itself is never changed.
+The first screen is also what `python -m rowsynth gui` shows with no file. It has `NEW PROJECT`, `OPEN...`, the files opened last, and in a clone of this repo the example. It is opened as a copy in a file you name, so the example itself is never changed.
 
 ### Every change is saved, and can be taken back
 
@@ -502,7 +502,7 @@ usage: rowsynth info [-h] FILE
 What a project file holds, by name, and how long each song runs.
 
 ```
-python -m rowsynth info examples/arcade.json
+python -m rowsynth info examples/demo.json
 ```
 
 ```
@@ -546,7 +546,8 @@ python -m rowsynth info examples/arcade.json
       "layers": {
 ...
       }
-    }
+    },
+...
   },
   "chords": [
     "Am",
@@ -557,7 +558,7 @@ python -m rowsynth info examples/arcade.json
 }
 ```
 
-The output is cut at each line of `...`: ten more instruments, three more sounds, and what the layers of the tune hold.
+The output is cut at each line of `...`: ten more instruments, three more sounds, what the layers of the tune hold, and the two other songs.
 
 ### render
 
@@ -570,7 +571,7 @@ usage: rowsynth render [-h] --out PATH [--rate N] [--variant N]
 Writes a sound as a mono WAV file, or a song as a stereo one, at 16 bits a sample, and prints its numbers.
 
 ```
-python -m rowsynth render examples/arcade.json coin --out out/coin.wav
+python -m rowsynth render examples/demo.json coin --out out/coin.wav
 ```
 
 ```
@@ -603,7 +604,7 @@ usage: rowsynth measure [-h] WAV [--at SECONDS]
 The numbers of a sound or a song of a project file, with nothing written. With a WAV file alone, the numbers of that file.
 
 ```
-python -m rowsynth measure examples/arcade.json coin --at 0.15
+python -m rowsynth measure examples/demo.json coin --at 0.15
 ```
 
 ```
@@ -638,7 +639,7 @@ usage: rowsynth check [-h] [--rate N] FILE
 Holds a project file to the rules under Checks below and prints what breaks them. The exit code is 1 when anything does and 0 when nothing does.
 
 ```
-python -m rowsynth check examples/arcade.json
+python -m rowsynth check examples/demo.json
 ```
 
 ```
@@ -657,7 +658,7 @@ usage: rowsynth build [-h] --out DIR [--rate N] [--format {wav,opus}]
 Writes songs into a folder as the files a player loads, with a manifest, `music.json`, that names them. With no `NAME` it builds every song of the project, and the rate is 48000 unless `--rate` gives another.
 
 ```
-python -m rowsynth build examples/piece.json --out out/music
+python -m rowsynth build examples/demo.json piece --out out/music
 ```
 
 ```
@@ -670,7 +671,7 @@ python -m rowsynth build examples/piece.json --out out/music
     "piece": {
       "loop_samples": 2534400,
       "gain": 0.891194,
-      "source": "b6b8a5e249f3965e",
+      "source": "c133f9bc2378f128",
       "file": "piece.wav"
     }
   }
@@ -720,18 +721,18 @@ usage: rowsynth page [-h] --out DIR [--rate N] [--format {wav,mp3,opus}] FILE
 Writes the listen page of a project into a folder, with its audio as WAV unless `--format` asks for MP3 or Opus.
 
 ```
-python -m rowsynth page examples/arcade.json --out out/arcade
+python -m rowsynth page examples/demo.json --out out/demo
 ```
 
 ```
 {
-  "page": "out/arcade/index.html",
-  "folder": "out/arcade",
+  "page": "out/demo/index.html",
+  "folder": "out/demo",
   "rate": 48000,
   "format": "wav",
   "sounds": 6,
-  "songs": 1,
-  "files": 17
+  "songs": 3,
+  "files": 19
 }
 ```
 
@@ -743,7 +744,7 @@ usage: rowsynth set [-h] [--text] [--from PATH] [--delete] FILE WHERE [VALUE]
 
 Changes one thing in a project file and keeps the rest of it as it is. It is how a script changes a project, and how anything changes a file that the window has open, without writing the whole file back.
 
-`WHERE` is the place, written as `check` writes a target: names joined by dots, and `[n]` after a list for its item n, counted from 0. The examples are run on `tune.json`, a copy of `examples/arcade.json`.
+`WHERE` is the place, written as `check` writes a target: names joined by dots, and `[n]` after a list for its item n, counted from 0. The examples are run on `tune.json`, a copy of `examples/demo.json`.
 
 ```
 python -m rowsynth set tune.json songs.tune.channels.bass.gain 0.7
@@ -829,7 +830,7 @@ error: songs.tune: pattern 'a', channel 'lead': cannot read "zz" in a channel
 
 A song that could not be read before the change can still be changed, so a file with several faults is mended one at a time. `set` runs none of the rules: a line that is a bar short is written, and `check` reports it under `rows`.
 
-`set` writes the file in one layout, the one the window saves in and the examples are kept in. Each entry of the four tables starts a line. A song is opened out, and so are its `instruments`, `drums`, `channels`, `patterns` and `layers`, one entry a line, and each pattern, one channel's text a line. Anything else is on one line when it ends by column 110, and is opened out one key or item a line when it does not. A text is never broken, and keys keep their order. So a change to one channel of one pattern changes one line of the file, and each of the four changes above is one line in a diff. A file that was in another layout is put into this one by the first change. The text goes to a temporary file that takes the place of the old one in one move, so a program that reads the file meanwhile gets the old text or the new, never half of one.
+`set` writes the file in one layout, the one the window saves in and the example is kept in. Each entry of the four tables starts a line. A song is opened out, and so are its `instruments`, `drums`, `channels`, `patterns` and `layers`, one entry a line, and each pattern, one channel's text a line. Anything else is on one line when it ends by column 110, and is opened out one key or item a line when it does not. A text is never broken, and keys keep their order. So a change to one channel of one pattern changes one line of the file, and each of the four changes above is one line in a diff. A file that was in another layout is put into this one by the first change. The text goes to a temporary file that takes the place of the old one in one move, so a program that reads the file meanwhile gets the old text or the new, never half of one.
 
 ### gui
 
@@ -846,12 +847,12 @@ The files opened in the window are remembered from one run to the next, in `rows
 `--frames` and `--shot` are for a run that nobody watches. `--frames N` closes the window by itself after N frames, and `--shot PATH` writes the last frame as a PNG, a pixel for each drawn pixel. Such a run reads no list of files and remembers none. With `SDL_VIDEODRIVER` and `SDL_AUDIODRIVER` both set to `dummy` in the environment it opens no window and plays no sound, which is how the picture above was made:
 
 ```
-python -m rowsynth gui examples/piece.json --frames 600 --shot docs/window.png
+python -m rowsynth gui examples/demo.json --frames 600 --shot docs/window.png
 ```
 
 ```
 {
-  "file": "examples/piece.json",
+  "file": "examples/demo.json",
   "frames": 600,
   "shot": "docs/window.png"
 }
@@ -899,7 +900,7 @@ A song with a `rows` finding is not played, so it has no `join` or `level` findi
 
 ## Layered music
 
-A song with `layers` is built as files that a player adds up while the music runs. These are the layers of the tune in `examples/arcade.json`:
+A song with `layers` is built as files that a player adds up while the music runs. These are the layers of the tune in `examples/demo.json`:
 
 ```json
 "layers": {
@@ -919,7 +920,7 @@ A group is a list of channels that are always heard together, and every channel 
 `build` writes one stereo loop for each group in each key, `NAME-GROUP-KEY.wav`. A group of drum channels alone is written once, as `NAME-GROUP.wav`. Every file of a song is multiplied by the same factor, the one that puts the loudest sample among them 1 dB under full scale, so the files of a version's groups in one key add up to that version.
 
 ```
-python -m rowsynth build examples/arcade.json --out out/layers --rate 8000
+python -m rowsynth build examples/demo.json tune --out out/layers --rate 8000
 ```
 
 That writes seven WAV files and this manifest, `out/layers/music.json`:
@@ -975,11 +976,11 @@ A sound has a row for each of its variants, and a held sound one each for its st
 
 The audio is WAV unless `--format` says `mp3` or `opus`. MP3 is written at a variable bit rate and Opus at about 96 kbit/s, both without tags, so the same samples make the same bytes from run to run. The numbers in the rows are read before a file is encoded, so they are the same in every format. Opus is held to the same rates as in a build.
 
-The two pages linked at the top of this file are in `docs`. They are the listen pages of the examples as MP3, made with:
+The two pages linked at the top of this file are in `docs`. They are listen pages as MP3 of the two projects the example was put together from, which the tests keep in `tests/data`, made with:
 
 ```
-python -m rowsynth page examples/arcade.json --out docs --format mp3
-python -m rowsynth page examples/piece.json --out docs/piece --format mp3
+python -m rowsynth page tests/data/arcade.json --out docs --format mp3
+python -m rowsynth page tests/data/piece.json --out docs/piece --format mp3
 ```
 
 ## From Python
@@ -987,7 +988,7 @@ python -m rowsynth page examples/piece.json --out docs/piece --format mp3
 ```python
 import rowsynth
 
-project = rowsynth.Project.load("examples/arcade.json")
+project = rowsynth.Project.load("examples/demo.json")
 
 (coin,) = rowsynth.render_entry(project.sound("coin"))
 rowsynth.save_wav("out/coin.wav", coin)

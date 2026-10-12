@@ -15,7 +15,7 @@ from rowsynth.gui.chordview import (ADD, KINDS, Bar, ChordBox, ChordList, Span, 
 from rowsynth.gui.ui import Event, Ui, inside
 from rowsynth.project import Project
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 AM, F, C = ({"root": 9, "tones": [9, 0, 4]}, {"root": 5, "tones": [5, 9, 0]}, {"root": 0, "tones": [0, 4, 7]})
 #: A song of three bars. Its second bar is shared by two chords, and its third has none written. One channel ends

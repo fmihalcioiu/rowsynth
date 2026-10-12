@@ -391,7 +391,7 @@ class InTheWindow(unittest.TestCase):
         self.assertEqual((first.new.text, first.open.text), ("NEW PROJECT", "OPEN..."))
         # A row for each example, and the files opened last: the one that is gone is dim.
         self.assertEqual([(row.text, row.head, row.dim) for row in first.list.rows],
-                         [("EXAMPLES", True, False), ("arcade", False, False), ("piece", False, False),
+                         [("EXAMPLES", True, False), ("demo", False, False),
                           ("RECENT", True, False), ("kept.json", False, False), ("gone.json", False, True)])
         art = app.screen.begin()
         app.update()
@@ -465,9 +465,9 @@ class InTheWindow(unittest.TestCase):
         app = self.first()
         click(app.ui, spot(app.first.list, ("example", str(example))))
         chooser = app.ui.modal
-        self.assertEqual((chooser.new, chooser.folder, chooser.box.text), (True, self.folder, "arcade.json"))
+        self.assertEqual((chooser.new, chooser.folder, chooser.box.text), (True, self.folder, "demo.json"))
         press(app.ui, "return")
-        copy = self.folder / "arcade.json"
+        copy = self.folder / "demo.json"
         self.assertEqual((app.model.path, copy.read_bytes()), (copy, before))
         # What is changed in the window is changed in the copy.
         self.assertTrue(app.session.change("songs.tune.patterns.a.lead", "l1 c", "lead of pattern a"))
@@ -476,7 +476,7 @@ class InTheWindow(unittest.TestCase):
         # A second copy is offered a name that the first does not have.
         app.leave()
         click(app.ui, spot(app.first.list, ("example", str(example))))
-        self.assertEqual(app.ui.modal.box.text, "arcade-2.json")
+        self.assertEqual(app.ui.modal.box.text, "demo-2.json")
 
     def test_a_copy_is_saved_to_another_file_and_the_open_file_stays_open(self) -> None:
         one = self.saved("one.json")

@@ -29,7 +29,7 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 
 #: A roll whose grid is (50, 30, 260, 192), under a ruler from y 20, with a scroll bar at its right and one under it.

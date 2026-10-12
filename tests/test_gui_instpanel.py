@@ -39,7 +39,7 @@ try:
 except ImportError:
     pygame = None
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 
 #: The middle of the art surface the layout is drawn for, and the least the panel is laid out in.

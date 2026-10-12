@@ -12,7 +12,7 @@ from rowsynth.project import Project
 from rowsynth.song import parse
 from rowsynth.songtext import write
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 # A letter that holds its hits for as long as they are written, one that holds them two rows and one five, one
 # at half the level, and one that is silent and half a row long.

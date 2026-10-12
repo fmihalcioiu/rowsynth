@@ -40,7 +40,7 @@ except ImportError:
 if TYPE_CHECKING:
     from rowsynth.gui.app import App
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 NEEDS = "pygame is not installed"
 #: The top bar and the left panel on the art surface the layout is drawn for, and the two in a far smaller window.
 BAR, SIDE = (0, 0, 960, 22), (0, 22, 124, 504)

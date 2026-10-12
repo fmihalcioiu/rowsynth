@@ -85,6 +85,6 @@ python -m rowsynth gui audio.json --frames 300 --shot out/window.png
 
 - The picture is the window as it opens: the first song of the file, its first pattern, and the first tuned channel with notes in that pattern. A file with no song shows its first sound. Nothing else can be picked from the command line.
 - Leave `--scale` out. The picture is then the whole layout, 960 by 540 pixels. With `--scale 2` on the dummy screen it came out 512 by 336, with parts of the layout missing.
-- The render and the checks run beside the window. Until they are through, `MEASURED` and `FOUND` show dots. How many frames that takes goes by the length of the song and by how busy the machine is, and a count of frames is no count of seconds. Start with 300, or 600 for a song as long as the piece of `examples/piece.json`, and if the picture has dots, run it again with more.
+- The render and the checks run beside the window. Until they are through, `MEASURED` and `FOUND` show dots. How many frames that takes goes by the length of the song and by how busy the machine is, and a count of frames is no count of seconds. Start with 300, or 600 for a song as long as `piece` in `examples/demo.json`, and if the picture has dots, run it again with more.
 - A run with `--frames` reads no list of files opened last and adds nothing to it.
 - Read the PNG to see what the person would see. It is a way to check what you describe to them. It is not a way to hear anything.

@@ -19,7 +19,7 @@ python -m rowsynth -h
 
 If it does not, it is not installed. In a clone of the rowsynth repo, run `pip install .`, or work from the repo's root folder, where `python -m rowsynth` runs without an install as long as NumPy is there. A script of your own that imports `rowsynth` without an install needs the repo's root in the `PYTHONPATH` environment variable, since Python looks beside the script and not in the working folder.
 
-The repo's `examples/arcade.json` holds six sound effects and a song in layers, and `examples/piece.json` a longer song on FM instruments. Both pass `check`.
+The repo's `examples/demo.json` holds six sound effects and three songs: `tune` in layers, `korobeiniki`, and `piece`, a longer song on FM instruments of its own. It passes `check`.
 
 ## The loop
 

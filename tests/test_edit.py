@@ -14,7 +14,7 @@ from rowsynth.edit import NOTHING, change_file, change_file_many, delete_in, get
 from rowsynth.errors import RowSynthError
 from rowsynth.project import Project
 
-ARCADE = Path(__file__).resolve().parents[1] / "examples" / "arcade.json"
+ARCADE = Path(__file__).resolve().parent / "data" / "arcade.json"
 
 
 def band() -> dict:

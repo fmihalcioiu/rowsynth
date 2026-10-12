@@ -28,7 +28,7 @@ from rowsynth.measure import brightness, measure
 from rowsynth.project import Project
 from rowsynth.song import mix_stems, pan_gains, render_loop, render_stems, up
 
-EXAMPLES = Path(__file__).resolve().parent.parent / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 # With three ticks to a row, a row is 400 samples at 8000 Hz, and a song of one bar is 6400: room for five of the
 # frames its brightness is read from.

@@ -25,7 +25,7 @@ SOFT = {"wave": "tri", "release": 3.5}
 INSTRUMENTS = {"beep": {"vol": [15, 10, 5], "release": 1}, "soft": SOFT}
 BAD_NOTE = "voices[0].notes[0][1]: not a note: 'h4'"
 
-EXAMPLE = Path(__file__).resolve().parents[1] / "examples" / "arcade.json"
+EXAMPLE = Path(__file__).resolve().parent / "data" / "arcade.json"
 # The held sound the README adds to the sounds of the example.
 HUM = {"held": {"note": {"voices": [{"inst": "bass", "notes": [[0, "c3", 60]]}]}, "start": 6, "loop": 30, "join": 3,
                 "end": {"voices": [{"inst": "bass", "notes": [[0, "c3", 2]]}]}, "let_go": 4}, "db": -6}

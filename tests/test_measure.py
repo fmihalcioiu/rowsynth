@@ -14,7 +14,7 @@ from rowsynth.measure import brightness, measure, pitch_at, spectrum
 from rowsynth.project import Project
 from rowsynth.sound import render_sound
 
-EXAMPLES = Path(__file__).resolve().parents[1] / "examples"
+EXAMPLES = Path(__file__).resolve().parent / "data"
 
 
 def tone(hz: float, count: int, rate: int, level: float = 1.0) -> np.ndarray:

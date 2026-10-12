@@ -177,7 +177,7 @@ One long note of a saw under a low-pass, cut in two: its first 12 ticks are the 
 
 ## Change one thing while the window is open
 
-The person has `audio.json` open in the window, a copy of the repo's `examples/arcade.json`. They find the bass too loud, and want the lead to end pattern `b` on a rest. That is two values, so two `set` commands, and then `check`:
+The person has `audio.json` open in the window, a copy of the repo's `examples/demo.json`. They find the bass too loud, and want the lead to end pattern `b` on a rest. That is two values, so two `set` commands, and then `check`:
 
 ```
 python -m rowsynth set audio.json songs.tune.channels.bass.gain 0.7
